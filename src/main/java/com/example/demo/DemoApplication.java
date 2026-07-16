@@ -3,6 +3,7 @@ package com.example.demo;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.ConfigurableApplicationContext;
+
 import java.util.Scanner;
 
 @SpringBootApplication
@@ -10,7 +11,7 @@ public class DemoApplication {
     // 版本常量
     public static final String APP_VERSION = "1.0.0";
     // 运行状态标记
-    public static boolean RUNNING = true;
+    public static volatile boolean RUNNING = true;
 
     public static void main(String[] args) {
         // 启动Spring容器
@@ -18,21 +19,29 @@ public class DemoApplication {
         System.out.println("====================程序启动完成====================");
         System.out.println("输入命令操作，输入 exit 退出程序");
 
-        // 开启控制台命令监听
-        Scanner scanner = new Scanner(System.in);
-        while (RUNNING) {
-            System.out.print("> ");
-            String cmd = scanner.nextLine().trim();
-            handleCommand(cmd, context);
-        }
-        scanner.close();
-        context.close();
+        new Thread(() -> {
+            Scanner scanner = new Scanner(System.in);
+            while (RUNNING) {
+                System.out.print("> ");
+                String cmd = scanner.nextLine().trim();
+                // ========== 命令调用处增加异常捕获 ==========
+                try {
+                    handleCommand(cmd, context);
+                } catch (Exception e) {
+                    // 捕获所有异常，展示错误消息
+                    printErrorMsg("执行命令【" + cmd + "】发生异常：" + e.getMessage());
+                    // 如果需要打印完整堆栈便于调试打开下面一行
+                    // e.printStackTrace();
+                }
+            }
+            scanner.close();
+        }, "command-input-thread").start();
     }
 
     /**
      * 命令分发处理器
      */
-    private static void handleCommand(String cmd, ConfigurableApplicationContext context) {
+    private static void handleCommand(String cmd, ConfigurableApplicationContext context) throws Exception{
         switch (cmd) {
             case "help":
                 printHelp();
@@ -46,18 +55,24 @@ public class DemoApplication {
             case "exit":
                 RUNNING = false;
                 System.out.println("正在关闭程序...");
+                context.close();
+                System.exit(0);
                 break;
             case "":
-                // 空输入忽略
                 break;
             default:
-                System.out.println("未知命令！输入 help 查看可用指令");
+                printErrorMsg("未知命令！输入 help 查看可用指令");
         }
     }
 
     /**
-     * help 命令：打印帮助信息
+     * 统一打印错误消息方法
      */
+    private static void printErrorMsg(String message){
+        // 控制台标识错误信息，醒目区分正常输出
+        System.out.println("\033[31m[ERROR] " + message + "\033[0m");
+    }
+
     private static void printHelp() {
         System.out.println("===== 可用命令列表 =====");
         System.out.println("help      显示帮助信息");
@@ -66,16 +81,10 @@ public class DemoApplication {
         System.out.println("exit      退出程序");
     }
 
-    /**
-     * version 命令：显示版本
-     */
     private static void printVersion() {
         System.out.println("当前程序版本：" + APP_VERSION);
     }
 
-    /**
-     * status 命令：显示运行状态
-     */
     private static void printStatus(ConfigurableApplicationContext context) {
         System.out.println("===== 程序状态信息 =====");
         System.out.println("程序是否运行中：" + context.isRunning());
