@@ -35,7 +35,7 @@ public class WechatBotRunner implements CommandLineRunner {
 
     @Override
     public void run(String... args) {
-        log.info("wechat-link 启动中...");
+        log.info("wechat-link 启动中..");
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             log.info("正在停止...");
