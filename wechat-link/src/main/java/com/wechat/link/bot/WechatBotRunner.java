@@ -5,6 +5,7 @@ import com.openilink.auth.LoginCallbacks;
 import com.openilink.model.FileItem;
 import com.openilink.model.ImageItem;
 import com.openilink.model.MessageItem;
+import com.openilink.model.VoiceItem;
 import com.openilink.model.MessageItemType;
 import com.openilink.model.WeixinMessage;
 import com.openilink.model.response.LoginResult;
@@ -101,6 +102,7 @@ public class WechatBotRunner implements CommandLineRunner {
                 case TEXT -> handleText(client, userId, item);
                 case IMAGE -> handleImage(client, userId, item);
                 case FILE -> handleFile(client, userId, item);
+                case VOICE -> handleVoice(client, userId, item);
                 default -> log.info("收到其他类型消息: {}", item.getType());
             }
         }
@@ -129,6 +131,18 @@ public class WechatBotRunner implements CommandLineRunner {
         client.push(userId, "收到你发的文件: " + fileName);
     }
 
+    private void handleVoice(ILinkClient client, String userId, MessageItem item) {
+        VoiceItem voice = item.getVoiceItem();
+        int duration = voice != null && voice.getPlayTime() != null ? voice.getPlayTime() : 0;
+        String transcript = voice != null ? voice.getText() : null;
+        log.info("收到语音消息 [{}]: 时长={}s, 转文字={}", userId, duration, transcript != null ? transcript : "无");
+        if (transcript != null && !transcript.isBlank()) {
+            client.push(userId, "收到你的语音，你说的是: " + transcript);
+        } else {
+            client.push(userId, "收到你的语音了！");
+        }
+    }
+
     private String getTextReply(String text) {
         if (text.contains("你好") || text.contains("hi") || text.contains("Hi")) {
             return "你好呀！我是微信机器人~";
@@ -143,7 +157,7 @@ public class WechatBotRunner implements CommandLineRunner {
             return "我是 wechat-link 机器人！";
         }
         if (text.contains("帮助") || text.contains("help")) {
-            return "支持功能：\n1. 文本消息自动回复\n2. 图片识别\n3. 文件识别\n发点消息试试吧！";
+            return "支持功能：\n1. 文本自动回复\n2. 图片识别\n3. 文件识别\n4. 语音识别\n发点消息试试吧！";
         }
         return "收到: " + text;
     }
