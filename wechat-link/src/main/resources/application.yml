@@ -1,0 +1,11 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: wechat-link
+
+ilink:
+  token: ""
+  bot-type: "3"
+  version: "1.0.0"
