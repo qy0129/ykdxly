@@ -30,7 +30,20 @@
 		<java.version>21</java.version>
 	</properties>
 	<dependencies>
-		<dependency>
+        <!-- JSON解析 -->
+        <dependency>
+            <groupId>com.alibaba.fastjson2</groupId>
+            <artifactId>fastjson2</artifactId>
+            <version>2.0.50</version>
+        </dependency>
+
+        <!-- OkHttp发送http请求 -->
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>okhttp</artifactId>
+            <version>4.12.0</version>
+        </dependency>
+        <dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>
 		</dependency>
