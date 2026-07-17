@@ -10,9 +10,12 @@ import com.openilink.model.MessageItemType;
 import com.openilink.model.WeixinMessage;
 import com.openilink.model.response.LoginResult;
 import com.openilink.monitor.MonitorOptions;
+import com.wechat.link.llm.dto.LLMRequest;
+import com.wechat.link.llm.dto.LLMResponse;
+import com.wechat.link.llm.facade.LLMMessageFacade;
 import jakarta.annotation.PreDestroy;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Component;
@@ -22,13 +25,24 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+/**
+ * 微信机器人消息监听器
+ * <p>
+ * 负责微信端消息的收发，将消息转发给 LLMMessageFacade 进行智能处理。
+ * </p>
+ *
+ * @author wechat-link
+ */
+@Slf4j
 @Component
+@RequiredArgsConstructor
 public class WechatBotRunner implements CommandLineRunner {
-
-    private static final Logger log = LoggerFactory.getLogger(WechatBotRunner.class);
 
     private final AtomicBoolean stopFlag = new AtomicBoolean(false);
     private final Map<String, String> contextTokenCache = new ConcurrentHashMap<>();
+
+    /** LLM 消息调度门面 */
+    private final LLMMessageFacade llmMessageFacade;
 
     @Value("${ilink.token:}")
     private String token;
@@ -92,10 +106,15 @@ public class WechatBotRunner implements CommandLineRunner {
         log.info("消息监听已停止");
     }
 
+    /**
+     * 消息分发处理
+     */
     private void handleMessage(ILinkClient client, WeixinMessage msg) {
         String userId = msg.getFromUserId();
         List<MessageItem> items = msg.getItemList();
-        if (items == null || items.isEmpty()) return;
+        if (items == null || items.isEmpty()) {
+            return;
+        }
 
         for (MessageItem item : items) {
             switch (item.getType()) {
@@ -108,58 +127,96 @@ public class WechatBotRunner implements CommandLineRunner {
         }
     }
 
+    /**
+     * 处理文本消息 - 转发给 LLM
+     */
     private void handleText(ILinkClient client, String userId, MessageItem item) {
         String text = item.getTextItem() != null ? item.getTextItem().getText() : "";
         log.info("收到文本消息 [{}]: {}", userId, text);
-        String reply = getTextReply(text);
+
+        LLMRequest request = LLMRequest.builder()
+                .userId(userId)
+                .sessionId(userId)
+                .content(text)
+                .messageType("TEXT")
+                .build();
+
+        LLMResponse response = llmMessageFacade.handleMessage(request);
+        String reply = extractReply(response);
         client.push(userId, reply);
         log.info("回复 [{}]: {}", userId, reply);
     }
 
+    /**
+     * 处理图片消息 - 转发给多模态解析
+     */
     private void handleImage(ILinkClient client, String userId, MessageItem item) {
         ImageItem image = item.getImageItem();
-        log.info("收到图片消息 [{}]: URL={}, 大小={}", userId,
-                image != null ? image.getUrl() : "N/A",
-                image != null ? image.getHdSize() : "N/A");
-        client.push(userId, "收到你发的图片了！");
+        String imageUrl = image != null ? image.getUrl() : null;
+        log.info("收到图片消息 [{}]: URL={}", userId, imageUrl);
+
+        LLMRequest request = LLMRequest.builder()
+                .userId(userId)
+                .sessionId(userId)
+                .messageType("IMAGE")
+                .mediaUrl(imageUrl)
+                .build();
+
+        LLMResponse response = llmMessageFacade.handleMessage(request);
+        client.push(userId, extractReply(response));
     }
 
+    /**
+     * 处理文件消息 - 转发给文档解析
+     */
     private void handleFile(ILinkClient client, String userId, MessageItem item) {
         FileItem file = item.getFileItem();
         String fileName = file != null ? file.getFileName() : "未知文件";
-        log.info("收到文件消息 [{}]: 文件名={}, 大小={}", userId, fileName, file != null ? file.getLen() : "N/A");
-        client.push(userId, "收到你发的文件: " + fileName);
+        log.info("收到文件消息 [{}]: 文件名={}", userId, fileName);
+
+        LLMRequest request = LLMRequest.builder()
+                .userId(userId)
+                .sessionId(userId)
+                .messageType("FILE")
+                .content(fileName)
+                .build();
+
+        LLMResponse response = llmMessageFacade.handleMessage(request);
+        client.push(userId, extractReply(response));
     }
 
+    /**
+     * 处理语音消息 - 如有转文字则走 LLM 对话
+     */
     private void handleVoice(ILinkClient client, String userId, MessageItem item) {
         VoiceItem voice = item.getVoiceItem();
         int duration = voice != null && voice.getPlayTime() != null ? voice.getPlayTime() : 0;
         String transcript = voice != null ? voice.getText() : null;
-        log.info("收到语音消息 [{}]: 时长={}s, 转文字={}", userId, duration, transcript != null ? transcript : "无");
-        if (transcript != null && !transcript.isBlank()) {
-            client.push(userId, "收到你的语音，你说的是: " + transcript);
-        } else {
-            client.push(userId, "收到你的语音了！");
-        }
+        log.info("收到语音消息 [{}]: 时长={}s, 转文字={}", userId, duration,
+                transcript != null ? transcript : "无");
+
+        LLMRequest request = LLMRequest.builder()
+                .userId(userId)
+                .sessionId(userId)
+                .messageType("VOICE")
+                .content(transcript)
+                .build();
+
+        LLMResponse response = llmMessageFacade.handleMessage(request);
+        client.push(userId, extractReply(response));
     }
 
-    private String getTextReply(String text) {
-        if (text.contains("你好") || text.contains("hi") || text.contains("Hi")) {
-            return "你好呀！我是微信机器人~";
+    /**
+     * 从 LLMResponse 中提取回复文本
+     */
+    private String extractReply(LLMResponse response) {
+        if (response == null) {
+            return "系统繁忙，请稍后再试。";
         }
-        if (text.contains("时间")) {
-            return java.time.LocalDateTime.now().toString();
+        if ("SUCCESS".equals(response.getStatus())) {
+            return response.getContent();
         }
-        if (text.contains("天气")) {
-            return "今天天气不错，适合 coding！";
-        }
-        if (text.contains("谁") || text.contains("你叫什么")) {
-            return "我是 wechat-link 机器人！";
-        }
-        if (text.contains("帮助") || text.contains("help")) {
-            return "支持功能：\n1. 文本自动回复\n2. 图片识别\n3. 文件识别\n4. 语音识别\n发点消息试试吧！";
-        }
-        return "收到: " + text;
+        return "抱歉，处理出现问题：" + response.getErrorMsg();
     }
 
     @PreDestroy

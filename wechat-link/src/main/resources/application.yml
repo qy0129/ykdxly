@@ -6,6 +6,23 @@ spring:
     name: wechat-link
 
 ilink:
-  token: ""
+  token: "${ILINK_TOKEN:}"
   bot-type: "3"
   version: "1.0.0"
+
+# ==================== LLM 大语言模型配置 ====================
+llm:
+  # API Key - 从环境变量 LLM_API_KEY 读取，严禁硬编码
+  api-key: ${LLM_API_KEY:}
+  # LLM 服务基础地址（兼容 OpenAI / 智谱 / Ollama 等）
+  base-url: ${LLM_BASE_URL:https://api.deepseek.com}
+  # 模型名称
+  model: ${LLM_MODEL:deepseek-v4-flash}
+  # 请求超时时间（秒）
+  timeout: ${LLM_TIMEOUT:30}
+  # 最大 Token 数
+  max-tokens: ${LLM_MAX_TOKENS:2048}
+  # 温度参数（0~1，越高越随机）
+  temperature: ${LLM_TEMPERATURE:0.7}
+  # 系统预设 Prompt
+  system-prompt: ${LLM_SYSTEM_PROMPT:你是一个智能微信助手，请用简洁友好的语言回复用户的问题。}

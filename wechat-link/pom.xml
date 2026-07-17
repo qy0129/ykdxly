@@ -26,6 +26,19 @@
             <artifactId>spring-boot-starter</artifactId>
         </dependency>
 
+        <!-- WebClient 用于 LLM API 的 HTTP 调用 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webflux</artifactId>
+        </dependency>
+
+        <!-- 配置元数据处理器，支持 @ConfigurationProperties 自动提示 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-configuration-processor</artifactId>
+            <optional>true</optional>
+        </dependency>
+
         <dependency>
             <groupId>com.openilink</groupId>
             <artifactId>openilink-sdk-java</artifactId>
