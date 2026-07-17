@@ -14,8 +14,12 @@ import java.util.List;
  * LLM 消息调度门面
  * <p>
  * 作为微信消息流转到 LLM 的唯一入口。
- * 根据消息类型自动分发给 LLMClient（文本对话）或对应的 MultiModalParser（多模态解析）。
- * 同时预留 Agent 调用的扩展点。
+ * 根据消息类型自动分发：
+ * - TEXT → LLMClient 文本对话
+ * - IMAGE → ImageModelParser 视觉模型
+ * - FILE → DocumentModelParser 文档处理
+ * - VOICE → 有转文字走文本对话，无转文字走 VoiceModelParser
+ * - VIDEO → VideoModelParser
  * </p>
  *
  * @author wechat-link
@@ -45,17 +49,30 @@ public class LLMMessageFacade {
         try {
             String messageType = request.getMessageType();
 
-            // 文本消息 -> 直接走 LLM 对话
+            // 文本消息 → 直接走 LLM 对话
             if ("TEXT".equalsIgnoreCase(messageType)) {
                 return handleTextMessage(request);
             }
 
-            // 语音消息（已转文字） -> 走 LLM 对话
-            if ("VOICE".equalsIgnoreCase(messageType) && request.getContent() != null && !request.getContent().isBlank()) {
-                return handleTextMessage(request);
+            // 图片消息 → 走多模态解析器（ImageModelParser）
+            if ("IMAGE".equalsIgnoreCase(messageType)) {
+                return handleMultiModalMessage(request);
             }
 
-            // 其他媒体类型 -> 走多模态解析器
+            // 语音消息 → 有内容走文本对话，无内容走 VoiceModelParser
+            if ("VOICE".equalsIgnoreCase(messageType)) {
+                if (request.getContent() != null && !request.getContent().isBlank()) {
+                    return handleTextMessage(request);
+                }
+                return handleMultiModalMessage(request);
+            }
+
+            // 文件消息 → 走 DocumentModelParser
+            if ("FILE".equalsIgnoreCase(messageType)) {
+                return handleMultiModalMessage(request);
+            }
+
+            // 视频及其他类型 → 走多模态解析器
             return handleMultiModalMessage(request);
 
         } catch (LLMException e) {
@@ -72,28 +89,23 @@ public class LLMMessageFacade {
      * 处理文本类消息（包括语音转文字）
      */
     private LLMResponse handleTextMessage(LLMRequest request) {
-        // TODO: 此处预留 Agent 路由判断
-        // 未来可在此判断用户意图，决定是否走 Agent 流程
-        // if (shouldRouteToAgent(request)) {
-        //     return agentService.execute(buildAgentContext(request));
-        // }
-
         return llmClient.chat(request);
     }
 
     /**
-     * 处理多模态消息（图片/视频/文件）
+     * 处理多模态消息（图片/视频/文件/语音）
      * 通过策略模式自动匹配对应的解析器
      */
     private LLMResponse handleMultiModalMessage(LLMRequest request) {
         String messageType = request.getMessageType();
-        String mediaUrl = request.getMediaUrl();
+        // 优先用 mediaUrl（图片 base64 等），其次用 content（文件名等）
+        String mediaData = request.getMediaUrl() != null ? request.getMediaUrl() : request.getContent();
 
         // 查找支持该类型的解析器
         for (MultiModalParser<String> parser : multiModalParsers) {
             if (parser.supports(messageType)) {
                 log.info("找到匹配的解析器: {} -> {}", messageType, parser.getClass().getSimpleName());
-                return parser.parse(mediaUrl);
+                return parser.parse(mediaData);
             }
         }
 
