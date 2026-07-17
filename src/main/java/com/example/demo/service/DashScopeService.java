@@ -53,6 +53,10 @@ public class DashScopeService {
 
     private static final String FILES_API_URL =
             "https://dashscope.aliyuncs.com/compatible-mode/v1/files";
+    private static final String WANXIANG_API_URL =
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis";
+    private static final String TASK_API_URL =
+            "https://dashscope.aliyuncs.com/api/v1/tasks";
     private static final int VIDEO_BASE64_MAX_BYTES = 7 * 1024 * 1024;
 
     @Autowired(required = false)
@@ -83,6 +87,10 @@ public class DashScopeService {
     }
 
     public String chat(String userMessage, List<String[]> history) {
+        return chat(userMessage, history, null);
+    }
+
+    public String chat(String userMessage, List<String[]> history, String tone) {
         String weatherInfo = null;
         if (weatherService != null && WEATHER_PATTERN.matcher(userMessage).matches()) {
             weatherInfo = weatherService.detectAndGetWeather(userMessage);
@@ -94,7 +102,23 @@ public class DashScopeService {
         ArrayNode messages = mapper.createArrayNode();
 
         ObjectNode systemMsg = mapper.createObjectNode();
-        String systemPrompt = "你是一个智能助手，请用中文友好地回答问题。结合对话历史理解上下文，回答简洁明了，一般不超过200字。不要使用表情符号，回复内容保持自然。如果你不知道答案，不要编造，直接说不知道。";
+        String toneGuide = "";
+        if (tone != null && !tone.isBlank()) {
+            toneGuide = switch (tone) {
+                case "正式" -> "请使用正式、严谨的书面语气回答问题，措辞规范，避免口语化表达。";
+                case "可爱" -> "请用可爱、亲切的语气回答问题，可以适当使用语气词，让回复显得活泼温暖。";
+                case "专业" -> "请用专业、精准的技术语言回答，引用具体概念和数据，体现专业性。";
+                case "朋友" -> "请像朋友聊天一样自然地回答问题，语气随意亲切，拉近距离。";
+                case "幽默" -> "请用幽默风趣的语气回答问题，适当加入俏皮话，让回复轻松有趣。";
+                case "温柔" -> "请用温柔、善解人意的语气回答问题，多使用关怀和安慰的措辞。";
+                case "诗意" -> "请用富有诗意和文艺气息的语言回答问题，适当运用修辞手法。";
+                case "简洁" -> "请用最简洁的语言回答问题，直接给出核心信息，不要多余修饰。";
+                case "热情" -> "请用热情洋溢、充满活力的语气回答问题，让回复具有感染力。";
+                default -> "请用友好、自然的语气回答问题。";
+            };
+        }
+        String systemPrompt = "你是一个智能助手，请用中文回答问题。结合对话历史理解上下文，回答一般不超过200字。不要使用表情符号。如果你不知道答案，不要编造，直接说不知道。"
+                + (toneGuide.isEmpty() ? "请用友好自然的语气回答问题。" : "\n\n当前语气要求：" + toneGuide);
         if (weatherInfo != null) {
             systemPrompt += "\n\n当前实时天气数据：" + weatherInfo + "\n用户询问天气时，请基于以上真实数据回答。";
         }
@@ -130,6 +154,95 @@ public class DashScopeService {
         body.set("parameters", params);
 
         return doRequest(body);
+    }
+
+    /**
+     * 文生图：调用万相-文生图V2版
+     * 使用异步任务模式（wanx2.1-t2i-plus），轮询获取结果
+     */
+    public String textToImage(String prompt) {
+        ObjectNode body = mapper.createObjectNode();
+        body.put("model", "wanx2.1-t2i-plus");
+        ObjectNode input = mapper.createObjectNode();
+        input.put("prompt", prompt);
+        body.set("input", input);
+        ObjectNode params = mapper.createObjectNode();
+        params.put("size", "768*768");
+        params.put("n", 1);
+        body.set("parameters", params);
+
+        try {
+            String json = body.toString();
+            Request request = new Request.Builder()
+                    .url(WANXIANG_API_URL)
+                    .header("Authorization", "Bearer " + apiKey)
+                    .header("X-DashScope-Async", "enable")
+                    .post(RequestBody.create(json, JSON_MEDIA))
+                    .build();
+
+            String respBody;
+            try (Response response = httpClient.newCall(request).execute()) {
+                respBody = response.body() != null ? response.body().string() : "";
+                if (!response.isSuccessful()) {
+                    log.warn("万相创建任务失败: status={}, body={}", response.code(), respBody);
+                    return null;
+                }
+            }
+
+            JsonNode root = mapper.readTree(respBody);
+            String taskId = root.path("output").path("task_id").asText();
+            if (taskId.isBlank()) {
+                log.warn("万相响应缺少 task_id: {}", respBody);
+                return null;
+            }
+            log.info("万相任务已创建: taskId={}", taskId);
+
+            // 轮询任务结果（最多 120 秒）
+            for (int i = 0; i < 60; i++) {
+                Thread.sleep(2000);
+                String pollResp = doHttpGet(TASK_API_URL + "/" + taskId);
+                if (pollResp == null) continue;
+
+                JsonNode pollOutput = mapper.readTree(pollResp).get("output");
+                if (pollOutput == null) continue;
+
+                String status = pollOutput.path("task_status").asText();
+                log.info("万相任务状态: {}", status);
+
+                if ("SUCCEEDED".equals(status)) {
+                    log.info("万相任务成功响应: {}", pollResp);
+
+                    // 尝试多种字段路径：results[].image_url, results[].url, output.image_url, data[].url
+                    JsonNode results = pollOutput.get("results");
+                    if (results != null && results.isArray()) {
+                        for (JsonNode r : results) {
+                            String url = r.path("image_url").asText();
+                            if (url.isBlank()) url = r.path("url").asText();
+                            if (!url.isBlank()) {
+                                log.info("万相文生图成功: {}", url);
+                                return url;
+                            }
+                        }
+                    }
+                    String directUrl = pollOutput.path("image_url").asText();
+                    if (directUrl.isBlank()) directUrl = pollOutput.path("url").asText();
+                    if (!directUrl.isBlank()) {
+                        log.info("万相文生图成功: {}", directUrl);
+                        return directUrl;
+                    }
+                    log.warn("万相任务成功但无法提取图片 URL");
+                    return null;
+                }
+                if ("FAILED".equals(status)) {
+                    log.warn("万相任务失败: {}", pollResp);
+                    return null;
+                }
+            }
+            log.warn("万相任务超时: taskId={}", taskId);
+        } catch (Exception e) {
+            log.warn("万相文生图异常: {}", e.getMessage());
+        }
+        return null;
     }
 
     private static final String MULTIMODAL_API_URL =
@@ -984,7 +1097,7 @@ public class DashScopeService {
         Request request = new Request.Builder()
                 .url(url)
                 .header("Authorization", "Bearer " + apiKey)
-                .post(RequestBody.create(jsonBody, JSON_MEDIA))
+                .post(jsonBody != null ? RequestBody.create(jsonBody, JSON_MEDIA) : RequestBody.create(new byte[0]))
                 .build();
 
         try (Response response = httpClient.newCall(request).execute()) {
@@ -996,6 +1109,26 @@ public class DashScopeService {
             return respBody;
         } catch (IOException e) {
             log.warn("HTTP POST 异常: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private String doHttpGet(String url) {
+        Request request = new Request.Builder()
+                .url(url)
+                .header("Authorization", "Bearer " + apiKey)
+                .get()
+                .build();
+
+        try (Response response = httpClient.newCall(request).execute()) {
+            String respBody = response.body() != null ? response.body().string() : "";
+            if (!response.isSuccessful()) {
+                log.warn("HTTP GET 失败: url={}, status={}, body={}", url, response.code(), respBody);
+                return null;
+            }
+            return respBody;
+        } catch (IOException e) {
+            log.warn("HTTP GET 异常: {}", e.getMessage());
             return null;
         }
     }

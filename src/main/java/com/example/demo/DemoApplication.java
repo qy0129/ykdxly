@@ -23,17 +23,18 @@ public class DemoApplication {
         System.out.println("输入命令操作，输入 help 查看可用指令");
 
         new Thread(() -> {
-            Scanner scanner = new Scanner(System.in);
-            while (RUNNING) {
-                System.out.print("> ");
-                String cmd = scanner.nextLine().trim();
-                try {
-                    handleCommand(cmd, context);
-                } catch (Exception e) {
-                    printErrorMsg("执行命令【" + cmd + "】发生异常：" + e.getMessage());
+            try (Scanner scanner = new Scanner(System.in)) {
+                while (RUNNING && scanner.hasNextLine()) {
+                    System.out.print("> ");
+                    String cmd = scanner.nextLine().trim();
+                    try {
+                        handleCommand(cmd, context);
+                    } catch (Exception e) {
+                        printErrorMsg("执行命令【" + cmd + "】发生异常：" + e.getMessage());
+                    }
                 }
+            } catch (Exception ignored) {
             }
-            scanner.close();
         }, "command-input-thread").start();
     }
 
