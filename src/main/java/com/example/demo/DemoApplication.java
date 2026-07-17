@@ -5,6 +5,10 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.ConfigurableApplicationContext;
 
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Properties;
 import java.util.Scanner;
 
 @SpringBootApplication
@@ -95,5 +99,24 @@ public class DemoApplication {
         WechatBotService botService = context.getBean(WechatBotService.class);
         System.out.println("Bot 是否运行：" + botService.isRunning());
         System.out.println("Bot 是否登录：" + botService.isLoggedIn());
+    }
+    private static String loadApiKey() {
+        try {
+            Properties props = new Properties();
+            Path path = Path.of("config.properties");
+            if (Files.exists(path)) {
+                try (InputStream in = Files.newInputStream(path)) {
+                    props.load(in);
+                    String key = props.getProperty("api.key");
+                    if (key != null && !key.isBlank() && !key.contains("把你的key")) {
+                        return key;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        System.err.println("错误: 请创建 properties.properties 文件，内容为: api.key=你的Key");
+        System.err.println("参考 config.properties.example");
+        System.exit(1);
+        return null;
     }
 }

@@ -128,6 +128,80 @@ public class WechatBotService {
                     System.out.println("\n[消息] 来自 " + userId + ": " + text);
                     String reply = getReply(userId, text);
                     sendReply(userId, reply);
+                } else if (item.getImage_item() != null) {
+                    log.info("收到来自 {} 的图片消息", userId);
+                    System.out.println("\n[消息] 来自 " + userId + ": [图片]");
+                    try {
+                        byte[] imageBytes = client.downloadImageFromMessageItem(item);
+                        log.info("图片下载完成，大小: {} bytes", imageBytes.length);
+                        String reply = dashScopeService.chatWithImage("请详细描述这张图片的内容", imageBytes, "image.png");
+                        if (reply != null) {
+                            log.info("AI 识别图片完成");
+                            sendReply(userId, reply);
+                        } else {
+                            log.warn("视觉模型不可用，降级为文字提示");
+                            sendReply(userId, "已收到您的图片。当前视觉模型不可用，请用文字描述你想问的问题。");
+                        }
+                    } catch (Exception e) {
+                        log.error("图片处理异常: {}", e.getMessage());
+                        sendReply(userId, "抱歉，图片处理失败，请用文字描述你的问题。");
+                    }
+                } else if (item.getVoice_item() != null) {
+                    log.info("收到来自 {} 的语音消息", userId);
+                    System.out.println("\n[消息] 来自 " + userId + ": [语音]");
+                    try {
+                        byte[] voiceBytes = client.downloadVoiceFromMessageItem(item);
+                        log.info("语音下载完成，大小: {} bytes", voiceBytes.length);
+                        String recognized = dashScopeService.transcribeAudio(voiceBytes);
+                        if (recognized != null && !recognized.isBlank()) {
+                            log.info("语音转写结果: {}", recognized);
+                            System.out.println("[语音识别] " + recognized);
+                            String reply = getReply(userId, recognized);
+                            sendReply(userId, reply);
+                        } else {
+                            sendReply(userId, "语音识别暂不可用，请用文字描述你想问的问题。");
+                        }
+                    } catch (Exception e) {
+                        log.error("语音处理异常: {}", e.getMessage());
+                        sendReply(userId, "语音处理失败，请用文字描述你想问的问题。");
+                    }
+                } else if (item.getFile_item() != null) {
+                    log.info("收到来自 {} 的文件消息", userId);
+                    System.out.println("\n[消息] 来自 " + userId + ": [文件]");
+                    try {
+                        byte[] fileBytes = client.downloadFileFromMessageItem(item);
+                        String fileName = item.getFile_item().getFile_name();
+                        if (fileName == null || fileName.isBlank()) fileName = "file.bin";
+                        log.info("文件下载完成，大小: {} bytes, 文件名: {}", fileBytes.length, fileName);
+                        System.out.println("[文件] " + fileName + " (" + fileBytes.length + " bytes)");
+                        String reply = dashScopeService.analyzeFile(fileBytes, fileName, "请总结这份文件的主要内容");
+                        if (reply != null && !reply.isBlank()) {
+                            log.info("AI 文件分析完成");
+                            sendReply(userId, reply);
+                        } else {
+                            sendReply(userId, "文件识别暂不可用，请用文字描述你想问的问题。");
+                        }
+                    } catch (Exception e) {
+                        log.error("文件处理异常: {}", e.getMessage());
+                        sendReply(userId, "文件处理失败，请用文字描述你的问题。");
+                    }
+                } else if (item.getVideo_item() != null) {
+                    log.info("收到来自 {} 的视频消息", userId);
+                    System.out.println("\n[消息] 来自 " + userId + ": [视频]");
+                    try {
+                        byte[] videoBytes = client.downloadVideoFromMessageItem(item);
+                        log.info("视频下载完成，大小: {} bytes", videoBytes.length);
+                        String reply = dashScopeService.chatWithVideo(videoBytes, "video.mp4", "请详细描述这段视频的内容");
+                        if (reply != null && !reply.isBlank()) {
+                            log.info("AI 视频识别完成");
+                            sendReply(userId, reply);
+                        } else {
+                            sendReply(userId, "视频识别暂不可用，请用文字描述你想问的问题。");
+                        }
+                    } catch (Exception e) {
+                        log.error("视频处理异常: {}", e.getMessage());
+                        sendReply(userId, "视频处理失败，请用文字描述你的问题。");
+                    }
                 }
             }
         }
