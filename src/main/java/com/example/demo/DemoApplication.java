@@ -1,83 +1,43 @@
 package com.example.demo;
 
-import com.alibaba.fastjson2.JSON;
-import com.alibaba.fastjson2.JSONObject;
-import jakarta.annotation.PostConstruct;
-import okhttp3.MediaType;
-import okhttp3.OkHttpClient;
-import okhttp3.Request;
-import okhttp3.RequestBody;
-import okhttp3.Response;
-import org.springframework.beans.factory.annotation.Value;
+import com.example.demo.service.WechatBotService;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.ConfigurableApplicationContext;
-import org.springframework.stereotype.Component;
 
-//import javax.annotation.PostConstruct;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Properties;
 import java.util.Scanner;
-import java.util.concurrent.TimeUnit;
 
 @SpringBootApplication
-@Component
 public class DemoApplication {
 
-    // =========从配置文件读取参数=========
-    @Value("${dashscope.api.key}")
-    private String dashscopeApiKey;
-
-    @Value("${dashscope.api.url}")
-    private String dashscopeUrl;
-
-    @Value("${dashscope.model.name}")
-    private String modelName;
-
-    @Value("${app.version}")
-    public String APP_VERSION;
-
+    public static final String APP_VERSION = "1.0.0";
     public static volatile boolean RUNNING = true;
-    private static OkHttpClient httpClient;
-    public static final MediaType JSON_TYPE = MediaType.get("application/json; charset=utf-8");
 
     public static void main(String[] args) {
         ConfigurableApplicationContext context = SpringApplication.run(DemoApplication.class, args);
-        System.out.println("====================程序启动完成====================");
-        System.out.println("指令示例：weather 杭州");
-        System.out.println("输入命令操作，输入 exit 退出程序");
-    }
-
-    // Spring容器初始化完成后启动控制台监听
-    @PostConstruct
-    public void startCommandListener() {
-        // 初始化http客户端
-        httpClient = new OkHttpClient.Builder()
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(30, TimeUnit.SECONDS)
-                .build();
+        System.out.println("==================== 程序启动完成 ====================");
+        System.out.println("输入命令操作，输入 help 查看可用指令");
 
         new Thread(() -> {
             Scanner scanner = new Scanner(System.in);
             while (RUNNING) {
                 System.out.print("> ");
-                String cmdLine = scanner.nextLine().trim();
+                String cmd = scanner.nextLine().trim();
                 try {
-                    handleCommand(cmdLine);
+                    handleCommand(cmd, context);
                 } catch (Exception e) {
-                    printErrorMsg("执行命令发生异常：" + e.getMessage());
-                    // e.printStackTrace(); //调试打开
+                    printErrorMsg("执行命令【" + cmd + "】发生异常：" + e.getMessage());
                 }
             }
             scanner.close();
         }, "command-input-thread").start();
     }
 
-    /**
-     * 命令分发
-     */
-    private void handleCommand(String cmdLine) {
-        String[] parts = cmdLine.split("\\s+");
-        String cmd = parts[0];
-
+    private static void handleCommand(String cmd, ConfigurableApplicationContext context) throws Exception {
         switch (cmd) {
             case "help":
                 printHelp();
@@ -86,20 +46,23 @@ public class DemoApplication {
                 printVersion();
                 break;
             case "status":
-                printStatus();
+                printStatus(context);
                 break;
-            case "weather":
-                // 校验是否传入城市
-                if (parts.length < 2 || parts[1].isBlank()) {
-                    printErrorMsg("参数缺失！正确格式：weather 城市名称，例如 weather 北京");
-                    return;
-                }
-                String city = parts[1];
-                queryWeather(city);
+            case "bot":
+                WechatBotService botService = context.getBean(WechatBotService.class);
+                System.out.println("Bot 运行状态: " + (botService.isRunning() ? "运行中" : "已停止"));
+                System.out.println("Bot 登录状态: " + (botService.isLoggedIn() ? "已登录" : "未登录"));
+                break;
+            case "bot start":
+                context.getBean(WechatBotService.class).start();
+                break;
+            case "bot stop":
+                context.getBean(WechatBotService.class).stop();
                 break;
             case "exit":
                 RUNNING = false;
                 System.out.println("正在关闭程序...");
+                context.close();
                 System.exit(0);
                 break;
             case "":
@@ -109,77 +72,51 @@ public class DemoApplication {
         }
     }
 
-    /**
-     * 调用阿里云百炼查询天气
-     */
-    private void queryWeather(String city) {
-        try {
-            JSONObject bodyObj = new JSONObject();
-            bodyObj.put("model", modelName);
-
-            JSONObject input = new JSONObject();
-            input.put("prompt", "简洁查询【" + city + "】今日天气，包含气温、天气状况、风力，不要多余内容");
-            bodyObj.put("input", input);
-
-            RequestBody requestBody = RequestBody.create(bodyObj.toJSONString(), JSON_TYPE);
-            Request request = new Request.Builder()
-                    .url(dashscopeUrl)
-                    .header("Authorization", "Bearer " + dashscopeApiKey)
-                    .post(requestBody)
-                    .build();
-
-            try (Response response = httpClient.newCall(request).execute()) {
-                if (!response.isSuccessful()) {
-                    printErrorMsg("接口请求失败，HTTP状态码：" + response.code());
-                    return;
-                }
-                String respText = response.body().string();
-                JSONObject json = JSON.parseObject(respText);
-
-                // 判断百炼返回业务错误
-                String errorCode = json.getString("code");
-                if (errorCode != null && !errorCode.isEmpty()) {
-                    printErrorMsg("API调用失败：" + json.getString("message"));
-                    return;
-                }
-
-                JSONObject output = json.getJSONObject("output");
-                String weatherInfo = output.getString("text");
-
-                System.out.println("\n==========" + city + " 天气信息==========");
-                System.out.println(weatherInfo);
-                System.out.println("========================================\n");
-            }
-        } catch (java.net.SocketTimeoutException e) {
-            printErrorMsg("请求超时，请检查网络");
-        } catch (Exception e) {
-            printErrorMsg("天气查询异常：" + e.getMessage());
-        }
-    }
-
-    /**
-     * 红色错误信息打印
-     */
     private static void printErrorMsg(String message) {
         System.out.println("\033[31m[ERROR] " + message + "\033[0m");
     }
 
-    private void printHelp() {
+    private static void printHelp() {
         System.out.println("===== 可用命令列表 =====");
-        System.out.println("help              显示帮助信息");
-        System.out.println("version           查看程序版本");
-        System.out.println("status            查看程序运行状态");
-        System.out.println("weather 城市名    查询指定城市天气（例：weather 杭州）");
-        System.out.println("exit              退出程序");
+        System.out.println("help          显示帮助信息");
+        System.out.println("version       查看程序版本");
+        System.out.println("status        查看程序运行状态");
+        System.out.println("bot           查看 Bot 状态");
+        System.out.println("bot start     启动微信 Bot（扫码登录）");
+        System.out.println("bot stop      停止微信 Bot");
+        System.out.println("exit          退出程序");
     }
 
-    private void printVersion() {
+    private static void printVersion() {
         System.out.println("当前程序版本：" + APP_VERSION);
     }
 
-    private void printStatus() {
+    private static void printStatus(ConfigurableApplicationContext context) {
         System.out.println("===== 程序状态信息 =====");
-        System.out.println("程序运行标识：" + RUNNING);
-        System.out.println("百炼模型：" + modelName);
+        System.out.println("程序是否运行中：" + context.isRunning());
+        System.out.println("容器是否已启动：" + context.isActive());
+        System.out.println("Bean总数：" + context.getBeanDefinitionCount());
+        WechatBotService botService = context.getBean(WechatBotService.class);
+        System.out.println("Bot 是否运行：" + botService.isRunning());
+        System.out.println("Bot 是否登录：" + botService.isLoggedIn());
+    }
+    private static String loadApiKey() {
+        try {
+            Properties props = new Properties();
+            Path path = Path.of("config.properties");
+            if (Files.exists(path)) {
+                try (InputStream in = Files.newInputStream(path)) {
+                    props.load(in);
+                    String key = props.getProperty("api.key");
+                    if (key != null && !key.isBlank() && !key.contains("把你的key")) {
+                        return key;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        System.err.println("错误: 请创建 properties.properties 文件，内容为: api.key=你的Key");
+        System.err.println("参考 config.properties.example");
+        System.exit(1);
+        return null;
     }
 }
