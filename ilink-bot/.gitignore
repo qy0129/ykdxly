@@ -1,0 +1,5 @@
+target/
+models/
+*.silk
+qrcode.png
+config.properties
