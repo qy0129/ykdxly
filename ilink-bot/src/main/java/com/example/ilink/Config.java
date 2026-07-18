@@ -13,7 +13,7 @@ public class Config {
     public static final String VISION_MODEL = "Qwen/Qwen3-VL-32B-Instruct";
     public static final String DRAW_API_URL = "https://api.siliconflow.cn/v1/images/generations";
     public static final String DRAW_MODEL = "Kwai-Kolors/Kolors";
-    public static final Duration REQ_TIMEOUT = Duration.ofSeconds(60);
+    public static final Duration REQ_TIMEOUT = Duration.ofSeconds(20);
 
     private static String loadApiKey() {
         try {
