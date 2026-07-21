@@ -30,4 +30,21 @@ public class LLMConfig {
                 .defaultHeader("Content-Type", "application/json")
                 .build();
     }
+
+    /**
+     * 多模态专用 WebClient（指向 multimodal 配置的 baseUrl）
+     * 用于图像识别、深度思考等需要视觉能力的场景
+     */
+    @Bean("multimodalWebClient")
+    public WebClient multimodalWebClient(LLMProperties properties) {
+        LLMProperties.MultimodalConfig mm = properties.getMultimodal();
+        HttpClient httpClient = HttpClient.create()
+                .responseTimeout(Duration.ofSeconds(mm.getTimeout()));
+
+        return WebClient.builder()
+                .baseUrl(mm.getBaseUrl())
+                .clientConnector(new ReactorClientHttpConnector(httpClient))
+                .defaultHeader("Content-Type", "application/json")
+                .build();
+    }
 }

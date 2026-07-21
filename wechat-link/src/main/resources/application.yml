@@ -5,12 +5,103 @@ spring:
   application:
     name: wechat-link
 
-# ==================== LLM 大语言模型配置 ====================
+# ==================== 路由策略配置 ====================
+# AUTO: 自动判断（前缀优先 + 关键词分析）
+# MULTIMODAL: 强制走多模态大模型
+# SPECIALIZED: 强制走单功能专精管道
 llm:
-  api-key: ${LLM_API_KEY:}
+  routing-mode: ${ACTIVE_ROUTER_MODE:AUTO}
+
+  # ---------- 默认纯文本模型（极速、低成本） ----------
+  api-key: ${LLM_API_KEY:sk-ws-H.EDYLDXH.DW0L.MEYCIQDr-W2SyPtUAUdB-yMNIQQpDkA2Pai9Bq8RRcqui6s_PQIhAJeFDahdVdQ8Ed01b-yhcqpP2CahhW3IBHL82eYl8--v}
   base-url: ${LLM_BASE_URL:https://ws-h7o2hyru91m6qked.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
-  model: ${LLM_MODEL:qwen3.7-plus}
+  model: ${LLM_MODEL:deepseek-v4-flash}
   timeout: ${LLM_TIMEOUT:30}
   max-tokens: ${LLM_MAX_TOKENS:2048}
   temperature: ${LLM_TEMPERATURE:0.7}
-  system-prompt: ${LLM_SYSTEM_PROMPT:你是一个智能微信助手，请用简洁友好的语言回复用户的问题。}
+  # TTS 指令控制系统提示
+  # 完整版含多维度声音描述，请设置为环境变量 LLM_SYSTEM_PROMPT（见下方注释）
+  # 
+  # 完整版内容（复制到环境变量 LLM_SYSTEM_PROMPT 中）：
+  # 你是一个智能微信助手，请用简洁友好的语言回复用户的消息。
+  # 回复开头用 {instruction:语气描述} 标注朗读情感，仅用于 TTS 控制，不会显示给用户。
+  # 
+  # 【核心原则】具体而非模糊、多维而非单一、简洁而非冗余
+  # 【描述维度】情感(开朗/沉稳/温柔/严肃/活泼/冷静/治愈/兴奋/悲伤/愤怒)
+  #            语速(快速/中速/缓慢/偏快/偏慢)
+  #            音调(高音/中音/低音)
+  #            特点(有磁性/清脆/沙哑/圆润/甜美/浑厚/有力/温柔)
+  # 
+  # 【场景映射】
+  #   开心→{instruction:语气欢快充满喜悦，语速轻快上扬}
+  #   悲伤→{instruction:温柔安慰，语速缓慢平和，充满共情}
+  #   生气→{instruction:沉稳冷静，语气平和耐心}
+  #   学习→{instruction:清晰认真，语速适中，字正腔圆}
+  #   闲聊→{instruction:活泼轻松，语调自然亲切}
+  #   疲惫→{instruction:轻柔舒缓，语速偏慢，助眠风格}
+  #   日常→{instruction:温和自然，语调平实流畅}
+  system-prompt: ${LLM_SYSTEM_PROMPT:你是一个智能微信助手，请用简洁友好的语言回复用户的消息。}
+
+  # ---------- 记忆模块参数 ----------
+  memory-max-size: ${MEMORY_MAX_SIZE:10}          # 每用户最大记忆条数
+  memory-recent-window: ${MEMORY_RECENT_WINDOW:4} # 衰减优化器中保留完整数据的近期消息数
+
+  # ---------- 多模态/深度思考模型（慢、贵、强） ----------
+  multimodal:
+    api-key: ${MULTIMODAL_API_KEY:sk-ws-H.EDYLDXH.DW0L.MEYCIQDr-W2SyPtUAUdB-yMNIQQpDkA2Pai9Bq8RRcqui6s_PQIhAJeFDahdVdQ8Ed01b-yhcqpP2CahhW3IBHL82eYl8--v}
+    base-url: ${MULTIMODAL_BASE_URL:https://ws-h7o2hyru91m6qked.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}
+    model: ${MULTIMODAL_MODEL:qwen3.7-plus}
+    timeout: ${MULTIMODAL_TIMEOUT:60}
+    max-tokens: ${MULTIMODAL_MAX_TOKENS:4096}
+
+  # ---------- 文生图模型配置 ----------
+  tti:
+    # 激活的文生图引擎
+    active-engine: ${TTI_ACTIVE_ENGINE:DALLE}
+
+    dalle:
+      api-key: ${DALLE_API_KEY:sk-ws-H.EDYLDXH.DW0L.MEYCIQDr-W2SyPtUAUdB-yMNIQQpDkA2Pai9Bq8RRcqui6s_PQIhAJeFDahdVdQ8Ed01b-yhcqpP2CahhW3IBHL82eYl8--v}
+      # 工作空间域名 + 原生路径 /api/v1/services/aigc/multimodal-generation/generation
+      base-url: ${DALLE_BASE_URL:https://ws-h7o2hyru91m6qked.cn-beijing.maas.aliyuncs.com/api/v1}
+      # 模型：qwen-image-2.0（百炼）/ dall-e-3（OpenAI）
+      model: ${DALLE_MODEL:qwen-image-2.0}
+      # 图片尺寸：1024x1024 / 512x512 等
+      size: ${DALLE_SIZE:1024*1024}
+      # 图片质量：standard / hd（仅 dall-e-3 支持 hd）
+      quality: ${DALLE_QUALITY:standard}
+      timeout: ${DALLE_TIMEOUT:60}
+
+  # ---------- 文档处理配置 ----------
+  document:
+    # Python 解释器路径（系统 PATH 中的 python 则保持默认）
+    python-path: ${DOCUMENT_PYTHON_PATH:python}
+    # Markdown 转文档脚本路径（相对项目根目录或绝对路径）
+    convert-script: ${DOCUMENT_CONVERT_SCRIPT:scripts/markdown_to_docx.py}
+    # 文档转换超时秒数
+    timeout: ${DOCUMENT_TIMEOUT:60}
+    # Tika 提取文本最大字符数（超过截断）
+    max-extract-chars: ${DOCUMENT_MAX_EXTRACT_CHARS:50000}
+    # 存入记忆时文档内容的占位符最大长度（防 Token 爆炸）
+    memory-placeholder-length: ${DOCUMENT_MEMORY_PLACEHOLDER:200}
+
+  voice:
+    # ---------- 语音 TTS（文字转语音）配置 ----------
+    tts:
+      # 是否启用 TTS 语音回复
+      enabled: ${TTS_ENABLED:true}
+      api-key: ${TTS_API_KEY:sk-ws-H.EDYLDXH.DW0L.MEYCIQDr-W2SyPtUAUdB-yMNIQQpDkA2Pai9Bq8RRcqui6s_PQIhAJeFDahdVdQ8Ed01b-yhcqpP2CahhW3IBHL82eYl8--v}
+      # 工作空间域名（qwen3-tts-flash 需走工作空间路由）
+      base-url: ${TTS_BASE_URL:https://ws-h7o2hyru91m6qked.cn-beijing.maas.aliyuncs.com}
+      # TTS 模型：qwen3-tts-instruct-flash（支持指令控制）/ qwen3-tts-flash / cosyvoice-v1 / qwen-tts
+      model: ${TTS_MODEL:qwen3-tts-instruct-flash}
+      # 百炼 Qwen-TTS 音色：
+      # 标准：Cherry/芊悦 Serena/苏瑶 Ethan/晨煦 Chelsie/千雪 MoMo/茉兔 Vivian/十三
+      #       Moon/月白 Maia/四月 Kai/凯 Bella/萌宝 Neil/阿闻 Seren/小婉 Stella/少女阿月
+      # 方言：Jada/上海-阿珍 Dylan/北京-晓东 Sunny/四川-晴儿 Rocky/粤语-阿强 Kiki/粤语-阿清
+      voice: ${TTS_VOICE:Cherry}
+      # 输出音频格式：mp3（推荐，微信支持）/ opus / aac / flac / wav
+      response-format: ${TTS_FORMAT:mp3}
+      # TTS 请求超时秒数
+      timeout: ${TTS_TIMEOUT:30}
+      # 用户发送语音后是否自动用 TTS 回复（需 enabled=true）
+      auto-voice-reply: ${TTS_AUTO_VOICE_REPLY:true}

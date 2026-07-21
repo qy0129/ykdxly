@@ -24,12 +24,12 @@ import java.util.Map;
 @Component
 public class ImageModelParser implements MultiModalParser<String> {
 
-    private final WebClient llmWebClient;
+    private final WebClient multimodalWebClient;
     private final LLMProperties properties;
 
-    public ImageModelParser(@Qualifier("llmWebClient") WebClient llmWebClient,
+    public ImageModelParser(@Qualifier("multimodalWebClient") WebClient multimodalWebClient,
                             LLMProperties properties) {
-        this.llmWebClient = llmWebClient;
+        this.multimodalWebClient = multimodalWebClient;
         this.properties = properties;
     }
 
@@ -55,16 +55,21 @@ public class ImageModelParser implements MultiModalParser<String> {
         try {
             // 构建多模态请求体（OpenAI vision 格式）
             Map<String, Object> requestBody = buildVisionRequest(mediaData);
+            LLMProperties.MultimodalConfig mm = properties.getMultimodal();
+            String apiKey = mm.getApiKey() != null && !mm.getApiKey().isBlank()
+                    ? mm.getApiKey() : properties.getApiKey();
 
-            // 调用 LLM 视觉接口
+            log.info("【模型调用】图像识别 - model={}", mm.getModel());
+
+            // 调用多模态视觉接口
             @SuppressWarnings("unchecked")
-            Map<String, Object> responseBody = llmWebClient.post()
+            Map<String, Object> responseBody = multimodalWebClient.post()
                     .uri("/chat/completions")
-                    .header("Authorization", "Bearer " + properties.getApiKey())
+                    .header("Authorization", "Bearer " + apiKey)
                     .bodyValue(requestBody)
                     .retrieve()
                     .bodyToMono(Map.class)
-                    .timeout(Duration.ofSeconds(properties.getTimeout()))
+                    .timeout(Duration.ofSeconds(mm.getTimeout()))
                     .block();
 
             // 解析响应
@@ -102,9 +107,9 @@ public class ImageModelParser implements MultiModalParser<String> {
         );
 
         return Map.of(
-                "model", properties.getModel(),
+                "model", properties.getMultimodal().getModel(),
                 "messages", List.of(systemMessage, userMessage),
-                "max_tokens", properties.getMaxTokens()
+                "max_tokens", properties.getMultimodal().getMaxTokens()
         );
     }
 

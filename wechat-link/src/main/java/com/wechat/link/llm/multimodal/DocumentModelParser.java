@@ -25,12 +25,12 @@ import java.util.Map;
 @Component
 public class DocumentModelParser implements MultiModalParser<String> {
 
-    private final WebClient llmWebClient;
+    private final WebClient multimodalWebClient;
     private final LLMProperties properties;
 
-    public DocumentModelParser(@Qualifier("llmWebClient") WebClient llmWebClient,
+    public DocumentModelParser(@Qualifier("multimodalWebClient") WebClient multimodalWebClient,
                                LLMProperties properties) {
-        this.llmWebClient = llmWebClient;
+        this.multimodalWebClient = multimodalWebClient;
         this.properties = properties;
     }
 
@@ -54,17 +54,22 @@ public class DocumentModelParser implements MultiModalParser<String> {
         log.info("[DocumentModelParser] 处理文件: {}", mediaData);
 
         try {
-            // 将文件信息传给 LLM，让 AI 根据文件名给出合理回复
+            // 将文件信息传给 LLM
             Map<String, Object> requestBody = buildFilePrompt(mediaData);
+            LLMProperties.MultimodalConfig mm = properties.getMultimodal();
+            String apiKey = mm.getApiKey() != null && !mm.getApiKey().isBlank()
+                    ? mm.getApiKey() : properties.getApiKey();
+
+            log.info("【模型调用】文档解析 - model={}", mm.getModel());
 
             @SuppressWarnings("unchecked")
-            Map<String, Object> responseBody = llmWebClient.post()
+            Map<String, Object> responseBody = multimodalWebClient.post()
                     .uri("/chat/completions")
-                    .header("Authorization", "Bearer " + properties.getApiKey())
+                    .header("Authorization", "Bearer " + apiKey)
                     .bodyValue(requestBody)
                     .retrieve()
                     .bodyToMono(Map.class)
-                    .timeout(Duration.ofSeconds(properties.getTimeout()))
+                    .timeout(Duration.ofSeconds(mm.getTimeout()))
                     .block();
 
             return parseResponse(responseBody);
@@ -85,9 +90,9 @@ public class DocumentModelParser implements MultiModalParser<String> {
                 "content", "我发送了一个文件：" + fileName
         );
         return Map.of(
-                "model", properties.getModel(),
+                "model", properties.getMultimodal().getModel(),
                 "messages", List.of(systemMessage, userMessage),
-                "max_tokens", properties.getMaxTokens(),
+                "max_tokens", properties.getMultimodal().getMaxTokens(),
                 "temperature", properties.getTemperature()
         );
     }
