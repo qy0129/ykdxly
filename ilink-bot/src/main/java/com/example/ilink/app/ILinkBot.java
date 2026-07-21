@@ -5,6 +5,8 @@ import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.core.listener.OnMessageListener;
 import com.github.wechat.ilink.sdk.core.model.WeixinMessage;
 
+import java.awt.Desktop;
+import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Base64;
@@ -46,14 +48,7 @@ public class ILinkBot {
             this.client = client;
 
             String qrcodeImg = client.executeLogin();
-            if (qrcodeImg.startsWith("http")) {
-                System.out.println("请在浏览器打开此链接扫码登录:");
-                System.out.println(qrcodeImg + "\n");
-            } else {
-                String raw = qrcodeImg.replaceFirst("^data:image/[a-zA-Z]+;base64,", "");
-                Files.write(Path.of("qrcode.png"), Base64.getDecoder().decode(raw));
-                System.out.println("二维码已保存到 qrcode.png，请打开并用微信扫码登录\n");
-            }
+            showLoginQrCode(qrcodeImg);
 
             System.out.println("等待扫码中...");
             while (!client.isLoggedIn()) {
@@ -68,6 +63,41 @@ public class ILinkBot {
             Thread.currentThread().interrupt();
         } catch (Exception e) {
             System.err.println("启动失败: " + e.getMessage());
+        }
+    }
+
+    private void showLoginQrCode(String qrcode) throws Exception {
+        if (qrcode.startsWith("http")) {
+            System.out.println("正在打开微信登录二维码页面:");
+            System.out.println(qrcode + "\n");
+            openInBrowser(qrcode);
+            return;
+        }
+
+        String raw = qrcode.replaceFirst("^data:image/[a-zA-Z]+;base64,", "");
+        Path path = Path.of("qrcode.png").toAbsolutePath();
+        Files.write(path, Base64.getDecoder().decode(raw));
+        System.out.println("二维码已保存到 " + path + "，请用微信扫码登录\n");
+        openFile(path);
+    }
+
+    private void openInBrowser(String url) {
+        try {
+            if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
+                Desktop.getDesktop().browse(URI.create(url));
+            }
+        } catch (Exception e) {
+            System.err.println("无法自动打开浏览器，请手动打开上面的链接: " + e.getMessage());
+        }
+    }
+
+    private void openFile(Path path) {
+        try {
+            if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) {
+                Desktop.getDesktop().open(path.toFile());
+            }
+        } catch (Exception e) {
+            System.err.println("无法自动打开二维码图片，请手动打开: " + path);
         }
     }
 
