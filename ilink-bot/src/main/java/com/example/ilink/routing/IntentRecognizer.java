@@ -84,7 +84,10 @@ public final class IntentRecognizer {
                     result.get("document_action").getAsString(),
                     result.get("output_file_type").getAsString(),
                     result.get("weather_location").getAsString(),
-                    result.get("weather_day").getAsString());
+                    result.get("weather_day").getAsString(),
+                    string(result, "plan_goal"),
+                    string(result, "plan_deadline"),
+                    string(result, "plan_available_time"));
         } catch (Exception e) {
             System.err.println("[意图识别] 识别失败：" + e.getMessage());
             return null;
@@ -128,6 +131,12 @@ public final class IntentRecognizer {
                 + "和平镇填 Heping；用户提供了省、市、县时也要保留这些英文行政区信息。"
                 + "今天或当前天气时 weather_day=today，明天天气时 weather_day=tomorrow。"
                 + "用户未说明地点时 weather_location 为空。\n\n");
+        prompt.append("11. task_plan：用户要求制定学习、项目、工作或生活任务计划时使用。"
+                + "plan_goal 填写最终目标，plan_deadline 保留用户给出的截止时间表达，例如后天或3天后，"
+                + "plan_available_time 填写用户说明的每天或各时间段可用时间。"
+                + "用户同时要求生成Word或PDF时仍然使用task_plan，并设置output_file_type。\n");
+        prompt.append("12. plan_adjust：用户要求调整、延期、重新安排当前计划，或说明某项任务已经完成时使用。\n");
+        prompt.append("13. plan_progress：用户询问当前计划完成情况、下一项任务或还剩什么时使用。\n\n");
 
         prompt.append("Document rules: when has_document=true, use document_summary for summarizing, document_question for questions, document_edit when the user asks to modify, rewrite, delete, add, or correct the current document, and generate_file when the user asks for a PDF or DOCX output. document_action must be none, summary, question, or edit. output_file_type must be none, docx, or pdf.\n");
         prompt.append("输出规则：\n");
@@ -140,7 +149,7 @@ public final class IntentRecognizer {
         prompt.append("提交结果前逐项检查：音色要求是否正确写入voice_style；语音要求是否正确写入reply_mode；"
                 + "没有明确生成图片要求时intent绝不能为draw。");
         prompt.append("\n输出必须包含以下全部字段："
-                + "{\"intent\":\"chat|draw|persona_switch|audio_transcribe|image_action|draw_size|document_summary|document_question|generate_file|document_edit|weather\","
+                + "{\"intent\":\"chat|draw|persona_switch|audio_transcribe|image_action|draw_size|document_summary|document_question|generate_file|document_edit|weather|task_plan|plan_adjust|plan_progress\","
                 + "\"en_prompt\":\"\",\"cn_description\":\"\","
                 + "\"image_size\":\"none|1024x1024|768x1024|1024x576\","
                 + "\"reply_mode\":\"keep|text|voice|both\","
@@ -148,7 +157,8 @@ public final class IntentRecognizer {
                 + "\"persona\":\"\",\"image_action\":\"none|analyze|solve|edit|clarify\","
                 + "\"image_prompt\":\"\",\"audio_source\":\"any|bot|user\",\"audio_index\":1,"
                 + "\"document_action\":\"none|summary|question\",\"output_file_type\":\"none|docx|pdf\","
-                + "\"weather_location\":\"\",\"weather_day\":\"today|tomorrow\"}。");
+                + "\"weather_location\":\"\",\"weather_day\":\"today|tomorrow\","
+                + "\"plan_goal\":\"\",\"plan_deadline\":\"\",\"plan_available_time\":\"\"}。");
         return prompt.toString();
     }
 
@@ -163,6 +173,12 @@ public final class IntentRecognizer {
             }
         }
         return JsonParser.parseString(json).getAsJsonObject();
+    }
+
+    /** 读取可选字符串字段，模型省略时返回空字符串。 */
+    private String string(JsonObject object, String name) {
+        return object.has(name) && !object.get(name).isJsonNull()
+                ? object.get(name).getAsString() : "";
     }
 
 
