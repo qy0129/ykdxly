@@ -1,6 +1,7 @@
 package com.example.ilink.conversation;
 
 import com.example.ilink.config.Config;
+import com.example.ilink.storage.MySqlStore;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -14,6 +15,7 @@ import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -29,8 +31,10 @@ public final class ChatHistoryStore {
 
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
+    private final MySqlStore database = MySqlStore.getInstance();
     private final Map<String, List<JsonObject>> chatHistory = new ConcurrentHashMap<>();
     private final Map<String, String> conversationSummary = new ConcurrentHashMap<>();
+    private final Set<String> loadedUsers = ConcurrentHashMap.newKeySet();
 
     /** 创建历史存储器，并注入用于摘要压缩的 HTTP 客户端。 */
     public ChatHistoryStore(HttpClient httpClient) {
@@ -43,6 +47,7 @@ public final class ChatHistoryStore {
 
     /** 追加一轮用户消息和机器人回复。 */
     public void add(String userId, String userContent, String assistantContent) {
+        ensureLoaded(userId);
         List<JsonObject> history = chatHistory.computeIfAbsent(userId, k -> Collections.synchronizedList(new LinkedList<>()));
         JsonObject userMsg = new JsonObject();
         userMsg.addProperty("role", "user");
@@ -52,6 +57,7 @@ public final class ChatHistoryStore {
         assistantMsg.addProperty("role", "assistant");
         assistantMsg.addProperty("content", assistantContent);
         history.add(assistantMsg);
+        database.saveConversation(userId, userContent, assistantContent);
         if (history.size() >= MAX_HISTORY) {
             compress(userId);
         }
@@ -59,6 +65,7 @@ public final class ChatHistoryStore {
 
     /** 将当前用户的摘要和最近消息复制到模型请求数组。 */
     public void addHistoryMessages(JsonArray target, String userId) {
+        ensureLoaded(userId);
         String summary = conversationSummary.get(userId);
         if (summary != null && !summary.isEmpty()) {
             JsonObject summaryMsg = new JsonObject();
@@ -93,8 +100,33 @@ public final class ChatHistoryStore {
 
         try {
             String summary = callSummary(toSummarize.toString());
-            conversationSummary.merge(userId, summary, (old, val) -> old + "\n" + val);
+            if (summary == null || summary.isBlank()) return;
+            String mergedSummary = conversationSummary.merge(
+                    userId, summary, (old, val) -> old + "\n" + val);
+            database.saveSummaryAndDeleteOldest(userId, mergedSummary, COMPRESS_BATCH);
         } catch (Exception ignored) {}
+    }
+
+    /** 用户首次访问时从 MySQL 恢复摘要和最近消息。 */
+    private void ensureLoaded(String userId) {
+        if (!database.isAvailable() || !loadedUsers.add(userId)) return;
+
+        String summary = database.loadConversationSummary(userId);
+        if (summary != null && !summary.isBlank()) {
+            conversationSummary.put(userId, summary);
+        }
+
+        List<MySqlStore.ChatEntry> storedMessages = database.loadRecentMessages(userId, MAX_HISTORY);
+        if (storedMessages.isEmpty()) return;
+
+        List<JsonObject> history = Collections.synchronizedList(new LinkedList<>());
+        for (MySqlStore.ChatEntry storedMessage : storedMessages) {
+            JsonObject message = new JsonObject();
+            message.addProperty("role", storedMessage.role());
+            message.addProperty("content", storedMessage.content());
+            history.add(message);
+        }
+        chatHistory.put(userId, history);
     }
 
     /** 调用模型把旧消息整理成简短摘要。 */

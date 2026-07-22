@@ -87,7 +87,26 @@ public final class IntentRecognizer {
                     result.get("weather_day").getAsString(),
                     string(result, "plan_goal"),
                     string(result, "plan_deadline"),
-                    string(result, "plan_available_time"));
+                    string(result, "plan_available_time"),
+                    string(result, "calculation_operation"),
+                    string(result, "calculation_left"),
+                    string(result, "calculation_right"),
+                    string(result, "calculation_quantity"),
+                    string(result, "calculation_unit_price"),
+                    string(result, "calculation_discount_percent"),
+                    string(result, "travel_origin"),
+                    string(result, "travel_destination"),
+                    string(result, "travel_departure_time"),
+                    integer(result, "time_budget_minutes", 0),
+                    string(result, "meal_keyword"),
+                    string(result, "diet_goal"),
+                    string(result, "nearby_location"),
+                    string(result, "nearby_action"),
+                    string(result, "calendar_action"),
+                    string(result, "calendar_title"),
+                    string(result, "calendar_time"),
+                    string(result, "calendar_recurrence"),
+                    integer(result, "calendar_reminder_minutes", 0));
         } catch (Exception e) {
             System.err.println("[意图识别] 识别失败：" + e.getMessage());
             return null;
@@ -132,11 +151,31 @@ public final class IntentRecognizer {
                 + "今天或当前天气时 weather_day=today，明天天气时 weather_day=tomorrow。"
                 + "用户未说明地点时 weather_location 为空。\n\n");
         prompt.append("11. task_plan：用户要求制定学习、项目、工作或生活任务计划时使用。"
-                + "plan_goal 填写最终目标，plan_deadline 保留用户给出的截止时间表达，例如后天或3天后，"
-                + "plan_available_time 填写用户说明的每天或各时间段可用时间。"
+                + "plan_goal 填写最终目标，plan_deadline 只填写真正的截止日期或时刻，例如后天或3天后，"
+                + "plan_available_time 填写每天或各时间段可用时间。若用户说‘我有一小时写作业’，"
+                + "这不是截止时间，time_budget_minutes=60，plan_deadline 为空。"
                 + "用户同时要求生成Word或PDF时仍然使用task_plan，并设置output_file_type。\n");
         prompt.append("12. plan_adjust：用户要求调整、延期、重新安排当前计划，或说明某项任务已经完成时使用。\n");
         prompt.append("13. plan_progress：用户询问当前计划完成情况、下一项任务或还剩什么时使用。\n\n");
+        prompt.append("14. calculator：用户要求四则运算、百分比、折扣、总价、单位换算、汇率、进制、BMI、个税、房贷、"
+                + "中文大写金额或亲戚称呼计算时使用。自然语言参数由 CalculatorService 再调用专用工具处理；"
+                + "基础四则运算仍可直接使用 calculation_operation、calculation_left、calculation_right 等字段。\n\n");
+        prompt.append("15. expense_split：用户要求多人 AA、平分消费、根据不同已付款金额结算或计算谁该转给谁时使用。"
+                + "例如“我们三个人吃饭300元，我付了200，张三付了100，怎么算”。\n");
+        prompt.append("16. deadline_countdown：用户询问距离某个截止日期或时间还有多久、剩余几天几小时、是否超时时使用。"
+                + "将明确的时间表达写入 plan_deadline，例如明天下午六点、2026-07-25 18:00。\n\n");
+        prompt.append("17. travel_plan：用户给出起点、终点并要求路线、导航、出行安排或中途停留时使用。"
+                + "travel_origin、travel_destination 必须分别填写地点；‘一个小时’等可用时长填入time_budget_minutes。"
+                + "中途想吃面、咖啡等填入meal_keyword；明确出发时间填travel_departure_time。"
+                + "即使用户说‘帮我规划’，只要核心是从A到B出行，必须是travel_plan，绝不能是task_plan。\n");
+        prompt.append("18. diet_plan：用户要求饮食规划、外卖推荐、减脂餐、增肌餐或控糖餐时使用。"
+                + "diet_goal 填减脂、增肌、控糖、维持体重或空字符串；不要把附近餐厅搜索判为diet_plan。\n");
+        prompt.append("19. nearby_food：用户说自己在某位置、询问附近有什么好吃的、附近餐厅或附近外卖时使用。"
+                + "nearby_location 填用户明确说出的地点，未重复时可留空；nearby_action 只能是remember或search。\n");
+        prompt.append("20. calendar_event：用户创建、查询、完成、取消或延后提醒/日程时使用。"
+                + "calendar_action 为create|list|complete|cancel|snooze；创建时填写calendar_title、calendar_time、"
+                + "calendar_recurrence(none|daily|weekly|monthly|yearly)和calendar_reminder_minutes。\n");
+        prompt.append("21. planning_capabilities：用户询问‘你可以帮我做什么规划’、规划功能有哪些时使用。\n\n");
 
         prompt.append("Document rules: when has_document=true, use document_summary for summarizing, document_question for questions, document_edit when the user asks to modify, rewrite, delete, add, or correct the current document, and generate_file when the user asks for a PDF or DOCX output. document_action must be none, summary, question, or edit. output_file_type must be none, docx, or pdf.\n");
         prompt.append("输出规则：\n");
@@ -149,7 +188,7 @@ public final class IntentRecognizer {
         prompt.append("提交结果前逐项检查：音色要求是否正确写入voice_style；语音要求是否正确写入reply_mode；"
                 + "没有明确生成图片要求时intent绝不能为draw。");
         prompt.append("\n输出必须包含以下全部字段："
-                + "{\"intent\":\"chat|draw|persona_switch|audio_transcribe|image_action|draw_size|document_summary|document_question|generate_file|document_edit|weather|task_plan|plan_adjust|plan_progress\","
+                + "{\"intent\":\"chat|draw|persona_switch|audio_transcribe|image_action|draw_size|document_summary|document_question|generate_file|document_edit|weather|task_plan|plan_adjust|plan_progress|calculator|expense_split|deadline_countdown|travel_plan|diet_plan|nearby_food|calendar_event|planning_capabilities\","
                 + "\"en_prompt\":\"\",\"cn_description\":\"\","
                 + "\"image_size\":\"none|1024x1024|768x1024|1024x576\","
                 + "\"reply_mode\":\"keep|text|voice|both\","
@@ -158,7 +197,17 @@ public final class IntentRecognizer {
                 + "\"image_prompt\":\"\",\"audio_source\":\"any|bot|user\",\"audio_index\":1,"
                 + "\"document_action\":\"none|summary|question\",\"output_file_type\":\"none|docx|pdf\","
                 + "\"weather_location\":\"\",\"weather_day\":\"today|tomorrow\","
-                + "\"plan_goal\":\"\",\"plan_deadline\":\"\",\"plan_available_time\":\"\"}。");
+                + "\"plan_goal\":\"\",\"plan_deadline\":\"\",\"plan_available_time\":\"\","
+                + "\"calculation_operation\":\"add|subtract|multiply|divide|percentage|total_price\","
+                + "\"calculation_left\":\"0\",\"calculation_right\":\"0\","
+                + "\"calculation_quantity\":\"1\",\"calculation_unit_price\":\"0\","
+                + "\"calculation_discount_percent\":\"0\","
+                + "\"travel_origin\":\"\",\"travel_destination\":\"\",\"travel_departure_time\":\"\","
+                + "\"time_budget_minutes\":0,\"meal_keyword\":\"\",\"diet_goal\":\"\","
+                + "\"nearby_location\":\"\",\"nearby_action\":\"remember|search\","
+                + "\"calendar_action\":\"create|list|complete|cancel|snooze\",\"calendar_title\":\"\","
+                + "\"calendar_time\":\"\",\"calendar_recurrence\":\"none|daily|weekly|monthly|yearly\","
+                + "\"calendar_reminder_minutes\":0}。");
         return prompt.toString();
     }
 
@@ -179,6 +228,16 @@ public final class IntentRecognizer {
     private String string(JsonObject object, String name) {
         return object.has(name) && !object.get(name).isJsonNull()
                 ? object.get(name).getAsString() : "";
+    }
+
+    /** 读取可选整数，模型遗漏或格式异常时使用默认值，避免路由失败影响普通聊天。 */
+    private int integer(JsonObject object, String name, int defaultValue) {
+        try {
+            return object.has(name) && !object.get(name).isJsonNull()
+                    ? object.get(name).getAsInt() : defaultValue;
+        } catch (RuntimeException ignored) {
+            return defaultValue;
+        }
     }
 
 

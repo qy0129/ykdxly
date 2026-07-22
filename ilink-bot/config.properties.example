@@ -17,3 +17,9 @@ audio.dir=data/audio
 media.dir=data/media
 ffmpeg.command=ffmpeg
 silk.decoder.command=auto
+database.enabled=false
+database.url=jdbc:mysql://127.0.0.1:3306/ilink_bot?useUnicode=true&characterEncoding=UTF-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true&connectTimeout=5000&socketTimeout=10000
+database.username=root
+database.password=你的MySQL密码
+database.bot.id=ilink-bot-1
+amap.api.key=你的高德Web服务Key

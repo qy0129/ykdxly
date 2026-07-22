@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>WeChat Bot Auth Console</title>
+<link rel="stylesheet" href="../static/css/qrcode.css">
+</head>
+<body>
+
+<div class="stream-layer">
+  <div class="stream-bar sb1"></div>
+  <div class="stream-bar sb2"></div>
+  <div class="stream-bar sb3"></div>
+  <div class="stream-bar sb4"></div>
+  <div class="stream-bar sb5"></div>
+  <div class="stream-bar sb6"></div>
+  <div class="stream-bar sb7"></div>
+  <div class="stream-bar sb8"></div>
+  <div class="stream-bar sb9"></div>
+  <div class="stream-bar sb10"></div>
+  <div class="stream-bar sb11"></div>
+  <div class="stream-bar sb12"></div>
+  <div class="stream-bar sb13"></div>
+  <div class="stream-bar sb14"></div>
+  <div class="stream-bar sbv sbv1"></div>
+  <div class="stream-bar sbv sbv2"></div>
+  <div class="stream-bar sbv sbv3"></div>
+  <div class="stream-bar sbv sbv4"></div>
+  <div class="stream-bar sbv sbv5"></div>
+  <div class="stream-bar sbv sbv6"></div>
+  <div class="stream-bar sbv sbv7"></div>
+  <div class="stream-bar sbv sbv8"></div>
+</div>
+
+<div class="float-txt ft1">WECHAT LINK · QR AUTH PROTOCOL</div>
+<div class="float-txt ft2">SESSION CHANNEL · SECURE ACCESS</div>
+<div class="float-txt ft3">DEVICE HANDSHAKE · AUTH STREAM</div>
+<div class="float-txt ft4">SYSTEM ONLINE · CHANNEL STABLE</div>
+<div class="float-txt ft5">WAITING FOR SCAN</div>
+<div class="float-txt ft6">NODE 07</div>
+
+<div class="left-track">
+  <div class="item"><span class="dot"></span>BOT NODE <span class="v">/ 07</span></div>
+  <div class="item"><span class="dot"></span>LINK STATUS <span class="v">/ READY</span></div>
+  <div class="item"><span class="dot"></span>PROTOCOL <span class="v">/ ILINK</span></div>
+  <div class="item"><span class="dot"></span>DEVICE <span class="v">/ MOBILE</span></div>
+  <div class="item"><span class="dot"></span>SIGNAL <span class="v">/ STABLE</span></div>
+  <div class="item"><span class="dot"></span>AUTH MODE <span class="v">/ QR</span></div>
+  <div class="item"><span class="dot" style="background:var(--faint);box-shadow:none"></span>PACKET <span class="v">0021</span></div>
+  <div class="item"><span class="dot" style="background:var(--faint);box-shadow:none"></span>SYNC <span class="v">98.4%</span></div>
+</div>
+
+<div class="right-track">
+  <div class="item">QR AUTH GATE</div>
+  <div class="item">SECURITY LEVEL <span class="v">/ A</span></div>
+  <div class="item">SESSION ID <span class="v">/ WX-2048</span></div>
+  <div class="item">SCAN VECTOR</div>
+  <div class="item">ACCESS CONTROL</div>
+  <div class="item">TOKEN READY</div>
+  <div class="item">WAITING INPUT</div>
+</div>
+
+<div class="hex-chars" id="hexDisplay"></div>
+
+<div class="dashboard">
+
+  <div class="top-section">
+    <div class="sys-tag"><span class="dot-on"></span> WECHAT-BOT <span class="hl">OS</span></div>
+    <div class="sys-tag"><span class="dot-on"></span> CONNECTION <span class="hl">ACTIVE</span></div>
+    <div class="ver">v3.2.1 / ${GEN_TIME}</div>
+  </div>
+
+  <div class="center-area">
+
+    <div class="robot-wrap">
+      <svg class="robot-svg" viewBox="0 0 200 280" fill="none">
+        <line x1="100" y1="18" x2="100" y2="48" stroke="#00E5E8" stroke-width="2" opacity="0.5">
+          <animate attributeName="opacity" values="0.3;0.7;0.3" dur="1.2s" repeatCount="indefinite"/>
+        </line>
+        <circle cx="100" cy="15" r="5" fill="#00E5E8" opacity="0.7">
+          <animate attributeName="r" values="4;6;4" dur="1.2s" repeatCount="indefinite"/>
+          <animate attributeName="opacity" values="0.4;1;0.4" dur="1.2s" repeatCount="indefinite"/>
+        </circle>
+        <rect x="55" y="48" width="90" height="76" rx="16" fill="none" stroke="#00E5E8" stroke-width="2" opacity="0.35"/>
+        <rect x="60" y="53" width="80" height="66" rx="12" fill="#0D1117" stroke="#1A212E" stroke-width="1.5" class="body-part"/>
+        <rect x="48" y="74" width="10" height="20" rx="3" fill="none" stroke="#00E5E8" stroke-width="1.5" opacity="0.4"/>
+        <rect x="142" y="74" width="10" height="20" rx="3" fill="none" stroke="#00E5E8" stroke-width="1.5" opacity="0.4"/>
+        <circle cx="82" cy="80" r="14" fill="none" stroke="#00E5E8" stroke-width="1.8"/>
+        <circle cx="118" cy="80" r="14" fill="none" stroke="#00E5E8" stroke-width="1.8"/>
+        <ellipse cx="82" cy="80" rx="6" ry="6" fill="#00E5E8" class="eye">
+          <animate attributeName="ry" values="6;1;6" dur="3s" repeatCount="indefinite" keyTimes="0;0.03;0.06"/>
+          <animate attributeName="rx" values="6;1;6" dur="3s" repeatCount="indefinite" keyTimes="0;0.03;0.06"/>
+        </ellipse>
+        <ellipse cx="118" cy="80" rx="6" ry="6" fill="#00E5E8" class="eye eye-r">
+          <animate attributeName="ry" values="6;1;6" dur="3s" begin="0.15s" repeatCount="indefinite" keyTimes="0;0.03;0.06"/>
+          <animate attributeName="rx" values="6;1;6" dur="3s" begin="0.15s" repeatCount="indefinite" keyTimes="0;0.03;0.06"/>
+        </ellipse>
+        <circle cx="82" cy="80" r="10" fill="none" stroke="#00E5E8" stroke-width="4" opacity="0.15">
+          <animate attributeName="r" values="10;14;10" dur="2s" repeatCount="indefinite"/>
+          <animate attributeName="opacity" values="0.1;0.25;0.1" dur="2s" repeatCount="indefinite"/>
+        </circle>
+        <circle cx="118" cy="80" r="10" fill="none" stroke="#00E5E8" stroke-width="4" opacity="0.15">
+          <animate attributeName="r" values="10;14;10" dur="2s" begin="0.3s" repeatCount="indefinite"/>
+          <animate attributeName="opacity" values="0.1;0.25;0.1" dur="2s" begin="0.3s" repeatCount="indefinite"/>
+        </circle>
+        <rect x="82" y="100" width="36" height="5" rx="2.5" fill="#B0E800" opacity="0.5"/>
+        <rect x="88" y="107" width="24" height="3" rx="1.5" fill="#B0E800" opacity="0.3"/>
+        <rect x="90" y="124" width="20" height="12" rx="4" fill="#0D1117" stroke="#1A212E" stroke-width="1.5" class="body-part"/>
+        <rect x="62" y="136" width="76" height="72" rx="12" fill="#0D1117" stroke="#1A212E" stroke-width="1.5" class="body-part"/>
+        <rect x="62" y="136" width="76" height="72" rx="12" fill="none" stroke="#00E5E8" stroke-width="0.8" opacity="0.15"/>
+        <rect x="90" y="152" width="20" height="14" rx="4" fill="none" stroke="#B0E800" stroke-width="1.2" opacity="0.6">
+          <animate attributeName="opacity" values="0.3;0.8;0.3" dur="2.4s" repeatCount="indefinite"/>
+        </rect>
+        <circle cx="100" cy="159" r="3" fill="#B0E800" class="light">
+          <animate attributeName="opacity" values="0.2;0.8;0.2" dur="2.4s" repeatCount="indefinite"/>
+        </circle>
+        <line x1="76" y1="180" x2="124" y2="180" stroke="#00E5E8" stroke-width="1" opacity="0.15"/>
+        <line x1="76" y1="188" x2="124" y2="188" stroke="#00E5E8" stroke-width="1" opacity="0.1"/>
+        <g>
+          <animateTransform attributeName="transform" type="rotate" values="-6,55,150;12,55,150;-6,55,150" dur="0.8s" repeatCount="indefinite"/>
+          <rect x="44" y="140" width="14" height="28" rx="6" fill="#0D1117" stroke="#1A212E" stroke-width="1.5" class="body-part"/>
+          <rect x="40" y="164" width="14" height="28" rx="6" fill="#0D1117" stroke="#1A212E" stroke-width="1.5" class="body-part"/>
+          <circle cx="47" cy="197" r="8" fill="#0D1117" stroke="#00E5E8" stroke-width="1.5" opacity="0.6" class="body-part">
+            <animate attributeName="opacity" values="0.3;0.8;0.3" dur="1.6s" repeatCount="indefinite"/>
+          </circle>
+        </g>
+        <g>
+          <animateTransform attributeName="transform" type="rotate" values="4,145,150;-8,145,150;4,145,150" dur="0.8s" repeatCount="indefinite"/>
+          <rect x="142" y="140" width="14" height="28" rx="6" fill="#0D1117" stroke="#1A212E" stroke-width="1.5" class="body-part"/>
+          <rect x="146" y="164" width="14" height="28" rx="6" fill="#0D1117" stroke="#1A212E" stroke-width="1.5" class="body-part"/>
+          <circle cx="153" cy="197" r="8" fill="#0D1117" stroke="#00E5E8" stroke-width="1.5" opacity="0.6" class="body-part">
+            <animate attributeName="opacity" values="0.3;0.8;0.3" dur="1.6s" begin="0.5s" repeatCount="indefinite"/>
+          </circle>
+        </g>
+        <g>
+          <animateTransform attributeName="transform" type="rotate" values="5,82,208;-5,82,208;5,82,208" dur="0.8s" repeatCount="indefinite"/>
+          <rect x="74" y="208" width="16" height="24" rx="5" fill="#0D1117" stroke="#1A212E" stroke-width="1.5" class="body-part"/>
+          <rect x="72" y="226" width="20" height="18" rx="4" fill="#0D1117" stroke="#1A212E" stroke-width="1.5" class="body-part"/>
+        </g>
+        <g>
+          <animateTransform attributeName="transform" type="rotate" values="-5,118,208;5,118,208;-5,118,208" dur="0.8s" repeatCount="indefinite"/>
+          <rect x="110" y="208" width="16" height="24" rx="5" fill="#0D1117" stroke="#1A212E" stroke-width="1.5" class="body-part"/>
+          <rect x="108" y="226" width="20" height="18" rx="4" fill="#0D1117" stroke="#1A212E" stroke-width="1.5" class="body-part"/>
+        </g>
+        <animateTransform attributeName="transform" type="translate" values="0,0;0,-3;0,0" dur="0.8s" repeatCount="indefinite"/>
+      </svg>
+    </div>
+
+    <div class="qr-panel">
+      <div class="qr-title">
+        WECHAT ROBOT AUTHENTICATION
+        <small>微信机器人登录认证</small>
+      </div>
+
+      <button class="qr-box" id="qrTrigger" type="button" aria-label="放大微信登录二维码">
+        <span class="b b1"></span><span class="b b2"></span>
+        <span class="b b3"></span><span class="b b4"></span>
+        <img id="qrImage" src="${QR_CODE_DATA}" alt="微信登录二维码">
+        <div class="scanline"></div>
+        <div class="qr-overlay" id="overlay">
+          <div class="msg">QR CODE EXPIRED</div>
+          <div class="sub">二维码已失效，程序正在刷新二维码</div>
+        </div>
+      </button>
+
+      <div class="status-row">
+        <span class="stat">WAITING FOR MOBILE SCAN</span>
+        <span class="stat" style="opacity:0.5">|</span>
+        <span class="stat">等待手机微信扫码</span>
+      </div>
+
+      <div class="countdown" id="countdown">00:05:00</div>
+      <div class="pbar"><div class="pbar-fill" id="pbar"></div></div>
+      <div style="font-size:8px;color:var(--faint);letter-spacing:0.5px;margin-top:2px">EXPIRE: ${EXPIRE_TIME}</div>
+    </div>
+
+  </div>
+
+  <div class="bottom-term">
+    <div class="term-box">
+      <div class="term-hdr">
+        <span class="term-dot d1"></span><span class="term-dot d2"></span><span class="term-dot d3"></span>
+        <span>SYS_CONSOLE / LOG</span>
+      </div>
+      <div class="term-body" id="termBody"></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="qr-modal" id="qrModal" aria-hidden="true" role="dialog" aria-modal="true" aria-label="微信登录二维码">
+  <div class="qr-modal-card">
+    <button class="qr-modal-close" id="qrModalClose" type="button" aria-label="关闭二维码放大视图">&times;</button>
+    <img id="qrModalImage" alt="放大的微信登录二维码">
+    <div class="qr-modal-scan"></div>
+  </div>
+</div>
+
+<script>window.QR_EXPIRE_SECONDS = ${QR_EXPIRE_SECONDS};</script>
+<script src="../static/js/qrcode.js" defer></script>
+</body>
+</html>

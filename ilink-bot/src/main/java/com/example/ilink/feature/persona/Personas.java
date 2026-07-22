@@ -1,11 +1,17 @@
 package com.example.ilink.feature.persona;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.net.JarURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.Enumeration;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 import java.util.stream.Collectors;
 
 /**
@@ -14,10 +20,8 @@ import java.util.stream.Collectors;
  * 每个人设对应 src/main/resources/personas/ 下的一个 .txt 文件，
  * 文件名即触发词（如"小甜妹.txt"），内容为详细人设 prompt。
  *
- * 如需新增人设：
- * 1. 在 src/main/resources/personas/ 下创建 {触发词}.txt 文件
- * 2. 在同目录的 index.txt 中增加该文件名
- * 3. 写入详细的人设描述并重启机器人
+ * 如需新增人设：在 src/main/resources/personas/ 下创建 {触发词}.txt 文件，
+ * 写入详细人设描述后重启机器人即可。
  *
  * 使用示例：
  *   history.setPersona(userId, "小甜妹");
@@ -27,8 +31,8 @@ import java.util.stream.Collectors;
 /**
  * 人设资源加载器。
  *
- * <p>从 classpath 的 {@code personas/index.txt} 读取人设名称，再加载对应的
- * 文本提示词。业务层只通过名称获取提示词，不直接操作资源文件。</p>
+ * <p>扫描 classpath 的 {@code personas/} 目录并加载全部文本提示词，
+ * 不依赖额外的索引文件。</p>
  */
 public class Personas {
 
@@ -38,36 +42,49 @@ public class Personas {
         loadFromResources();
     }
 
-    /** 从 index.txt 加载全部人设名称和对应提示词。 */
+    /** 从资源目录或打包 JAR 中扫描全部 .txt 人设文件。 */
     private static void loadFromResources() {
         try {
-            String index = loadResource("/personas/index.txt");
-            if (index == null) {
-                System.err.println("[Personas] 未找到人格索引文件: /personas/index.txt");
-                return;
-            }
-
-            for (String line : index.split("\\R")) {
-                String fileName = line.trim();
-                if (fileName.isEmpty() || fileName.startsWith("#")) {
-                    continue;
-                }
-
-                String key = fileName.replaceFirst("\\.txt$", "");
-                String content = loadResource("/personas/" + fileName);
-                if (content != null && !content.isBlank()) {
-                    ALL.put(key, content);
-                } else {
-                    System.err.println("[Personas] 未找到人格文件: " + fileName);
-                }
-            }
+            Enumeration<URL> directories = Personas.class.getClassLoader().getResources("personas");
+            while (directories.hasMoreElements()) loadDirectory(directories.nextElement());
         } catch (Exception e) {
             System.err.println("[Personas] 加载人设文件失败: " + e.getMessage());
         }
     }
 
+    /** 分别处理开发环境的文件目录和生产环境的 JAR 资源目录。 */
+    private static void loadDirectory(URL directory) throws Exception {
+        if ("file".equals(directory.getProtocol())) {
+            File[] files = new File(directory.toURI()).listFiles((dir, name) -> name.endsWith(".txt"));
+            if (files != null) {
+                for (File file : files) loadPersona(file.getName());
+            }
+            return;
+        }
+        if ("jar".equals(directory.getProtocol())) {
+            JarURLConnection connection = (JarURLConnection) directory.openConnection();
+            try (JarFile jar = connection.getJarFile()) {
+                Enumeration<JarEntry> entries = jar.entries();
+                while (entries.hasMoreElements()) {
+                    String name = entries.nextElement().getName();
+                    if (name.startsWith("personas/") && name.endsWith(".txt")) {
+                        loadPersona(name.substring("personas/".length()));
+                    }
+                }
+            }
+        }
+    }
+
+    /** 统一读取一个发现到的人设文件，文件名即用户可见的人设名称。 */
+    private static void loadPersona(String fileName) {
+        String content = loadResource("/personas/" + fileName);
+        if (content != null && !content.isBlank()) {
+            ALL.put(fileName.replaceFirst("\\.txt$", ""), content);
+        }
+    }
+
     /** 默认人设触发词，用户未设置人设时生效。设为 null 则不启用默认人设。 */
-    public static final String DEFAULT = "鲁迅";   // ← 改成 "小甜妹" 等即启用默认
+    public static final String DEFAULT = "温柔";
 
     /** 以 UTF-8 读取 classpath 中的人设文本文件。 */
     private static String loadResource(String path) {

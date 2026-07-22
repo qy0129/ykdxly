@@ -10,6 +10,7 @@ public final class PlanSessionStore {
 
     private final Map<String, TaskPlan> plans = new ConcurrentHashMap<>();
     private final Map<String, PendingPlanRequest> pendingRequests = new ConcurrentHashMap<>();
+    private final Map<String, TaskPlan> pendingCalendarSyncs = new ConcurrentHashMap<>();
 
     /** 保存或替换用户当前计划。 */
     public void set(String userId, TaskPlan plan) {
@@ -49,6 +50,23 @@ public final class PlanSessionStore {
     /** 清除等待补充信息的规划请求。 */
     public void clearPending(String userId) {
         pendingRequests.remove(userId);
+    }
+
+    /** 保存等待用户确认同步到日历的计划，避免未经确认批量创建提醒。 */
+    public void setPendingCalendarSync(String userId, TaskPlan plan) {
+        pendingCalendarSyncs.put(userId, plan);
+    }
+
+    public TaskPlan getPendingCalendarSync(String userId) {
+        return pendingCalendarSyncs.get(userId);
+    }
+
+    public boolean hasPendingCalendarSync(String userId) {
+        return pendingCalendarSyncs.containsKey(userId);
+    }
+
+    public void clearPendingCalendarSync(String userId) {
+        pendingCalendarSyncs.remove(userId);
     }
 
     /** 尚未完成的规划请求及其回复选项。 */

@@ -2,35 +2,52 @@ package com.example.ilink.conversation;
 
 import com.example.ilink.feature.persona.Personas;
 import com.example.ilink.feature.weather.WeatherLocation;
+import com.example.ilink.storage.MySqlStore;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 用户临时会话状态存储。
  *
- * <p>保存人设、待确认的绘图提示词、最近图片和待处理图片等短期状态，
- * 不负责保存长期聊天记录或媒体文件。</p>
+ * <p>保存人设、待确认的绘图提示词、最近图片和待处理图片等状态；数据库启用时，
+ * 人设会跨重启保存，其他短期状态仍只保存在内存。</p>
  */
 public final class UserSessionStore {
 
+    private final MySqlStore database = MySqlStore.getInstance();
     private final Map<String, String> personas = new ConcurrentHashMap<>();
+    private final Set<String> loadedPersonaUsers = ConcurrentHashMap.newKeySet();
     private final Map<String, String> pendingDrawPrompts = new ConcurrentHashMap<>();
     private final Map<String, String> lastImagePaths = new ConcurrentHashMap<>();
     private final Map<String, String> pendingImagePaths = new ConcurrentHashMap<>();
     private final Map<String, List<WeatherLocation>> pendingWeatherLocations = new ConcurrentHashMap<>();
     private final Map<String, String> pendingWeatherDays = new ConcurrentHashMap<>();
+    private final Map<String, String> currentLocations = new ConcurrentHashMap<>();
 
     /** 设置用户当前人设名称。 */
     public void setPersona(String userId, String persona) {
+        loadedPersonaUsers.add(userId);
         personas.put(userId, persona);
+        database.savePersona(userId, persona);
     }
 
     /** 获取用户当前人设对应的系统提示词。 */
     public String getPersonaPrompt(String userId) {
+        ensurePersonaLoaded(userId);
         String name = personas.getOrDefault(userId, Personas.DEFAULT);
         return name == null ? null : Personas.get(name);
+    }
+
+    /** 用户首次访问时从 MySQL 恢复上次选择的人设。 */
+    private void ensurePersonaLoaded(String userId) {
+        if (!loadedPersonaUsers.add(userId)) return;
+        String persona = database.loadPersona(userId);
+        if (persona != null && !persona.isBlank()) {
+            personas.put(userId, persona);
+        }
     }
 
     /** 保存等待用户补充尺寸的绘图提示词。 */
@@ -98,5 +115,14 @@ public final class UserSessionStore {
     public void clearPendingWeatherLocations(String userId) {
         pendingWeatherLocations.remove(userId);
         pendingWeatherDays.remove(userId);
+    }
+
+    /** 记录用户主动提供的当前位置，供“附近有什么好吃的”等连续问法使用。 */
+    public void setCurrentLocation(String userId, String location) {
+        currentLocations.put(userId, location);
+    }
+
+    public String getCurrentLocation(String userId) {
+        return currentLocations.get(userId);
     }
 }

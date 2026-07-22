@@ -3,6 +3,8 @@ package com.example.ilink.tools.core;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
+import java.math.BigDecimal;
+
 /** 统一读取和校验模型生成的工具参数。 */
 public final class ToolArguments {
 
@@ -28,5 +30,11 @@ public final class ToolArguments {
     public static int integer(JsonObject arguments, String name, int defaultValue) {
         JsonElement value = arguments.get(name);
         return value == null || value.isJsonNull() ? defaultValue : value.getAsInt();
+    }
+
+    /** 读取数字参数，使用 BigDecimal 保留金额精度。 */
+    public static BigDecimal decimal(JsonObject arguments, String name, BigDecimal defaultValue) {
+        JsonElement value = arguments.get(name);
+        return value == null || value.isJsonNull() ? defaultValue : value.getAsBigDecimal();
     }
 }

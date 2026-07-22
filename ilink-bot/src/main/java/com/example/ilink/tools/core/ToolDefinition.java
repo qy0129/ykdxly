@@ -93,4 +93,14 @@ public record ToolDefinition(
         property.addProperty("maximum", maximum);
         return property;
     }
+
+    /** 创建数字参数定义，支持小数和金额。 */
+    public static JsonObject numberProperty(String description, double minimum, double maximum) {
+        JsonObject property = new JsonObject();
+        property.addProperty("type", "number");
+        property.addProperty("description", description);
+        property.addProperty("minimum", minimum);
+        property.addProperty("maximum", maximum);
+        return property;
+    }
 }

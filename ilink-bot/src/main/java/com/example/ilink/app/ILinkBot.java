@@ -2,18 +2,22 @@ package com.example.ilink.app;
 
 import com.example.ilink.config.Config;
 import com.github.wechat.ilink.sdk.ILinkClient;
+import com.github.wechat.ilink.sdk.core.config.ILinkConfig;
 import com.github.wechat.ilink.sdk.core.listener.OnMessageListener;
+import com.github.wechat.ilink.sdk.core.listener.OnLoginListener;
+import com.github.wechat.ilink.sdk.core.login.LoginStatus;
 import com.github.wechat.ilink.sdk.core.model.WeixinMessage;
 
 import java.awt.Desktop;
 import java.net.URI;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.Base64;
 import java.util.List;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * iLink 机器人应用入口。
@@ -24,9 +28,16 @@ import java.util.concurrent.Executors;
  */
 public class ILinkBot {
 
+    /** 登录状态轮询间隔，避免频繁请求登录接口。 */
+    private static final long LOGIN_STATUS_INTERVAL_MS = 2000L;
+    /** 登录失败后重新获取二维码前的等待时间。 */
+    private static final long LOGIN_RETRY_DELAY_MS = 3000L;
+
     private final CountDownLatch latch = new CountDownLatch(1);
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final MessageDispatcher dispatcher = new MessageDispatcher();
+    private final LoginQrPage loginQrPage = new LoginQrPage();
+    private final AtomicBoolean running = new AtomicBoolean(true);
     private ILinkClient client;
 
     /** 启动机器人，完成登录并进入消息监听循环。 */
@@ -43,28 +54,41 @@ public class ILinkBot {
                 System.exit(1);
             }
 
-            ILinkClient client = ILinkClient.builder()
-                    .onMessage(new OnMessageListener() {
-                        /** 将 SDK 收到的消息提交到后台线程逐条处理。 */
-                        @Override
-                        public void onMessages(List<WeixinMessage> messages) {
-                            for (WeixinMessage message : messages) {
-                                executor.submit(() -> dispatcher.handleMessage(ILinkBot.this.client, message));
-                            }
-                        }
-                    })
-                    .build();
-            this.client = client;
+            while (running.get() && !isLoggedIn()) {
+                ILinkClient loginClient = null;
+                boolean loginSucceeded = false;
+                try {
+                    loginClient = createClient();
+                    this.client = loginClient;
 
-            String qrcodeImg = client.executeLogin();
-            showLoginQrCode(qrcodeImg);
+                    System.out.println("[登录] 正在获取二维码...");
+                    String qrcodeImg = loginClient.executeLogin();
+                    showLoginQrCode(qrcodeImg);
+                    loginSucceeded = waitForLogin(loginClient);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                } catch (Exception e) {
+                    System.err.println("[登录] 网络异常，准备重试: " + rootMessage(e));
+                } finally {
+                    if (!loginSucceeded && loginClient != null) {
+                        closeClient(loginClient);
+                    }
+                }
 
-            System.out.println("等待扫码中...");
-            while (!client.isLoggedIn()) {
-                Thread.sleep(4000);
-                System.out.println("  状态: 等待扫码...");
+                if (!loginSucceeded && running.get()) {
+                    System.out.println("[登录] 本次登录未完成，" + (LOGIN_RETRY_DELAY_MS / 1000)
+                            + " 秒后刷新二维码...\n");
+                    Thread.sleep(LOGIN_RETRY_DELAY_MS);
+                }
             }
 
+            if (!running.get() || !isLoggedIn()) {
+                return;
+            }
+
+            // 登录后的客户端连接由日历调度器复用，用于在用户未发消息时主动提醒。
+            dispatcher.onClientReady(client);
             System.out.println("登录成功！监听器已就绪，等待消息... (Ctrl+C 退出)\n");
             latch.await();
             executor.shutdownNow();
@@ -75,20 +99,110 @@ public class ILinkBot {
         }
     }
 
-    /** 根据 SDK 返回的二维码链接或 Base64 数据展示登录二维码。 */
-    private void showLoginQrCode(String qrcode) throws Exception {
-        if (qrcode.startsWith("http")) {
-            System.out.println("正在打开微信登录二维码页面:");
-            System.out.println(qrcode + "\n");
-            openInBrowser(qrcode);
-            return;
-        }
+    /** 创建带网络重试、超时和登录回调的 SDK 客户端。 */
+    private ILinkClient createClient() {
+        ILinkConfig config = ILinkConfig.builder()
+                .connectTimeoutMs(60000)
+                .readTimeoutMs(60000)
+                .writeTimeoutMs(60000)
+                .httpMaxRetries(5)
+                .retryBaseDelayMs(1000)
+                .retryMaxDelayMs(10000)
+                .loginTimeoutMs(300000)
+                .autoReconnectEnabled(true)
+                .build();
 
-        String raw = qrcode.replaceFirst("^data:image/[a-zA-Z]+;base64,", "");
-        Path path = Path.of("qrcode.png").toAbsolutePath();
-        Files.write(path, Base64.getDecoder().decode(raw));
-        System.out.println("二维码已保存到 " + path + "，请用微信扫码登录\n");
-        openFile(path);
+        return ILinkClient.builder()
+                .config(config)
+                .onLogin(new OnLoginListener() {
+                    /** 登录成功时输出中文状态，便于在控制台确认登录结果。 */
+                    @Override
+                    public void onLoginSuccess(com.github.wechat.ilink.sdk.core.login.LoginContext context) {
+                        System.out.println("[登录] 登录成功");
+                    }
+
+                    /** 登录失败时输出 SDK 返回的具体原因。 */
+                    @Override
+                    public void onLoginFailure(Throwable error) {
+                        System.err.println("[登录] 登录失败: " + rootMessage(error));
+                    }
+                })
+                .onMessage(new OnMessageListener() {
+                    /** 将 SDK 收到的消息提交到后台线程逐条处理。 */
+                    @Override
+                    public void onMessages(List<WeixinMessage> messages) {
+                        for (WeixinMessage message : messages) {
+                            executor.submit(() -> dispatcher.handleMessage(ILinkBot.this.client, message));
+                        }
+                    }
+                })
+                .build();
+    }
+
+    /** 轮询当前登录状态，遇到过期、错误或 Future 异常时结束本次登录。 */
+    private boolean waitForLogin(ILinkClient loginClient) throws InterruptedException {
+        LoginStatus.Status lastStatus = null;
+        CompletableFuture<?> loginFuture = loginClient.getLoginFuture();
+
+        while (running.get() && !loginClient.isLoggedIn()) {
+            LoginStatus loginStatus = loginClient.getLoginStatus();
+            LoginStatus.Status status = loginStatus.getStatus();
+            if (status != lastStatus) {
+                String detail = status == LoginStatus.Status.ERROR && loginStatus.getErrorMessage() != null
+                        ? "，原因=" + loginStatus.getErrorMessage() : "";
+                System.out.println("[登录] 状态=" + status + detail);
+                lastStatus = status;
+            }
+
+            if (status == LoginStatus.Status.EXPIRED || status == LoginStatus.Status.ERROR) {
+                return false;
+            }
+
+            if (loginFuture != null && loginFuture.isDone()) {
+                try {
+                    loginFuture.join();
+                } catch (CompletionException | CancellationException e) {
+                    System.err.println("[登录] 登录轮询结束: " + rootMessage(e));
+                    return false;
+                }
+                return loginClient.isLoggedIn();
+            }
+
+            Thread.sleep(LOGIN_STATUS_INTERVAL_MS);
+        }
+        return loginClient.isLoggedIn();
+    }
+
+    /** 判断当前客户端是否已完成登录。 */
+    private boolean isLoggedIn() {
+        return client != null && client.isLoggedIn();
+    }
+
+    /** 关闭一次登录尝试使用的临时客户端。 */
+    private void closeClient(ILinkClient target) {
+        try {
+            target.cancelLogin();
+            target.close();
+        } catch (Exception ignored) {
+            // 关闭失败不影响下一次二维码登录。
+        }
+    }
+
+    /** 提取异常根因，避免控制台只显示多层包装异常。 */
+    private String rootMessage(Throwable error) {
+        Throwable current = error;
+        while (current.getCause() != null && current.getCause() != current) {
+            current = current.getCause();
+        }
+        return current.getMessage() == null ? current.getClass().getSimpleName() : current.getMessage();
+    }
+
+    /** 根据 SDK 返回的二维码链接或 Base64 数据生成并打开扫码前端页面。 */
+    private void showLoginQrCode(String qrcode) throws Exception {
+        URI page = loginQrPage.render(qrcode);
+        System.out.println("[登录] 已生成扫码页面，请使用微信扫描页面中的二维码：");
+        System.out.println(page + "\n");
+        openInBrowser(page.toString());
     }
 
     /** 尝试使用系统默认浏览器打开登录页面。 */
@@ -102,23 +216,15 @@ public class ILinkBot {
         }
     }
 
-    /** 尝试使用系统默认图片查看器打开二维码文件。 */
-    private void openFile(Path path) {
-        try {
-            if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) {
-                Desktop.getDesktop().open(path.toFile());
-            }
-        } catch (Exception e) {
-            System.err.println("无法自动打开二维码图片，请手动打开: " + path);
-        }
-    }
-
     /** 停止线程池、消息分发器和微信客户端。 */
     public void stop() {
+        running.set(false);
         executor.shutdownNow();
         dispatcher.close();
+        loginQrPage.cleanup();
         if (client != null) {
             try {
+                client.cancelLogin();
                 client.close();
             } catch (Exception ignored) {}
         }
