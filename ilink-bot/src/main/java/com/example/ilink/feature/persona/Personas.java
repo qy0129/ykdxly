@@ -24,6 +24,12 @@ import java.util.stream.Collectors;
  *   或
  *   history.setPersona(userId, "毒舌");
  */
+/**
+ * 人设资源加载器。
+ *
+ * <p>从 classpath 的 {@code personas/index.txt} 读取人设名称，再加载对应的
+ * 文本提示词。业务层只通过名称获取提示词，不直接操作资源文件。</p>
+ */
 public class Personas {
 
     private static final Map<String, String> ALL = new LinkedHashMap<>();
@@ -32,6 +38,7 @@ public class Personas {
         loadFromResources();
     }
 
+    /** 从 index.txt 加载全部人设名称和对应提示词。 */
     private static void loadFromResources() {
         try {
             String index = loadResource("/personas/index.txt");
@@ -62,6 +69,7 @@ public class Personas {
     /** 默认人设触发词，用户未设置人设时生效。设为 null 则不启用默认人设。 */
     public static final String DEFAULT = "鲁迅";   // ← 改成 "小甜妹" 等即启用默认
 
+    /** 以 UTF-8 读取 classpath 中的人设文本文件。 */
     private static String loadResource(String path) {
         try (InputStream is = Personas.class.getResourceAsStream(path)) {
             if (is == null) return null;
@@ -73,12 +81,12 @@ public class Personas {
         }
     }
 
-    /** 根据用户触发词获取人设 prompt */
+    /** 按人设名称获取提示词，不存在时返回 null。 */
     public static String get(String name) {
         return ALL.get(name);
     }
 
-    /** 获取所有触发词 */
+    /** 返回全部人设的只读视图，供提示和校验使用。 */
     public static Map<String, String> getAll() {
         return ALL;
     }

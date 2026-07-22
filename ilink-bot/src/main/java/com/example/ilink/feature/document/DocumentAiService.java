@@ -16,17 +16,26 @@ import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * 文档 AI 服务。
+ *
+ * <p>负责把文档文本和用户问题交给模型，支持文档问答、内容总结、文件内容生成，
+ * 以及将用户修改要求转换为结构化的 DOCX 编辑计划。</p>
+ */
 public final class DocumentAiService {
 
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
     private final ChatHistoryStore history;
 
+    /** 注入 HTTP 客户端和共享聊天历史。 */
     public DocumentAiService(HttpClient httpClient, ChatHistoryStore history) {
         this.httpClient = httpClient;
         this.history = history;
     }
+    /** 基于当前文档内容回答用户问题。 */
     public String chatWithDocument(String userId, String userMessage, String fileName, String documentText) {
+        // 文档问答把文件内容作为上下文，但仍保留用户的聊天历史和人设。
         try {
             JsonObject body = new JsonObject();
             body.addProperty("model", Config.DOCUMENT_MODEL);
@@ -70,7 +79,9 @@ public final class DocumentAiService {
         }
     }
 
+    /** 生成适合写入 DOCX 或 PDF 的完整正文。 */
     public String generateDocument(String userId, String userMessage) {
+        // 文件生成阶段只生成正文，文件格式和落盘由 DocumentService 负责。
         try {
             JsonObject body = new JsonObject();
             body.addProperty("model", Config.DOCUMENT_MODEL);
@@ -112,7 +123,9 @@ public final class DocumentAiService {
         }
     }
 
+    /** 将自然语言修改要求转换为结构化 DOCX 编辑计划。 */
     public DocumentEditPlan planDocxEdits(String fileName, String documentText, String userRequest) {
+        // 先让模型输出编辑指令，再由 DocxEditor 在原文件上执行，避免模型直接改二进制文件。
         try {
             JsonObject body = new JsonObject();
             body.addProperty("model", Config.DOCUMENT_MODEL);
@@ -172,6 +185,7 @@ public final class DocumentAiService {
     }
 
 
+    /** 从模型输出中提取 JSON 对象，兼容 Markdown 代码块包装。 */
     private JsonObject parseJsonObject(String content) {
         String json = content.trim();
         if (json.startsWith("```")) {

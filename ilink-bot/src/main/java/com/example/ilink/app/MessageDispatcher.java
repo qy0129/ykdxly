@@ -33,6 +33,13 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * 微信消息分发器。
+ *
+ * <p>将 SDK 收到的文本、图片、文件、语音等消息转换为统一的处理流程，
+ * 同时负责下载媒体、保存会话状态，并把文本请求交给
+ * {@link UserRequestHandler}。</p>
+ */
 public final class MessageDispatcher implements AutoCloseable {
 
     private final HttpClient httpClient = HttpClient.newBuilder()
@@ -56,6 +63,7 @@ public final class MessageDispatcher implements AutoCloseable {
             intentRecognizer, chatService, documentAiService,
             audioService, documentService, imageService, mediaStore, replySender);
     private final ScheduledExecutorService progressScheduler = Executors.newScheduledThreadPool(1);
+    /** 接收一条 SDK 消息，并异步提交给内部处理流程。 */
     public void handleMessage(ILinkClient client, WeixinMessage message) {
         String userId = message.getFrom_user_id();
         boolean voiceOnly = voiceReplyUsers.contains(userId)
@@ -77,6 +85,7 @@ public final class MessageDispatcher implements AutoCloseable {
         }
     }
 
+    /** 按消息类型处理文本、图片、文件和语音，并更新对应会话状态。 */
     private void handleMessageInternal(ILinkClient client, WeixinMessage message) {
         try {
             String userId = message.getFrom_user_id();
@@ -186,6 +195,7 @@ public final class MessageDispatcher implements AutoCloseable {
         }
     }
 
+    /** 关闭进度调度器，释放分发器持有的后台资源。 */
     @Override
     public void close() {
         progressScheduler.shutdownNow();

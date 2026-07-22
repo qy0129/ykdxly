@@ -15,6 +15,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+/**
+ * iLink 机器人应用入口。
+ *
+ * <p>负责创建微信 SDK 客户端、执行扫码登录、启动消息分发器，
+ * 并在程序退出时释放线程池和 SDK 连接。具体业务处理由
+ * {@link MessageDispatcher} 完成。</p>
+ */
 public class ILinkBot {
 
     private final CountDownLatch latch = new CountDownLatch(1);
@@ -22,6 +29,7 @@ public class ILinkBot {
     private final MessageDispatcher dispatcher = new MessageDispatcher();
     private ILinkClient client;
 
+    /** 启动机器人，完成登录并进入消息监听循环。 */
     public void start() {
         try {
             System.out.println("========================================");
@@ -37,6 +45,7 @@ public class ILinkBot {
 
             ILinkClient client = ILinkClient.builder()
                     .onMessage(new OnMessageListener() {
+                        /** 将 SDK 收到的消息提交到后台线程逐条处理。 */
                         @Override
                         public void onMessages(List<WeixinMessage> messages) {
                             for (WeixinMessage message : messages) {
@@ -66,6 +75,7 @@ public class ILinkBot {
         }
     }
 
+    /** 根据 SDK 返回的二维码链接或 Base64 数据展示登录二维码。 */
     private void showLoginQrCode(String qrcode) throws Exception {
         if (qrcode.startsWith("http")) {
             System.out.println("正在打开微信登录二维码页面:");
@@ -81,6 +91,7 @@ public class ILinkBot {
         openFile(path);
     }
 
+    /** 尝试使用系统默认浏览器打开登录页面。 */
     private void openInBrowser(String url) {
         try {
             if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
@@ -91,6 +102,7 @@ public class ILinkBot {
         }
     }
 
+    /** 尝试使用系统默认图片查看器打开二维码文件。 */
     private void openFile(Path path) {
         try {
             if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) {
@@ -101,6 +113,7 @@ public class ILinkBot {
         }
     }
 
+    /** 停止线程池、消息分发器和微信客户端。 */
     public void stop() {
         executor.shutdownNow();
         dispatcher.close();
@@ -112,6 +125,7 @@ public class ILinkBot {
         latch.countDown();
     }
 
+    /** Java 程序入口，注册退出钩子后启动机器人。 */
     public static void main(String[] args) {
         ILinkBot bot = new ILinkBot();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {

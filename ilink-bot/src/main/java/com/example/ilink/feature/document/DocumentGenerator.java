@@ -32,7 +32,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
+/**
+ * 文档生成器。
+ *
+ * <p>将纯文本内容生成 DOCX 或 PDF 字节。生成器只关心文件格式，
+ * 不负责意图识别、模型调用和媒体文件落盘。</p>
+ */
 public final class DocumentGenerator {
+    /** 生成包含标题和正文的 DOCX 字节数组。 */
     public byte[] createDocx(String title, String content) throws IOException {
         try (XWPFDocument document = new XWPFDocument();
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
@@ -48,6 +55,7 @@ public final class DocumentGenerator {
         }
     }
 
+    /** 生成包含标题和正文的 PDF 字节数组。 */
     public byte[] createPdf(String title, String content) throws IOException {
         try (PDDocument document = new PDDocument();
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
@@ -58,6 +66,7 @@ public final class DocumentGenerator {
         }
     }
 
+    /** 把一页标题和正文写入 PDF 文档。 */
     private void addPdfPage(PDDocument document, Object font, String title, String content) throws IOException {
         PDPage page = new PDPage(PDRectangle.A4);
         document.addPage(page);
@@ -97,6 +106,7 @@ public final class DocumentGenerator {
         stream.close();
     }
 
+    /** 优先加载项目中的中文字体，找不到时退回 PDF 内置字体。 */
     private org.apache.pdfbox.pdmodel.font.PDFont loadPdfFont(PDDocument document) throws IOException {
         String[] candidates = {
                 "C:/Windows/Fonts/simhei.ttf",
@@ -113,6 +123,7 @@ public final class DocumentGenerator {
         return new PDType1Font(Standard14Fonts.FontName.HELVETICA);
     }
 
+    /** 设置 DOCX 页面为 A4 纸张和统一页边距。 */
     private void configureA4Page(XWPFDocument document) {
         CTBody body = document.getDocument().getBody();
         CTSectPr section = body.isSetSectPr() ? body.getSectPr() : body.addNewSectPr();
@@ -127,6 +138,7 @@ public final class DocumentGenerator {
         margins.setLeft(BigInteger.valueOf(1440));
     }
 
+    /** 清理 PDF 内置字体无法编码的字符，避免写入失败。 */
     private String safePdfText(String text) {
         return text.replace("\t", " ").replace("\u0000", "");
     }

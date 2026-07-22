@@ -17,8 +17,16 @@ import java.nio.file.StandardOpenOption;
 import java.util.Locale;
 import java.util.UUID;
 
+/**
+ * 音频格式转换器。
+ *
+ * <p>普通音频通过 FFmpeg 转换为 16kHz、单声道 WAV；微信 SILK 音频先调用
+ * SILK 解码器转为 PCM，再交给 FFmpeg 封装为 WAV，供语音识别服务使用。</p>
+ */
 public final class AudioConverter {
+    /** 将任意支持的音频转换为语音识别所需的 WAV 格式。 */
     public void convertToWav(Path source, Path target) throws Exception {
+        // 先识别 SILK，避免把微信语音直接交给 FFmpeg 导致格式识别失败。
         if (isSilk(source)) {
             decodeSilk(source, target);
             return;
@@ -43,6 +51,7 @@ public final class AudioConverter {
         }
     }
 
+    /** 使用外部 SILK 解码器把微信语音转成 PCM，再转为 WAV。 */
     private void decodeSilk(Path source, Path target) throws Exception {
         Path pcmFile = Files.createTempFile("ilink-voice-", ".pcm");
         try {
@@ -66,6 +75,7 @@ public final class AudioConverter {
         }
     }
 
+    /** 使用 FFmpeg 把 16kHz 单声道 PCM 封装成 WAV。 */
     private void convertPcmToWav(Path source, Path target) throws Exception {
         Process process = new ProcessBuilder(
                 Config.FFMPEG_COMMAND,
@@ -87,6 +97,7 @@ public final class AudioConverter {
         }
     }
 
+    /** 根据配置或系统安装位置定位 SILK 解码器。 */
     private String resolveSilkDecoder() throws IOException {
         if (!"auto".equalsIgnoreCase(Config.SILK_DECODER_COMMAND)) {
             return Config.SILK_DECODER_COMMAND;
@@ -95,6 +106,7 @@ public final class AudioConverter {
         return resolveSilkBinary("decoder.exe");
     }
 
+    /** 在 Windows npm 工具目录中查找指定的 SILK 可执行文件。 */
     private String resolveSilkBinary(String binaryName) throws IOException {
         if (!"auto".equalsIgnoreCase(Config.SILK_DECODER_COMMAND)) {
             Path configured = Path.of(Config.SILK_DECODER_COMMAND);
@@ -115,6 +127,7 @@ public final class AudioConverter {
         throw new IOException("未找到 SILK 工具，请先安装 @binsee/wx-voice: " + binaryName);
     }
 
+    /** 检查文件头，判断输入是否为微信 SILK_V3 音频。 */
     private boolean isSilk(Path file) throws IOException {
         byte[] header = Files.readAllBytes(file);
         byte[] silkHeader = "#!SILK_V3".getBytes(StandardCharsets.US_ASCII);

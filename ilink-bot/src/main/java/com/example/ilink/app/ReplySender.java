@@ -30,6 +30,12 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * 统一回复发送器。
+ *
+ * <p>根据回复模式发送文本或语音，并记录机器人生成的音频，避免业务处理类
+ * 直接依赖微信 SDK 的多种发送接口。</p>
+ */
 public final class ReplySender {
 
     private final AudioService audioService;
@@ -37,15 +43,18 @@ public final class ReplySender {
     private final AudioHistoryStore audioHistory;
     private final Set<String> voiceReplyUsers = ConcurrentHashMap.newKeySet();
 
+    /** 创建回复发送器并注入音频、媒体和语音历史依赖。 */
     public ReplySender(AudioService audioService, MediaStore mediaStore, AudioHistoryStore audioHistory) {
         this.audioService = audioService;
         this.mediaStore = mediaStore;
         this.audioHistory = audioHistory;
     }
+    /** 按用户当前默认回复模式发送一条回复。 */
     public void sendReply(ILinkClient client, String userId, String text) throws Exception {
         sendReply(client, userId, text, null, "default");
     }
 
+    /** 根据指定的回复模式和音色发送文本、语音或两者。 */
     public void sendReply(ILinkClient client, String userId, String text,
                            String replyMode, String voiceStyle) throws Exception {
         boolean voice = voiceReplyUsers.contains(userId)
@@ -76,6 +85,7 @@ public final class ReplySender {
         }
     }
 
+    /** 保存路由结果中的回复模式，供后续回复使用。 */
     public void applyReplyMode(String userId, String replyMode) {
         if ("both".equals(replyMode) || "voice".equals(replyMode)) {
             voiceReplyUsers.add(userId);
@@ -84,6 +94,7 @@ public final class ReplySender {
         }
     }
 
+    /** 判断该用户是否被设置为只接收语音回复。 */
     public boolean isVoiceOnly(String userId) {
         return voiceReplyUsers.contains(userId) || "voice".equalsIgnoreCase(Config.REPLY_MODE);
     }

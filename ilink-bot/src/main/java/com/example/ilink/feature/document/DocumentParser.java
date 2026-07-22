@@ -32,8 +32,16 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
+/**
+ * 文档解析器。
+ *
+ * <p>根据扩展名解析 TXT、DOC、DOCX 和 PDF，统一返回纯文本，
+ * 供文档问答、总结和编辑计划使用。</p>
+ */
 public final class DocumentParser {
+    /** 根据文件扩展名选择解析器，并限制返回文本长度。 */
     public DocumentService.ParsedDocument parse(Path path, String originalFileName) throws Exception {
+        // 统一从文件名得到扩展名，再选择对应的解析实现。
         String extension = extension(originalFileName);
         String text = switch (extension) {
             case "txt", "md", "csv" -> Files.readString(path, StandardCharsets.UTF_8);
@@ -54,6 +62,7 @@ public final class DocumentParser {
         return new DocumentService.ParsedDocument(originalFileName, extension, text);
     }
 
+    /** 读取 DOCX 段落和表格文本。 */
     private String parseDocx(Path path) throws IOException {
         StringBuilder text = new StringBuilder();
         try (InputStream input = Files.newInputStream(path);
@@ -72,6 +81,7 @@ public final class DocumentParser {
         return text.toString();
     }
 
+    /** 读取旧版 DOC 文档中的段落文本。 */
     private String parseDoc(Path path) throws IOException {
         try (InputStream input = Files.newInputStream(path);
              HWPFDocument document = new HWPFDocument(input);
@@ -80,18 +90,21 @@ public final class DocumentParser {
         }
     }
 
+    /** 使用 PDFBox 提取 PDF 页面中的文字。 */
     private String parsePdf(Path path) throws IOException {
         try (PDDocument document = Loader.loadPDF(path.toFile())) {
             return new PDFTextStripper().getText(document);
         }
     }
 
+    /** 追加非空文本行，并统一控制行尾格式。 */
     private void appendLine(StringBuilder text, String value) {
         if (value != null && !value.isBlank()) {
             text.append(value.strip()).append('\n');
         }
     }
 
+    /** 从文件名提取小写扩展名，不包含点号。 */
     public static String extension(String fileName) {
         if (fileName == null) return "";
         int dot = fileName.lastIndexOf('.');

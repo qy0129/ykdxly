@@ -14,14 +14,22 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Base64;
 
+/**
+ * 图片生成和编辑服务。
+ *
+ * <p>调用图片生成接口创建新图片，也可以将本地图片编码后提交给图片编辑模型，
+ * 最终返回图片字节供 MediaStore 或微信 SDK 使用。</p>
+ */
 public final class ImageGenerationService {
 
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
 
+    /** 创建图片生成服务并注入 HTTP 客户端。 */
     public ImageGenerationService(HttpClient httpClient) {
         this.httpClient = httpClient;
     }
+    /** 调用图片生成模型并下载返回的图片。 */
     public byte[] generateImage(String prompt, String imageSize) throws Exception {
         System.out.println("[绘图] 开始生成: " + prompt + " 尺寸: " + imageSize);
         JsonObject body = new JsonObject();
@@ -74,6 +82,7 @@ public final class ImageGenerationService {
         return null;
     }
 
+    /** 上传本地图片并调用图片编辑模型。 */
     public byte[] editImage(Path sourceImage, String prompt) throws Exception {
         byte[] imageBytes = Files.readAllBytes(sourceImage);
         JsonObject body = new JsonObject();
@@ -97,6 +106,7 @@ public final class ImageGenerationService {
         return downloadGeneratedImage(response.body());
     }
 
+    /** 从图片接口响应中提取 URL 并下载图片字节。 */
     private byte[] downloadGeneratedImage(String responseBody) throws Exception {
         JsonObject json = JsonParser.parseString(responseBody).getAsJsonObject();
         String imageUrl = json.getAsJsonArray("images").get(0).getAsJsonObject().get("url").getAsString();

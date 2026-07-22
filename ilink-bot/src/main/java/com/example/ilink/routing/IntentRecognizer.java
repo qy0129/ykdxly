@@ -12,16 +12,25 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 
+/**
+ * 唯一的用户意图识别入口。
+ *
+ * <p>把用户自然语言和会话上下文发送给路由模型，并将模型返回的 JSON
+ * 转换为 {@link IntentResult}。本类只负责识别，不执行具体业务。</p>
+ */
 public final class IntentRecognizer {
 
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
 
+    /** 创建意图识别器并注入 HTTP 客户端。 */
     public IntentRecognizer(HttpClient httpClient) {
         this.httpClient = httpClient;
     }
 
+    /** 调用路由模型，把自然语言转换为结构化意图结果。 */
     public IntentResult recognize(String userId, String userMessage, IntentContext context) {
+        // 路由模型只输出结构化意图，业务执行由 UserRequestHandler 负责。
         try {
             JsonObject body = new JsonObject();
             body.addProperty("model", Config.ROUTER_MODEL);
@@ -79,6 +88,7 @@ public final class IntentRecognizer {
         }
     }
 
+    /** 构造路由模型的系统提示词和当前会话状态说明。 */
     private String buildSystemPrompt(String userId, IntentContext context) {
         StringBuilder prompt = new StringBuilder();
         prompt.append("你只负责用户意图路由，不回答用户问题。必须严格依据语义判断，禁止仅凭单个词触发功能。只输出一行JSON。\n");
@@ -133,6 +143,7 @@ public final class IntentRecognizer {
         return prompt.toString();
     }
 
+    /** 从模型文本中提取 JSON 对象，处理代码块和多余说明文字。 */
     private JsonObject parseJsonObject(String content) {
         String json = content.trim();
         if (json.startsWith("```")) {
