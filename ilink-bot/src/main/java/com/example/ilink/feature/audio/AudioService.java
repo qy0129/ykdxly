@@ -33,13 +33,18 @@ public final class AudioService {
         return transcriptionService.transcribe(originalAudio);
     }
 
-    /** 使用默认音色把文本合成为音频。 */
-    public byte[] synthesize(String text) throws Exception {
+    /** 使用默认音色把文本合成为音频，优先 MP3，失败时返回 WAV。 */
+    public SynthesizedAudio synthesize(String text) throws Exception {
         return synthesisService.synthesize(text);
     }
 
-    /** 使用指定音色风格把文本合成为音频。 */
-    public byte[] synthesize(String text, String voiceStyle) throws Exception {
+    /** 使用指定音色风格把文本合成为音频，优先 MP3，失败时返回 WAV。 */
+    public SynthesizedAudio synthesize(String text, String voiceStyle) throws Exception {
         return synthesisService.synthesize(text, voiceStyle);
+    }
+
+    /** 显式生成 WAV，用于 MP3 文件发送失败后的重试。 */
+    public SynthesizedAudio synthesizeWav(String text, String voiceStyle) throws Exception {
+        return synthesisService.synthesizeWav(text, voiceStyle);
     }
 }

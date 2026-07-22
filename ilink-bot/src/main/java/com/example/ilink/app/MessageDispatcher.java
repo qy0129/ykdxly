@@ -11,6 +11,18 @@ import com.example.ilink.feature.document.DocumentAiService;
 import com.example.ilink.feature.document.DocumentService;
 import com.example.ilink.feature.image.ImageService;
 import com.example.ilink.feature.persona.Personas;
+import com.example.ilink.feature.weather.WeatherService;
+import com.example.ilink.tools.audio.AudioTranscribeTool;
+import com.example.ilink.tools.audio.SpeechTool;
+import com.example.ilink.tools.core.ToolManager;
+import com.example.ilink.tools.document.DocumentEditTool;
+import com.example.ilink.tools.document.DocumentGenerateTool;
+import com.example.ilink.tools.document.DocumentQATool;
+import com.example.ilink.tools.image.DrawTool;
+import com.example.ilink.tools.image.ImageAnalysisTool;
+import com.example.ilink.tools.image.ImageEditTool;
+import com.example.ilink.tools.persona.PersonaSwitchTool;
+import com.example.ilink.tools.weather.WeatherTool;
 import com.example.ilink.model.AudioRecord;
 import com.example.ilink.model.AudioSource;
 import com.example.ilink.model.DocumentRecord;
@@ -55,13 +67,26 @@ public final class MessageDispatcher implements AutoCloseable {
     private final AudioService audioService = new AudioService(httpClient);
     private final DocumentService documentService = new DocumentService();
     private final ImageService imageService = new ImageService(httpClient);
+    private final WeatherService weatherService = new WeatherService(httpClient);
     private final MediaStore mediaStore = new MediaStore();
+    private final ToolManager toolManager = new ToolManager()
+            .register(new WeatherTool(weatherService))
+            .register(new DrawTool(imageService))
+            .register(new ImageAnalysisTool(imageService, sessions))
+            .register(new ImageEditTool(imageService, sessions))
+            .register(new DocumentQATool(documentAiService, documentSessions))
+            .register(new DocumentGenerateTool(documentAiService, documentService, documentSessions))
+            .register(new DocumentEditTool(documentAiService, documentService, documentSessions))
+            .register(new AudioTranscribeTool(audioService, audioHistory))
+            .register(new SpeechTool(audioService))
+            .register(new PersonaSwitchTool(sessions));
     private final Set<String> voiceReplyUsers = ConcurrentHashMap.newKeySet();
-    private final ReplySender replySender = new ReplySender(audioService, mediaStore, audioHistory);
+    private final ReplySender replySender = new ReplySender(
+            audioService, mediaStore, audioHistory, toolManager);
     private final UserRequestHandler requestHandler = new UserRequestHandler(
-            chatHistory, sessions, audioHistory, documentSessions,
-            intentRecognizer, chatService, documentAiService,
-            audioService, documentService, imageService, mediaStore, replySender);
+            chatHistory, sessions, documentSessions,
+            intentRecognizer, chatService, weatherService,
+            mediaStore, replySender, toolManager);
     private final ScheduledExecutorService progressScheduler = Executors.newScheduledThreadPool(1);
     /** 接收一条 SDK 消息，并异步提交给内部处理流程。 */
     public void handleMessage(ILinkClient client, WeixinMessage message) {

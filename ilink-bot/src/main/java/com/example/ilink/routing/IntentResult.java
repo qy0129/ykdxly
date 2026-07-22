@@ -19,5 +19,7 @@ public record IntentResult(
         String audioSource,
         int audioIndex,
         String documentAction,
-        String outputFileType) {
+        String outputFileType,
+        String weatherLocation,
+        String weatherDay) {
 }
