@@ -50,13 +50,15 @@ public final class UserRequestHandler {
     private final MediaStore mediaStore;
     private final ReplySender replySender;
     private final ToolManager toolManager;
+    private final PlanWorkflow planWorkflow;
 
     /** 注入所有业务服务，保持本类只负责请求编排。 */
     public UserRequestHandler(ChatHistoryStore chatHistory, UserSessionStore sessions,
                               DocumentSessionStore documentSessions,
                               IntentRecognizer intentRecognizer, ChatService chatService,
                               WeatherService weatherService, MediaStore mediaStore,
-                              ReplySender replySender, ToolManager toolManager) {
+                              ReplySender replySender, ToolManager toolManager,
+                              PlanWorkflow planWorkflow) {
         this.chatHistory = chatHistory;
         this.sessions = sessions;
         this.documentSessions = documentSessions;
@@ -66,11 +68,16 @@ public final class UserRequestHandler {
         this.mediaStore = mediaStore;
         this.replySender = replySender;
         this.toolManager = toolManager;
+        this.planWorkflow = planWorkflow;
     }
     /** 识别用户意图并调用对应功能处理器。 */
     public void handle(ILinkClient client, String userId, String text) throws Exception {
         if (sessions.hasPendingWeatherLocations(userId)) {
             handleWeatherLocationSelection(client, userId, text);
+            return;
+        }
+        if (planWorkflow.hasPendingPlan(userId)) {
+            planWorkflow.completePendingPlan(client, userId, text);
             return;
         }
 
@@ -97,6 +104,9 @@ public final class UserRequestHandler {
             case "audio_transcribe" -> handleAudioTranscribe(client, userId, route);
             case "image_action" -> handleImageAction(client, userId, route);
             case "weather" -> handleWeather(client, userId, text, route);
+            case "task_plan" -> planWorkflow.createPlan(client, userId, text, route);
+            case "plan_adjust" -> planWorkflow.adjustPlan(client, userId, text, route);
+            case "plan_progress" -> planWorkflow.queryProgress(client, userId, text, route);
             case "document_summary", "document_question", "generate_file", "document_edit" ->
                     handleDocumentAction(client, userId, text, route);
             default -> {
@@ -380,6 +390,9 @@ public final class UserRequestHandler {
             case "generate_file" -> "生成文件";
             case "document_edit" -> "编辑文档";
             case "weather" -> "天气";
+            case "task_plan" -> "制定计划";
+            case "plan_adjust" -> "调整计划";
+            case "plan_progress" -> "查询计划进度";
             default -> intent;
         };
     }

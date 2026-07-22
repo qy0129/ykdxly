@@ -21,5 +21,8 @@ public record IntentResult(
         String documentAction,
         String outputFileType,
         String weatherLocation,
-        String weatherDay) {
+        String weatherDay,
+        String planGoal,
+        String planDeadline,
+        String planAvailableTime) {
 }
