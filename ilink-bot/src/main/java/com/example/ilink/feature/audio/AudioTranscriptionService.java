@@ -18,17 +18,26 @@ import java.nio.file.StandardOpenOption;
 import java.util.Locale;
 import java.util.UUID;
 
+/**
+ * 语音转文字服务。
+ *
+ * <p>先把输入音频统一转换为 WAV，再以 multipart/form-data 方式调用
+ * SiliconFlow 的语音识别接口。</p>
+ */
 public final class AudioTranscriptionService {
 
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
     private final AudioConverter converter;
 
+    /** 注入 HTTP 客户端和音频转换器。 */
     public AudioTranscriptionService(HttpClient httpClient, AudioConverter converter) {
         this.httpClient = httpClient;
         this.converter = converter;
     }
+    /** 转换原始音频并调用语音识别接口。 */
     public String transcribe(Path originalAudio) throws Exception {
+        // 转换逻辑独立于 HTTP 请求，保证不同音频格式使用同一套识别流程。
         Path wavAudio = Files.createTempFile("ilink-voice-", ".wav");
         try {
             converter.convertToWav(originalAudio, wavAudio);
@@ -38,6 +47,7 @@ public final class AudioTranscriptionService {
         }
     }
 
+    /** 将 WAV 字节封装为 multipart 请求并解析识别结果。 */
     private String transcribeWav(byte[] audioBytes) throws Exception {
         String boundary = "----ilink-audio-" + UUID.randomUUID();
         byte[] body = multipartBody(boundary, audioBytes);
@@ -59,6 +69,7 @@ public final class AudioTranscriptionService {
         return json.has("text") ? json.get("text").getAsString() : response.body();
     }
 
+    /** 构造语音识别接口需要的 multipart 请求体。 */
     private byte[] multipartBody(String boundary, byte[] audioBytes) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         writePart(out, boundary, "model", Config.AUDIO_TRANSCRIPTION_MODEL);
@@ -72,6 +83,7 @@ public final class AudioTranscriptionService {
         return out.toByteArray();
     }
 
+    /** 向 multipart 请求体写入一个文本字段。 */
     private void writePart(ByteArrayOutputStream out, String boundary, String name, String value) throws IOException {
         out.write(("--" + boundary + "\r\n" +
                 "Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" +

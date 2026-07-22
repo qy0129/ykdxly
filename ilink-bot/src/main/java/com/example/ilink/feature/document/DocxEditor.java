@@ -32,8 +32,16 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
+/**
+ * DOCX 文本编辑器。
+ *
+ * <p>遍历正文段落和表格中的段落，按目标文本执行替换，并尽量保留原有
+ * run 的样式信息。</p>
+ */
 public final class DocxEditor {
+    /** 打开 DOCX，逐条执行替换，并返回成功和失败统计。 */
     public DocumentService.DocxEditResult editDocx(Path original, List<DocumentService.TextEdit> edits) throws IOException {
+        // 统一收集正文和表格段落，确保表格中的文字也能被编辑。
         List<String> unmatchedTargets = new ArrayList<>();
         int appliedEdits = 0;
 
@@ -64,6 +72,7 @@ public final class DocxEditor {
         }
     }
 
+    /** 收集正文段落和所有表格单元格中的段落。 */
     private List<XWPFParagraph> editableParagraphs(XWPFDocument document) {
         List<XWPFParagraph> paragraphs = new ArrayList<>(document.getParagraphs());
         for (XWPFTable table : document.getTables()) {
@@ -72,6 +81,7 @@ public final class DocxEditor {
         return paragraphs;
     }
 
+    /** 递归收集一个表格中的可编辑段落。 */
     private void collectTableParagraphs(XWPFTable table, List<XWPFParagraph> paragraphs) {
         for (var row : table.getRows()) {
             for (var cell : row.getTableCells()) {
@@ -83,6 +93,7 @@ public final class DocxEditor {
         }
     }
 
+    /** 在一个段落中替换第一次出现的目标文本。 */
     private boolean replaceFirst(XWPFParagraph paragraph, String target, String replacement) {
         if (target == null || target.isEmpty()) return false;
 
@@ -137,6 +148,7 @@ public final class DocxEditor {
         return true;
     }
 
+    /** 更新 run 文本，同时尽量保留原 run 的样式。 */
     private void setRunText(XWPFRun run, String text) {
         var ctr = run.getCTR();
         if (ctr.sizeOfTArray() == 0) {
@@ -149,6 +161,7 @@ public final class DocxEditor {
         }
     }
 
+    /** 保存 run 与其在段落全文中的字符区间。 */
     private record RunText(XWPFRun run, String text, int start, int end) {
     }
 }

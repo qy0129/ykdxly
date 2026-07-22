@@ -17,6 +17,12 @@ import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * 普通聊天服务。
+ *
+ * <p>负责组装系统提示词、当前人设和聊天历史，并调用文本模型生成回复。
+ * 意图识别由 routing 模块负责，本类不会自行判断用户要执行哪项功能。</p>
+ */
 public final class ChatService {
 
     private final HttpClient httpClient;
@@ -24,12 +30,15 @@ public final class ChatService {
     private final ChatHistoryStore history;
     private final UserSessionStore sessions;
 
+    /** 注入 HTTP 客户端、历史存储和用户会话存储。 */
     public ChatService(HttpClient httpClient, ChatHistoryStore history, UserSessionStore sessions) {
         this.httpClient = httpClient;
         this.history = history;
         this.sessions = sessions;
     }
+    /** 结合人设和历史调用聊天模型，返回文本回复。 */
     public String chat(String userId, String userMessage) {
+        // 普通聊天只处理已经被路由为 chat 的请求。
         try {
             JsonObject body = new JsonObject();
             body.addProperty("model", Config.MODEL);

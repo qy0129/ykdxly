@@ -18,18 +18,26 @@ import java.nio.file.StandardOpenOption;
 import java.util.Locale;
 import java.util.UUID;
 
+/**
+ * 文本转语音服务。
+ *
+ * <p>根据默认配置或用户指定的音色风格调用语音合成接口，并返回音频字节。</p>
+ */
 public final class SpeechSynthesisService {
 
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
 
+    /** 创建文本转语音服务。 */
     public SpeechSynthesisService(HttpClient httpClient) {
         this.httpClient = httpClient;
     }
+    /** 使用配置中的默认音色合成语音。 */
     public byte[] synthesize(String text) throws Exception {
         return synthesize(text, "default");
     }
 
+    /** 根据音色风格选择 voice 参数并合成语音。 */
     public byte[] synthesize(String text, String voiceStyle) throws Exception {
         if (text == null || text.isBlank()) {
             throw new IllegalArgumentException("语音合成文本不能为空");
@@ -62,6 +70,7 @@ public final class SpeechSynthesisService {
         return response.body();
     }
 
+    /** 把业务层音色名称映射为配置中的具体模型音色。 */
     private String resolveVoice(String voiceStyle) {
         String style = voiceStyle == null ? "default" : voiceStyle.toLowerCase(Locale.ROOT);
         String voice = switch (style) {

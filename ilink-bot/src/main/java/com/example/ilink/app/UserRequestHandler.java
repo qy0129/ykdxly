@@ -36,6 +36,13 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * 用户文本请求处理器。
+ *
+ * <p>先调用唯一的意图识别入口 {@link IntentRecognizer}，再根据识别结果
+ * 调用聊天、绘图、图片、音频或文档功能。该类负责流程协调，具体 API 调用
+ * 放在各 feature 服务中。</p>
+ */
 public final class UserRequestHandler {
 
     private final ChatHistoryStore chatHistory;
@@ -51,6 +58,7 @@ public final class UserRequestHandler {
     private final MediaStore mediaStore;
     private final ReplySender replySender;
 
+    /** 注入所有业务服务，保持本类只负责请求编排。 */
     public UserRequestHandler(ChatHistoryStore chatHistory, UserSessionStore sessions,
                               AudioHistoryStore audioHistory, DocumentSessionStore documentSessions,
                               IntentRecognizer intentRecognizer, ChatService chatService,
@@ -70,7 +78,9 @@ public final class UserRequestHandler {
         this.mediaStore = mediaStore;
         this.replySender = replySender;
     }
+    /** 识别用户意图并调用对应功能处理器。 */
     public void handle(ILinkClient client, String userId, String text) throws Exception {
+        // 根据当前用户的临时状态构造上下文，让意图识别知道用户正在处理什么。
         IntentContext context = new IntentContext(
                 sessions.peekPendingImage(userId) != null,
                 sessions.getLastImage(userId) != null,
@@ -107,6 +117,7 @@ public final class UserRequestHandler {
         }
     }
 
+    /** 处理绘图请求；缺少尺寸时先保存提示词，等待用户补充。 */
     private void handleDraw(ILinkClient client, String userId, String userText,
                             IntentResult route) throws Exception {
         sessions.clearPendingDraw(userId);
@@ -128,6 +139,7 @@ public final class UserRequestHandler {
         }
     }
 
+    /** 处理用户对上一次绘图请求补充的尺寸选择。 */
     private void handleDrawSize(ILinkClient client, String userId, IntentResult route) throws Exception {
         String prompt = sessions.peekPendingDraw(userId);
         if (prompt == null) {
@@ -148,6 +160,7 @@ public final class UserRequestHandler {
         }
     }
 
+    /** 校验并切换用户当前人设。 */
     private void handlePersonaSwitch(ILinkClient client, String userId, String userText,
                                      IntentResult route) throws Exception {
         String persona = route.persona();
@@ -162,6 +175,7 @@ public final class UserRequestHandler {
         replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
     }
 
+    /** 查找历史语音，必要时调用转写服务并返回文字。 */
     private void handleAudioTranscribe(ILinkClient client, String userId,
                                        IntentResult route) throws Exception {
         int index = Math.max(1, Math.min(route.audioIndex(), 100));
@@ -196,6 +210,7 @@ public final class UserRequestHandler {
         client.sendText(userId, "第" + index + "条" + owner + "的语音文字：\n" + transcript);
     }
 
+    /** 处理图片分析、解题和编辑请求。 */
     private void handleImageAction(ILinkClient client, String userId,
                                    IntentResult route) throws Exception {
         String pendingImage = sessions.peekPendingImage(userId);
@@ -235,6 +250,7 @@ public final class UserRequestHandler {
         }
     }
 
+    /** 处理文档问答、总结、生成和 DOCX 编辑请求。 */
     private void handleDocumentAction(ILinkClient client, String userId, String userText,
                                       IntentResult route) throws Exception {
         DocumentRecord document = documentSessions.get(userId);
@@ -303,6 +319,7 @@ public final class UserRequestHandler {
         client.sendFile(userId, output, outputName, "文件已生成");
     }
 
+    /** 根据原文档类型选择默认输出格式。 */
     private String defaultDocumentOutputType(DocumentRecord document) {
         if (document == null) return "docx";
         return "pdf".equals(document.extension()) ? "pdf" : "docx";

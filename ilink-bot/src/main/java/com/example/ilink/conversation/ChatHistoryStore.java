@@ -16,6 +16,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * 对话历史和摘要存储。
+ *
+ * <p>保存用户与机器人的最近消息，并在历史过长时调用模型压缩成摘要，
+ * 以控制后续请求的上下文长度。</p>
+ */
 public final class ChatHistoryStore {
 
     private static final int MAX_HISTORY = 20;
@@ -26,13 +32,16 @@ public final class ChatHistoryStore {
     private final Map<String, List<JsonObject>> chatHistory = new ConcurrentHashMap<>();
     private final Map<String, String> conversationSummary = new ConcurrentHashMap<>();
 
+    /** 创建历史存储器，并注入用于摘要压缩的 HTTP 客户端。 */
     public ChatHistoryStore(HttpClient httpClient) {
         this.httpClient = httpClient;
     }
+    /** 把图片、音频或文档等媒体事件加入对话历史。 */
     public void addMedia(String userId, String type, String path, String summary) {
         add(userId, "[用户发送了" + type + ": " + path + "]", summary);
     }
 
+    /** 追加一轮用户消息和机器人回复。 */
     public void add(String userId, String userContent, String assistantContent) {
         List<JsonObject> history = chatHistory.computeIfAbsent(userId, k -> Collections.synchronizedList(new LinkedList<>()));
         JsonObject userMsg = new JsonObject();
@@ -48,6 +57,7 @@ public final class ChatHistoryStore {
         }
     }
 
+    /** 将当前用户的摘要和最近消息复制到模型请求数组。 */
     public void addHistoryMessages(JsonArray target, String userId) {
         String summary = conversationSummary.get(userId);
         if (summary != null && !summary.isEmpty()) {
@@ -66,6 +76,7 @@ public final class ChatHistoryStore {
         }
     }
 
+    /** 压缩过长的历史，保留最近消息并更新摘要。 */
     private void compress(String userId) {
         List<JsonObject> history = chatHistory.get(userId);
         if (history == null || history.size() < COMPRESS_BATCH) return;
@@ -86,6 +97,7 @@ public final class ChatHistoryStore {
         } catch (Exception ignored) {}
     }
 
+    /** 调用模型把旧消息整理成简短摘要。 */
     private String callSummary(String conversationText) throws Exception {
         JsonObject body = new JsonObject();
         body.addProperty("model", Config.MODEL);

@@ -14,15 +14,23 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Base64;
 
+/**
+ * 图片理解服务。
+ *
+ * <p>将图片转换为 Base64 后提交视觉模型，返回模型对图片的文字分析结果。</p>
+ */
 public final class VisionService {
 
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
 
+    /** 创建视觉服务并注入 HTTP 客户端。 */
     public VisionService(HttpClient httpClient) {
         this.httpClient = httpClient;
     }
+    /** 将 Base64 图片和用户问题提交给视觉模型。 */
     public String vision(String userMessage, String base64Image) throws Exception {
+        // 图片分析和普通聊天使用不同模型与消息结构，因此单独封装。
         JsonObject body = new JsonObject();
         body.addProperty("model", Config.VISION_MODEL);
 

@@ -5,6 +5,13 @@ import java.nio.file.*;
 import java.time.Duration;
 import java.util.Properties;
 
+/**
+ * 应用配置中心。
+ *
+ * <p>从项目运行目录下的 {@code config.properties} 读取 API Key、模型、
+ * 音频目录和超时时间等配置；配置文件不存在或 API Key 无效时，程序会在
+ * 启动阶段直接提示错误。</p>
+ */
 public class Config {
 
     public static final String API_KEY = loadApiKey();
@@ -40,6 +47,7 @@ public class Config {
     public static final Duration DOCUMENT_REQ_TIMEOUT = Duration.ofSeconds(
             Long.parseLong(loadProperty("document.request.timeout.seconds", "240")));
 
+    /** 读取 API Key；不存在或仍为模板值时终止启动。 */
     private static String loadApiKey() {
         try {
             Properties props = new Properties();
@@ -60,6 +68,7 @@ public class Config {
         return null;
     }
 
+    /** 读取普通配置项，文件不存在或读取失败时返回默认值。 */
     private static String loadProperty(String name, String defaultValue) {
         try {
             Properties props = new Properties();
