@@ -58,7 +58,8 @@ public final class IntentRecognizer {
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
-                System.err.println("[Router] HTTP " + response.statusCode() + ": " + response.body());
+                System.err.println("[意图识别] 请求失败，HTTP "
+                        + response.statusCode() + "：" + response.body());
                 return null;
             }
 
@@ -81,9 +82,11 @@ public final class IntentRecognizer {
                     result.get("audio_source").getAsString(),
                     result.get("audio_index").getAsInt(),
                     result.get("document_action").getAsString(),
-                    result.get("output_file_type").getAsString());
+                    result.get("output_file_type").getAsString(),
+                    result.get("weather_location").getAsString(),
+                    result.get("weather_day").getAsString());
         } catch (Exception e) {
-            System.err.println("[Router] 意图识别失败: " + e.getMessage());
+            System.err.println("[意图识别] 识别失败：" + e.getMessage());
             return null;
         }
     }
@@ -120,26 +123,32 @@ public final class IntentRecognizer {
         prompt.append("9. generate_file：用户明确要求把文件总结或回答整理成 PDF 或 DOCX 时使用。\n");
         prompt.append("document_action 只能是 none|summary|question；没有文件时必须为 none。"
                 + "生成文件时 output_file_type 为 docx 或 pdf，否则为 none。\n\n");
+        prompt.append("10. weather：用户明确查询某个城市、区县、乡镇的天气、温度、降雨或风力时使用。"
+                + "weather_location 必须填写可供 Open-Meteo 检索的英文地点名，例如北京填 Beijing，上海填 Shanghai，"
+                + "和平镇填 Heping；用户提供了省、市、县时也要保留这些英文行政区信息。"
+                + "今天或当前天气时 weather_day=today，明天天气时 weather_day=tomorrow。"
+                + "用户未说明地点时 weather_location 为空。\n\n");
 
         prompt.append("Document rules: when has_document=true, use document_summary for summarizing, document_question for questions, document_edit when the user asks to modify, rewrite, delete, add, or correct the current document, and generate_file when the user asks for a PDF or DOCX output. document_action must be none, summary, question, or edit. output_file_type must be none, docx, or pdf.\n");
         prompt.append("输出规则：\n");
         prompt.append("- 用户明确只要语音时 reply_mode=voice；明确同时要文字和语音时为both；要求关闭语音时为text；否则为keep。\n");
         prompt.append("- voice_style：小男孩=boy，小女孩=girl，成年男声=male，成年女声=female，温柔柔和=warm，活泼元气=lively，无要求=default。\n");
-        prompt.append("- 未使用的字符串字段填空字符串，image_size填none，image_action填none，audio_source填any，audio_index填1。\n");
+        prompt.append("- 未使用的字符串字段填空字符串，image_size填none，image_action填none，audio_source填any，audio_index填1，weather_day填today。\n");
         prompt.append("最高优先级校验示例：用户输入‘用小男孩的音色给我讲个笑话’时，"
                 + "intent必须为chat，reply_mode必须为voice，voice_style必须为boy，"
                 + "en_prompt和cn_description必须为空，image_size必须为none。\n");
         prompt.append("提交结果前逐项检查：音色要求是否正确写入voice_style；语音要求是否正确写入reply_mode；"
                 + "没有明确生成图片要求时intent绝不能为draw。");
         prompt.append("\n输出必须包含以下全部字段："
-                + "{\"intent\":\"chat|draw|persona_switch|audio_transcribe|image_action|draw_size|document_summary|document_question|generate_file|document_edit\","
+                + "{\"intent\":\"chat|draw|persona_switch|audio_transcribe|image_action|draw_size|document_summary|document_question|generate_file|document_edit|weather\","
                 + "\"en_prompt\":\"\",\"cn_description\":\"\","
                 + "\"image_size\":\"none|1024x1024|768x1024|1024x576\","
                 + "\"reply_mode\":\"keep|text|voice|both\","
                 + "\"voice_style\":\"default|boy|girl|male|female|warm|lively\","
                 + "\"persona\":\"\",\"image_action\":\"none|analyze|solve|edit|clarify\","
                 + "\"image_prompt\":\"\",\"audio_source\":\"any|bot|user\",\"audio_index\":1,"
-                + "\"document_action\":\"none|summary|question\",\"output_file_type\":\"none|docx|pdf\"}。");
+                + "\"document_action\":\"none|summary|question\",\"output_file_type\":\"none|docx|pdf\","
+                + "\"weather_location\":\"\",\"weather_day\":\"today|tomorrow\"}。");
         return prompt.toString();
     }
 

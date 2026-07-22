@@ -1,55 +1,70 @@
 package com.example.ilink.feature.audio;
 
 import com.example.ilink.config.Config;
-import com.google.gson.Gson;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.Locale;
-import java.util.UUID;
 
 /**
  * 文本转语音服务。
  *
- * <p>根据默认配置或用户指定的音色风格调用语音合成接口，并返回音频字节。</p>
+ * <p>优先生成 MP3；接口不支持或生成失败时自动改为 WAV。</p>
  */
 public final class SpeechSynthesisService {
 
     private final HttpClient httpClient;
-    private final Gson gson = new Gson();
 
     /** 创建文本转语音服务。 */
     public SpeechSynthesisService(HttpClient httpClient) {
         this.httpClient = httpClient;
     }
     /** 使用配置中的默认音色合成语音。 */
-    public byte[] synthesize(String text) throws Exception {
+    public SynthesizedAudio synthesize(String text) throws Exception {
         return synthesize(text, "default");
     }
 
-    /** 根据音色风格选择 voice 参数并合成语音。 */
-    public byte[] synthesize(String text, String voiceStyle) throws Exception {
+    /** 根据音色风格优先生成 MP3，失败时自动生成 WAV。 */
+    public SynthesizedAudio synthesize(String text, String voiceStyle) throws Exception {
         if (text == null || text.isBlank()) {
             throw new IllegalArgumentException("语音合成文本不能为空");
         }
 
         String voice = resolveVoice(voiceStyle);
         System.out.println("[TTS] inputLength=" + text.codePointCount(0, text.length()) + ", voice=" + voice);
+        try {
+            return synthesize(text, voice, "mp3");
+        } catch (Exception mp3Error) {
+            System.err.println("[TTS] MP3 生成失败，改用 WAV: " + mp3Error.getMessage());
+            try {
+                return synthesize(text, voice, "wav");
+            } catch (Exception wavError) {
+                wavError.addSuppressed(mp3Error);
+                throw wavError;
+            }
+        }
+    }
+
+    /** 在 MP3 文件无法发送时，显式生成 WAV 重试。 */
+    public SynthesizedAudio synthesizeWav(String text, String voiceStyle) throws Exception {
+        if (text == null || text.isBlank()) {
+            throw new IllegalArgumentException("语音合成文本不能为空");
+        }
+        return synthesize(text, resolveVoice(voiceStyle), "wav");
+    }
+
+    private SynthesizedAudio synthesize(String text, String voice, String format)
+            throws IOException, InterruptedException {
         JsonObject body = new JsonObject();
         body.addProperty("model", Config.TTS_MODEL);
         body.addProperty("input", text);
         body.addProperty("voice", voice);
-        body.addProperty("response_format", "mp3");
+        body.addProperty("response_format", format);
         body.addProperty("sample_rate", 32000);
         body.addProperty("stream", false);
 
@@ -66,8 +81,12 @@ public final class SpeechSynthesisService {
             throw new IOException("语音合成失败: HTTP " + response.statusCode() + " - "
                     + new String(response.body(), StandardCharsets.UTF_8));
         }
-        System.out.println("[TTS] MP3 生成成功，字节数=" + response.body().length);
-        return response.body();
+        if (response.body().length == 0) {
+            throw new IOException("语音合成失败: 返回空音频");
+        }
+        System.out.println("[TTS] " + format.toUpperCase(Locale.ROOT)
+                + " 生成成功，字节数=" + response.body().length);
+        return new SynthesizedAudio(response.body(), format);
     }
 
     /** 把业务层音色名称映射为配置中的具体模型音色。 */

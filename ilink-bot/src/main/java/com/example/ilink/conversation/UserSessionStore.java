@@ -1,7 +1,9 @@
 package com.example.ilink.conversation;
 
 import com.example.ilink.feature.persona.Personas;
+import com.example.ilink.feature.weather.WeatherLocation;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -17,6 +19,8 @@ public final class UserSessionStore {
     private final Map<String, String> pendingDrawPrompts = new ConcurrentHashMap<>();
     private final Map<String, String> lastImagePaths = new ConcurrentHashMap<>();
     private final Map<String, String> pendingImagePaths = new ConcurrentHashMap<>();
+    private final Map<String, List<WeatherLocation>> pendingWeatherLocations = new ConcurrentHashMap<>();
+    private final Map<String, String> pendingWeatherDays = new ConcurrentHashMap<>();
 
     /** 设置用户当前人设名称。 */
     public void setPersona(String userId, String persona) {
@@ -67,5 +71,32 @@ public final class UserSessionStore {
     /** 清除待处理图片状态。 */
     public void clearPendingImage(String userId) {
         pendingImagePaths.remove(userId);
+    }
+
+    /** 保存等待用户确认的同名天气地点。 */
+    public void setPendingWeatherLocations(String userId, List<WeatherLocation> locations, String weatherDay) {
+        pendingWeatherLocations.put(userId, List.copyOf(locations));
+        pendingWeatherDays.put(userId, weatherDay);
+    }
+
+    /** 获取待确认的天气地点。 */
+    public List<WeatherLocation> getPendingWeatherLocations(String userId) {
+        return pendingWeatherLocations.getOrDefault(userId, List.of());
+    }
+
+    /** 判断用户是否正在选择天气地点。 */
+    public boolean hasPendingWeatherLocations(String userId) {
+        return pendingWeatherLocations.containsKey(userId);
+    }
+
+    /** 获取待确认天气查询对应的日期。 */
+    public String getPendingWeatherDay(String userId) {
+        return pendingWeatherDays.getOrDefault(userId, "today");
+    }
+
+    /** 清除待确认的天气地点。 */
+    public void clearPendingWeatherLocations(String userId) {
+        pendingWeatherLocations.remove(userId);
+        pendingWeatherDays.remove(userId);
     }
 }
