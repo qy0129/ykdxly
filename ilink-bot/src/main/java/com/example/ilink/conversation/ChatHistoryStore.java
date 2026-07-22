@@ -3,6 +3,7 @@ package com.example.ilink.conversation;
 import com.example.ilink.config.Config;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
@@ -10,6 +11,8 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
@@ -26,6 +29,7 @@ public final class ChatHistoryStore {
 
     private static final int MAX_HISTORY = 20;
     private static final int COMPRESS_BATCH = 6;
+    private static final DateTimeFormatter TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
@@ -41,16 +45,19 @@ public final class ChatHistoryStore {
         add(userId, "[用户发送了" + type + ": " + path + "]", summary);
     }
 
-    /** 追加一轮用户消息和机器人回复。 */
+    /** 追加一轮用户消息和机器人回复，自动记录时间戳。 */
     public void add(String userId, String userContent, String assistantContent) {
         List<JsonObject> history = chatHistory.computeIfAbsent(userId, k -> Collections.synchronizedList(new LinkedList<>()));
+        String now = LocalDateTime.now().format(TIMESTAMP_FORMAT);
         JsonObject userMsg = new JsonObject();
         userMsg.addProperty("role", "user");
         userMsg.addProperty("content", userContent);
+        userMsg.addProperty("created_at", now);
         history.add(userMsg);
         JsonObject assistantMsg = new JsonObject();
         assistantMsg.addProperty("role", "assistant");
         assistantMsg.addProperty("content", assistantContent);
+        assistantMsg.addProperty("created_at", now);
         history.add(assistantMsg);
         if (history.size() >= MAX_HISTORY) {
             compress(userId);
@@ -74,6 +81,29 @@ public final class ChatHistoryStore {
                 }
             }
         }
+    }
+
+    /**
+     * 按内容关键词查找用户消息的创建时间。
+     *
+     * @param userId       用户 ID
+     * @param contentKeyword 要搜索的消息内容关键词
+     * @return 第一条匹配的用户消息的创建时间，未找到时返回 null
+     */
+    public String findUserMessageTime(String userId, String contentKeyword) {
+        List<JsonObject> history = chatHistory.get(userId);
+        if (history == null) return null;
+        synchronized (history) {
+            for (JsonObject msg : history) {
+                if (!"user".equals(msg.get("role").getAsString())) continue;
+                String content = msg.get("content").getAsString();
+                if (content.contains(contentKeyword)) {
+                    JsonElement time = msg.get("created_at");
+                    return time == null ? null : time.getAsString();
+                }
+            }
+        }
+        return null;
     }
 
     /** 压缩过长的历史，保留最近消息并更新摘要。 */

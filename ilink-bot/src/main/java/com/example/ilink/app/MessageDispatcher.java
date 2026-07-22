@@ -4,7 +4,6 @@ import com.example.ilink.config.Config;
 import com.example.ilink.conversation.AudioHistoryStore;
 import com.example.ilink.conversation.ChatHistoryStore;
 import com.example.ilink.conversation.DocumentSessionStore;
-import com.example.ilink.conversation.PlanSessionStore;
 import com.example.ilink.conversation.UserSessionStore;
 import com.example.ilink.feature.audio.AudioService;
 import com.example.ilink.feature.chat.ChatService;
@@ -12,7 +11,6 @@ import com.example.ilink.feature.document.DocumentAiService;
 import com.example.ilink.feature.document.DocumentService;
 import com.example.ilink.feature.image.ImageService;
 import com.example.ilink.feature.persona.Personas;
-import com.example.ilink.feature.planning.TaskPlanningService;
 import com.example.ilink.feature.weather.WeatherService;
 import com.example.ilink.tools.audio.AudioTranscribeTool;
 import com.example.ilink.tools.audio.SpeechTool;
@@ -24,11 +22,7 @@ import com.example.ilink.tools.image.DrawTool;
 import com.example.ilink.tools.image.ImageAnalysisTool;
 import com.example.ilink.tools.image.ImageEditTool;
 import com.example.ilink.tools.persona.PersonaSwitchTool;
-import com.example.ilink.tools.planning.DateTimeTool;
-import com.example.ilink.tools.planning.PlanAdjustTool;
-import com.example.ilink.tools.planning.PlanProgressTool;
-import com.example.ilink.tools.planning.TaskDecompositionTool;
-import com.example.ilink.tools.planning.TaskPlanTool;
+import com.example.ilink.tools.planning.DeadlineCountdownTool;
 import com.example.ilink.tools.weather.WeatherTool;
 import com.example.ilink.model.AudioRecord;
 import com.example.ilink.model.AudioSource;
@@ -68,7 +62,6 @@ public final class MessageDispatcher implements AutoCloseable {
     private final UserSessionStore sessions = new UserSessionStore();
     private final AudioHistoryStore audioHistory = new AudioHistoryStore();
     private final DocumentSessionStore documentSessions = new DocumentSessionStore();
-    private final PlanSessionStore planSessions = new PlanSessionStore();
     private final IntentRecognizer intentRecognizer = new IntentRecognizer(httpClient);
     private final ChatService chatService = new ChatService(httpClient, chatHistory, sessions);
     private final DocumentAiService documentAiService = new DocumentAiService(httpClient, chatHistory);
@@ -76,7 +69,6 @@ public final class MessageDispatcher implements AutoCloseable {
     private final DocumentService documentService = new DocumentService();
     private final ImageService imageService = new ImageService(httpClient);
     private final WeatherService weatherService = new WeatherService(httpClient);
-    private final TaskPlanningService planningService = new TaskPlanningService(httpClient);
     private final MediaStore mediaStore = new MediaStore();
     private final ToolManager toolManager = new ToolManager()
             .register(new WeatherTool(weatherService))
@@ -89,20 +81,14 @@ public final class MessageDispatcher implements AutoCloseable {
             .register(new AudioTranscribeTool(audioService, audioHistory))
             .register(new SpeechTool(audioService))
             .register(new PersonaSwitchTool(sessions))
-            .register(new DateTimeTool())
-            .register(new TaskDecompositionTool(planningService))
-            .register(new TaskPlanTool(planningService))
-            .register(new PlanAdjustTool(planningService, planSessions))
-            .register(new PlanProgressTool(planningService, planSessions));
+            .register(new DeadlineCountdownTool());
     private final Set<String> voiceReplyUsers = ConcurrentHashMap.newKeySet();
     private final ReplySender replySender = new ReplySender(
             audioService, mediaStore, audioHistory, toolManager);
-    private final PlanWorkflow planWorkflow = new PlanWorkflow(
-            toolManager, planSessions, chatHistory, replySender);
     private final UserRequestHandler requestHandler = new UserRequestHandler(
             chatHistory, sessions, documentSessions,
             intentRecognizer, chatService, weatherService,
-            mediaStore, replySender, toolManager, planWorkflow);
+            mediaStore, replySender, toolManager);
     private final ScheduledExecutorService progressScheduler = Executors.newScheduledThreadPool(1);
     /** 接收一条 SDK 消息，并异步提交给内部处理流程。 */
     public void handleMessage(ILinkClient client, WeixinMessage message) {
