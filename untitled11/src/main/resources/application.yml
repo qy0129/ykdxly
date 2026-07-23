@@ -1,8 +1,0 @@
-server:
-  port: 8080
-
-amap:
-  api:
-    # 高德地图 Web服务 API Key
-    # 申请地址: https://console.amap.com/dev/key/app
-    key: 31feddd6623db8315f551273b8235fa5
