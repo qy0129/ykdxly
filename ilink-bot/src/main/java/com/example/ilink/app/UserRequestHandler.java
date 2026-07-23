@@ -5,6 +5,7 @@ import com.example.ilink.conversation.ChatHistoryStore;
 import com.example.ilink.conversation.DocumentSessionStore;
 import com.example.ilink.conversation.UserSessionStore;
 import com.example.ilink.feature.chat.ChatService;
+import com.example.ilink.feature.calculator.CalculatorService;
 import com.example.ilink.feature.weather.WeatherLocation;
 import com.example.ilink.feature.weather.WeatherService;
 import com.example.ilink.model.DocumentRecord;
@@ -20,9 +21,11 @@ import com.example.ilink.tools.document.DocumentEditTool;
 import com.example.ilink.tools.document.DocumentGenerateTool;
 import com.example.ilink.tools.document.DocumentQATool;
 import com.example.ilink.tools.document.DocumentToolOutput;
+import com.example.ilink.tools.finance.ExpenseSplitTool;
 import com.example.ilink.tools.image.DrawTool;
 import com.example.ilink.tools.image.ImageAnalysisTool;
 import com.example.ilink.tools.image.ImageEditTool;
+import com.example.ilink.tools.math.CalculatorTool;
 import com.example.ilink.tools.persona.PersonaSwitchTool;
 import com.example.ilink.tools.planning.DeadlineCountdownTool;
 import com.example.ilink.tools.weather.WeatherTool;
@@ -30,8 +33,6 @@ import com.github.wechat.ilink.sdk.ILinkClient;
 import com.google.gson.JsonObject;
 
 import java.nio.file.Path;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
 
@@ -53,13 +54,22 @@ public final class UserRequestHandler {
     private final MediaStore mediaStore;
     private final ReplySender replySender;
     private final ToolManager toolManager;
+    private final PlanWorkflow planWorkflow;
+    private final CalculatorService calculatorService;
+    private final CalendarWorkflow calendarWorkflow;
+    private final HealthDietWorkflow healthDietWorkflow;
+    private final TravelWorkflow travelWorkflow;
+    private final NearbyFoodWorkflow nearbyFoodWorkflow;
 
     /** 注入所有业务服务，保持本类只负责请求编排。 */
     public UserRequestHandler(ChatHistoryStore chatHistory, UserSessionStore sessions,
                               DocumentSessionStore documentSessions,
                               IntentRecognizer intentRecognizer, ChatService chatService,
                               WeatherService weatherService, MediaStore mediaStore,
-                              ReplySender replySender, ToolManager toolManager) {
+                              ReplySender replySender, ToolManager toolManager,
+                              PlanWorkflow planWorkflow, CalculatorService calculatorService,
+                              CalendarWorkflow calendarWorkflow, HealthDietWorkflow healthDietWorkflow,
+                              TravelWorkflow travelWorkflow, NearbyFoodWorkflow nearbyFoodWorkflow) {
         this.chatHistory = chatHistory;
         this.sessions = sessions;
         this.documentSessions = documentSessions;
@@ -69,11 +79,38 @@ public final class UserRequestHandler {
         this.mediaStore = mediaStore;
         this.replySender = replySender;
         this.toolManager = toolManager;
+        this.planWorkflow = planWorkflow;
+        this.calculatorService = calculatorService;
+        this.calendarWorkflow = calendarWorkflow;
+        this.healthDietWorkflow = healthDietWorkflow;
+        this.travelWorkflow = travelWorkflow;
+        this.nearbyFoodWorkflow = nearbyFoodWorkflow;
     }
     /** 识别用户意图并调用对应功能处理器。 */
     public void handle(ILinkClient client, String userId, String text) throws Exception {
+        // 只对未完成会话使用本地状态机；所有新请求都必须先经过大模型语义路由。
         if (sessions.hasPendingWeatherLocations(userId)) {
             handleWeatherLocationSelection(client, userId, text);
+            return;
+        }
+        if (planWorkflow.hasPendingPlan(userId)) {
+            planWorkflow.completePendingPlan(client, userId, text);
+            return;
+        }
+        if (planWorkflow.hasPendingCalendarSync(userId)) {
+            planWorkflow.completeCalendarSync(client, userId, text);
+            return;
+        }
+        if (calendarWorkflow.hasPending(userId)) {
+            calendarWorkflow.handle(client, userId, text);
+            return;
+        }
+        if (healthDietWorkflow.hasPending(userId)) {
+            healthDietWorkflow.handlePending(client, userId, text);
+            return;
+        }
+        if (nearbyFoodWorkflow.hasPendingLocation(userId)) {
+            nearbyFoodWorkflow.handleLocationSelection(client, userId, text);
             return;
         }
 
@@ -100,9 +137,25 @@ public final class UserRequestHandler {
             case "audio_transcribe" -> handleAudioTranscribe(client, userId, route);
             case "image_action" -> handleImageAction(client, userId, route);
             case "weather" -> handleWeather(client, userId, text, route);
+            case "task_plan" -> planWorkflow.createPlan(client, userId, text, route);
+            case "travel_plan" -> travelWorkflow.handle(client, userId, route);
+            case "diet_plan" -> healthDietWorkflow.handle(client, userId, route);
+            case "nearby_food" -> nearbyFoodWorkflow.handle(client, userId, route);
+            case "calendar_event" -> calendarWorkflow.handle(client, userId, text, route);
+            case "planning_capabilities" -> replySender.sendReply(client, userId, planningCapabilitiesText(),
+                    route.replyMode(), route.voiceStyle());
+            case "plan_adjust" -> planWorkflow.adjustPlan(client, userId, text, route);
+            case "plan_progress" -> planWorkflow.queryProgress(client, userId, text, route);
+            case "expense_split" -> handleExpenseSplit(client, userId, text, route);
+            case "deadline_countdown" -> handleDeadlineCountdown(client, userId, text, route);
+            case "calculator" -> {
+                String reply = calculatorService.execute(userId, text);
+                chatHistory.add(userId, text, reply);
+                replySender.applyReplyMode(userId, route.replyMode());
+                replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
+            }
             case "document_summary", "document_question", "generate_file", "document_edit" ->
                     handleDocumentAction(client, userId, text, route);
-            case "deadline_countdown" -> handleDeadlineCountdown(client, userId, text, route);
             default -> {
                 String reply = chatService.chat(userId, text);
                 if (reply == null || reply.isBlank()) {
@@ -229,6 +282,35 @@ public final class UserRequestHandler {
                 replySender.sendReply(client, userId, result.output());
             }
         }
+    }
+
+    /** 调用费用分摊工具，处理多人 AA 和不同付款金额的结算。 */
+    private void handleExpenseSplit(ILinkClient client, String userId, String userText,
+                                    IntentResult route) throws Exception {
+        JsonObject arguments = new JsonObject();
+        arguments.addProperty("request", userText);
+        ToolResult result = toolManager.execute(
+                ExpenseSplitTool.NAME, new ToolContext(userId), arguments);
+        chatHistory.add(userId, userText, result.output());
+        replySender.applyReplyMode(userId, route.replyMode());
+        replySender.sendReply(client, userId, result.output(), route.replyMode(), route.voiceStyle());
+    }
+
+    /** 调用截止时间工具，返回用户距离目标时间的剩余时长。 */
+    private void handleDeadlineCountdown(ILinkClient client, String userId, String userText,
+                                         IntentResult route) throws Exception {
+        if (route.planDeadline().isBlank()) {
+            replySender.sendReply(client, userId, "请告诉我具体截止时间，例如“明天下午六点”。",
+                    route.replyMode(), route.voiceStyle());
+            return;
+        }
+        JsonObject arguments = new JsonObject();
+        arguments.addProperty("deadline", route.planDeadline());
+        ToolResult result = toolManager.execute(
+                DeadlineCountdownTool.NAME, new ToolContext(userId), arguments);
+        chatHistory.add(userId, userText, result.output());
+        replySender.applyReplyMode(userId, route.replyMode());
+        replySender.sendReply(client, userId, result.output(), route.replyMode(), route.voiceStyle());
     }
 
     /** 查询天气；同名地点时保存候选项并等待用户选择。 */
@@ -364,46 +446,42 @@ public final class UserRequestHandler {
         client.sendFile(userId, output.bytes(), output.fileName(), output.caption());
     }
 
-    /** 处理截止时间倒计时查询。 */
-    private void handleDeadlineCountdown(ILinkClient client, String userId, String userText,
-                                          IntentResult route) throws Exception {
-        String deadlineExpr = route.planDeadline();
-        if (deadlineExpr == null || deadlineExpr.isBlank()) {
-            replySender.sendReply(client, userId, "请告诉我你的截止时间，比如\u201c下午6点下班\u201d\u201c明天下午5点\u201d。");
-            return;
-        }
-
-        // 记录消息创建时间，作为倒计时计算基准
-        String msgCreatedAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-        JsonObject arguments = new JsonObject();
-        arguments.addProperty("deadline", deadlineExpr);
-        arguments.addProperty("reference_time", msgCreatedAt);
-        ToolResult result = toolManager.execute(
-                DeadlineCountdownTool.NAME, new ToolContext(userId), arguments);
-
-        String reply;
-        if (!result.success()) {
-            reply = result.output();
-        } else {
-            // 把用户原话 + 工具计算结果一起发给模型，让模型生成自然回复
-            String modelInput = "用户说：" + userText + "\n\n"
-                    + "【工具计算结果】" + result.output() + "\n\n"
-                    + "请根据工具计算结果，用自然的语气回复用户。";
-            reply = chatService.chat(userId, modelInput);
-            if (reply == null || reply.isBlank()) {
-                reply = result.output();
-            }
-        }
-
-        chatHistory.add(userId, userText, reply);
-        replySender.applyReplyMode(userId, route.replyMode());
-        replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
-    }
-
     /** 根据原文档类型选择默认输出格式。 */
     private String defaultDocumentOutputType(DocumentRecord document) {
         if (document == null) return "docx";
         return "pdf".equals(document.extension()) ? "pdf" : "docx";
+    }
+
+    /** 根据意图结果调用基础计算工具。 */
+    private void handleCalculator(ILinkClient client, String userId,
+                                  IntentResult route) throws Exception {
+        JsonObject arguments = new JsonObject();
+        arguments.addProperty("operation", route.calculationOperation().isBlank()
+                ? "add" : route.calculationOperation());
+        arguments.addProperty("left", route.calculationLeft().isBlank()
+                ? "0" : route.calculationLeft());
+        arguments.addProperty("right", route.calculationRight().isBlank()
+                ? "0" : route.calculationRight());
+        arguments.addProperty("quantity", integerValue(route.calculationQuantity(), 1));
+        arguments.addProperty("unit_price", route.calculationUnitPrice().isBlank()
+                ? "0" : route.calculationUnitPrice());
+        arguments.addProperty("discount_percent", route.calculationDiscountPercent().isBlank()
+                ? "0" : route.calculationDiscountPercent());
+
+        ToolResult result = toolManager.execute(
+                CalculatorTool.NAME, new ToolContext(userId), arguments);
+        replySender.applyReplyMode(userId, route.replyMode());
+        replySender.sendReply(client, userId, result.output(),
+                route.replyMode(), route.voiceStyle());
+    }
+
+    /** 将意图中的数量文本转换为整数。 */
+    private int integerValue(String value, int defaultValue) {
+        try {
+            return value == null || value.isBlank() ? defaultValue : Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     /** 将内部英文意图转换为便于阅读的中文名称。 */
@@ -420,7 +498,17 @@ public final class UserRequestHandler {
             case "generate_file" -> "生成文件";
             case "document_edit" -> "编辑文档";
             case "weather" -> "天气";
+            case "travel_plan" -> "出行规划";
+            case "diet_plan" -> "饮食规划";
+            case "nearby_food" -> "附近美食";
+            case "calendar_event" -> "日历事件";
+            case "planning_capabilities" -> "规划能力说明";
+            case "task_plan" -> "制定计划";
+            case "plan_adjust" -> "调整计划";
+            case "plan_progress" -> "查询计划进度";
+            case "expense_split" -> "费用分摊";
             case "deadline_countdown" -> "截止时间倒计时";
+            case "calculator" -> "基础计算";
             default -> intent;
         };
     }
@@ -448,6 +536,26 @@ public final class UserRequestHandler {
             case "default" -> "默认";
             default -> voiceStyle;
         };
+    }
+
+    /** 判断用户是否在询问规划能力，而不是要立即创建某个具体计划。 */
+    private boolean isPlanningCapabilityQuestion(String text) {
+        return text.contains("可以帮我做什么规划") || text.contains("能帮我做什么规划")
+                || text.contains("有哪些规划功能") || text.contains("规划功能有哪些");
+    }
+
+    /** 仅在用户主动询问时展示，保持日常对话界面简洁。 */
+    private String planningCapabilitiesText() {
+        return "我可以帮你做这些规划：\n"
+                + "1. 学习与阅读：拆分目标、安排每日任务、跟踪进度。\n"
+                + "2. 健康饮食：制定餐食安排、用餐提醒，并按目标推荐外卖。\n"
+                + "3. 日程提醒：记录一次性、每天、每周、每月、每年的事项，到点主动提醒。\n"
+                + "4. 出行行程：安排出发时间、路线和地点标记地图。\n"
+                + "5. 生活事件：缴费、家庭活动、纪念日、体检、宠物护理等都可以直接记到日历。\n\n"
+                + "例如：\n"
+                + "“明天早上 8 点提醒我吃药”\n"
+                + "“帮我安排两周阅读计划”\n"
+                + "“下周六从北京去天津怎么安排”";
     }
 
 }

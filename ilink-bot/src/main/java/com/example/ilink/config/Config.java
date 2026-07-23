@@ -46,6 +46,17 @@ public class Config {
             Long.parseLong(loadProperty("request.timeout.seconds", "120")));
     public static final Duration DOCUMENT_REQ_TIMEOUT = Duration.ofSeconds(
             Long.parseLong(loadProperty("document.request.timeout.seconds", "240")));
+    public static final boolean DATABASE_ENABLED =
+            Boolean.parseBoolean(loadProperty("database.enabled", "false"));
+    public static final String DATABASE_URL = loadProperty("database.url",
+            "jdbc:mysql://127.0.0.1:3306/ilink_bot?useUnicode=true&characterEncoding=UTF-8"
+                    + "&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true"
+                    + "&connectTimeout=5000&socketTimeout=10000");
+    public static final String DATABASE_USERNAME = loadProperty("database.username", "root");
+    public static final String DATABASE_PASSWORD = loadProperty("database.password", "");
+    public static final String DATABASE_BOT_ID = loadProperty("database.bot.id", "ilink-bot-1");
+    /** 高德 Web 服务 Key；为空时保留文字出行建议，不生成地图图片。 */
+    public static final String AMAP_API_KEY = loadProperty("amap.api.key", "");
 
     /** 读取 API Key；不存在或仍为模板值时终止启动。 */
     private static String loadApiKey() {
