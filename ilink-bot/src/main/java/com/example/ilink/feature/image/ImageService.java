@@ -26,12 +26,12 @@ public final class ImageService {
     }
 
     /** 调用图片生成服务。 */
-    public byte[] generateImage(String prompt, String imageSize) throws Exception {
+    public GeneratedImage generateImage(String prompt, String imageSize) throws Exception {
         return generationService.generateImage(prompt, imageSize);
     }
 
     /** 调用图片编辑服务。 */
-    public byte[] editImage(Path sourceImage, String prompt) throws Exception {
+    public GeneratedImage editImage(Path sourceImage, String prompt) throws Exception {
         return generationService.editImage(sourceImage, prompt);
     }
 }

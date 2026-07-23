@@ -1,6 +1,7 @@
 package com.example.ilink.tools.image;
 
 import com.example.ilink.feature.image.ImageService;
+import com.example.ilink.feature.image.GeneratedImage;
 import com.example.ilink.tools.core.Tool;
 import com.example.ilink.tools.core.ToolArguments;
 import com.example.ilink.tools.core.ToolContext;
@@ -43,7 +44,7 @@ public final class DrawTool implements Tool {
     public ToolResult execute(ToolContext context, JsonObject arguments) throws Exception {
         String prompt = ToolArguments.requireString(arguments, "prompt");
         String imageSize = ToolArguments.requireString(arguments, "image_size");
-        byte[] image = imageService.generateImage(prompt, imageSize);
+        GeneratedImage image = imageService.generateImage(prompt, imageSize);
         return image == null
                 ? ToolResult.failure("图片生成失败")
                 : ToolResult.success("图片已生成", image);

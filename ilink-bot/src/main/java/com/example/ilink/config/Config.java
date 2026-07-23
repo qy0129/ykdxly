@@ -43,9 +43,9 @@ public class Config {
     public static final String DOCUMENT_MODEL = loadProperty("document.model", "Qwen/Qwen3.5-9B");
     public static final int DOCUMENT_MAX_TEXT_CHARS = Integer.parseInt(loadProperty("document.max_text_chars", "40000"));
     public static final Duration REQ_TIMEOUT = Duration.ofSeconds(
-            Long.parseLong(loadProperty("request.timeout.seconds", "120")));
+            Long.parseLong(loadProperty("request.timeout.seconds", "180")));
     public static final Duration DOCUMENT_REQ_TIMEOUT = Duration.ofSeconds(
-            Long.parseLong(loadProperty("document.request.timeout.seconds", "240")));
+            Long.parseLong(loadProperty("document.request.timeout.seconds", "300")));
     public static final boolean DATABASE_ENABLED =
             Boolean.parseBoolean(loadProperty("database.enabled", "false"));
     public static final String DATABASE_URL = loadProperty("database.url",

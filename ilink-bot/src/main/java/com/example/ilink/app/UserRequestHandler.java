@@ -6,10 +6,14 @@ import com.example.ilink.conversation.DocumentSessionStore;
 import com.example.ilink.conversation.UserSessionStore;
 import com.example.ilink.feature.chat.ChatService;
 import com.example.ilink.feature.calculator.CalculatorService;
+import com.example.ilink.feature.image.GeneratedImage;
 import com.example.ilink.feature.weather.WeatherLocation;
 import com.example.ilink.feature.weather.WeatherService;
 import com.example.ilink.model.DocumentRecord;
 import com.example.ilink.routing.IntentContext;
+import com.example.ilink.routing.IntentAction;
+import com.example.ilink.routing.IntentPlan;
+import com.example.ilink.routing.IntentPolicy;
 import com.example.ilink.routing.IntentRecognizer;
 import com.example.ilink.routing.IntentResult;
 import com.example.ilink.storage.MediaStore;
@@ -35,11 +39,13 @@ import com.google.gson.JsonObject;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 用户文本请求处理器。
  *
- * <p>先调用唯一的意图识别入口 {@link IntentRecognizer}，再根据识别结果
+ * <p>先调用唯一的意图识别入口 {@link IntentRecognizer}，再按动作计划
  * 调用聊天、绘图、图片、音频或文档功能。该类负责流程协调，具体 API 调用
  * 放在各 feature 服务中。</p>
  */
@@ -60,6 +66,8 @@ public final class UserRequestHandler {
     private final HealthDietWorkflow healthDietWorkflow;
     private final TravelWorkflow travelWorkflow;
     private final NearbyFoodWorkflow nearbyFoodWorkflow;
+    private final ActionPlanExecutor actionPlanExecutor = new ActionPlanExecutor();
+    private final Map<String, PendingFileExport> pendingFileExports = new ConcurrentHashMap<>();
 
     /** 注入所有业务服务，保持本类只负责请求编排。 */
     public UserRequestHandler(ChatHistoryStore chatHistory, UserSessionStore sessions,
@@ -88,29 +96,57 @@ public final class UserRequestHandler {
     }
     /** 识别用户意图并调用对应功能处理器。 */
     public void handle(ILinkClient client, String userId, String text) throws Exception {
+        PendingFileExport pendingFileExport = pendingFileExports.get(userId);
+        if (pendingFileExport != null) {
+            if (IntentPolicy.isFileTypeAnswer(text)) {
+                pendingFileExports.remove(userId, pendingFileExport);
+                handleDocumentAction(client, userId, pendingFileExport.userText(),
+                        pendingFileExport.route(), IntentPolicy.explicitOutputFileType(text));
+                return;
+            }
+            if ("取消".equals(text.trim())) {
+                pendingFileExports.remove(userId, pendingFileExport);
+                replySender.sendReply(client, userId, "已取消生成文件。");
+                return;
+            }
+            // 用户提出了新要求，放弃旧的格式确认，避免状态劫持后续对话。
+            pendingFileExports.remove(userId, pendingFileExport);
+        }
+
         // 只对未完成会话使用本地状态机；所有新请求都必须先经过大模型语义路由。
         if (sessions.hasPendingWeatherLocations(userId)) {
             handleWeatherLocationSelection(client, userId, text);
+            resumeActionPlan(client, userId);
             return;
         }
         if (planWorkflow.hasPendingPlan(userId)) {
             planWorkflow.completePendingPlan(client, userId, text);
+            resumeActionPlan(client, userId);
             return;
         }
         if (planWorkflow.hasPendingCalendarSync(userId)) {
             planWorkflow.completeCalendarSync(client, userId, text);
+            resumeActionPlan(client, userId);
             return;
         }
         if (calendarWorkflow.hasPending(userId)) {
             calendarWorkflow.handle(client, userId, text);
+            resumeActionPlan(client, userId);
             return;
         }
         if (healthDietWorkflow.hasPending(userId)) {
             healthDietWorkflow.handlePending(client, userId, text);
+            resumeActionPlan(client, userId);
+            return;
+        }
+        if (travelWorkflow.hasPendingLocation(userId)) {
+            travelWorkflow.handleLocationSelection(client, userId, text);
+            resumeActionPlan(client, userId);
             return;
         }
         if (nearbyFoodWorkflow.hasPendingLocation(userId)) {
             nearbyFoodWorkflow.handleLocationSelection(client, userId, text);
+            resumeActionPlan(client, userId);
             return;
         }
 
@@ -120,53 +156,99 @@ public final class UserRequestHandler {
                 sessions.getLastImage(userId) != null,
                 sessions.peekPendingDraw(userId) != null,
                 documentSessions.get(userId) != null);
-        IntentResult route = intentRecognizer.recognize(userId, text, context);
-        if (route == null) {
+        IntentPlan plan = intentRecognizer.recognize(userId, text, context);
+        if (plan == null || plan.isEmpty()) {
             replySender.sendReply(client, userId, "网络波动了，请再发一次～");
             return;
         }
 
-        System.out.println("[意图识别] 意图=" + intentName(route.intent())
+        System.out.println("[意图识别] 共识别 " + plan.actions().size() + " 个动作："
+                + plan.actions().stream().map(action -> intentName(action.route().intent())).toList());
+        if (plan.actions().size() > 1) {
+            String actionNames = String.join("、", plan.actions().stream()
+                    .map(action -> intentName(action.route().intent())).toList());
+            replySender.sendReply(client, userId, "我识别到 " + plan.actions().size()
+                    + " 项要求：" + actionNames + "。现在依次处理。");
+        }
+        actionPlanExecutor.start(userId, plan,
+                action -> executeAction(client, userId, action),
+                () -> hasBlockingPending(userId),
+                (action, error) -> handleActionFailure(client, userId, action, error));
+    }
+
+    /** 调用一个动作对应的原有业务处理器，动作之间由统一执行器负责排序。 */
+    private void executeAction(ILinkClient client, String userId, IntentAction action) throws Exception {
+        IntentResult route = action.route();
+        String actionText = action.requestText();
+        System.out.println("[动作执行] 意图=" + intentName(route.intent())
+                + "，要求=" + actionText
                 + "，回复方式=" + replyModeName(route.replyMode())
                 + "，音色=" + voiceStyleName(route.voiceStyle()));
-
         switch (route.intent()) {
-            case "draw" -> handleDraw(client, userId, text, route);
+            case "draw" -> handleDraw(client, userId, actionText, route);
             case "draw_size" -> handleDrawSize(client, userId, route);
-            case "persona_switch" -> handlePersonaSwitch(client, userId, text, route);
+            case "persona_switch" -> handlePersonaSwitch(client, userId, actionText, route);
             case "audio_transcribe" -> handleAudioTranscribe(client, userId, route);
             case "image_action" -> handleImageAction(client, userId, route);
-            case "weather" -> handleWeather(client, userId, text, route);
-            case "task_plan" -> planWorkflow.createPlan(client, userId, text, route);
+            case "weather" -> handleWeather(client, userId, actionText, route);
+            case "task_plan" -> planWorkflow.createPlan(client, userId, actionText, route);
             case "travel_plan" -> travelWorkflow.handle(client, userId, route);
             case "diet_plan" -> healthDietWorkflow.handle(client, userId, route);
             case "nearby_food" -> nearbyFoodWorkflow.handle(client, userId, route);
-            case "calendar_event" -> calendarWorkflow.handle(client, userId, text, route);
+            case "calendar_event" -> calendarWorkflow.handle(client, userId, actionText, route);
             case "planning_capabilities" -> replySender.sendReply(client, userId, planningCapabilitiesText(),
                     route.replyMode(), route.voiceStyle());
-            case "plan_adjust" -> planWorkflow.adjustPlan(client, userId, text, route);
-            case "plan_progress" -> planWorkflow.queryProgress(client, userId, text, route);
-            case "expense_split" -> handleExpenseSplit(client, userId, text, route);
-            case "deadline_countdown" -> handleDeadlineCountdown(client, userId, text, route);
+            case "plan_adjust" -> planWorkflow.adjustPlan(client, userId, actionText, route);
+            case "plan_progress" -> planWorkflow.queryProgress(client, userId, actionText, route);
+            case "expense_split" -> handleExpenseSplit(client, userId, actionText, route);
+            case "deadline_countdown" -> handleDeadlineCountdown(client, userId, actionText, route);
             case "calculator" -> {
-                String reply = calculatorService.execute(userId, text);
-                chatHistory.add(userId, text, reply);
+                String reply = calculatorService.execute(userId, actionText);
+                chatHistory.add(userId, actionText, reply);
                 replySender.applyReplyMode(userId, route.replyMode());
                 replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
             }
             case "document_summary", "document_question", "generate_file", "document_edit" ->
-                    handleDocumentAction(client, userId, text, route);
+                    handleDocumentAction(client, userId, actionText, route);
             default -> {
-                String reply = chatService.chat(userId, text);
+                String reply = chatService.chat(userId, actionText);
                 if (reply == null || reply.isBlank()) {
                     reply = "网络波动了，请再发一次～";
                 }
-                chatHistory.add(userId, text, reply);
+                chatHistory.add(userId, actionText, reply);
                 replySender.applyReplyMode(userId, route.replyMode());
                 System.out.println("[机器人回复] " + reply);
                 replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
             }
         }
+    }
+
+    /** 当前补充会话结束后继续执行同一段话中尚未完成的动作。 */
+    private void resumeActionPlan(ILinkClient client, String userId) throws Exception {
+        if (hasBlockingPending(userId)) return;
+        actionPlanExecutor.resume(userId,
+                action -> executeAction(client, userId, action),
+                () -> hasBlockingPending(userId),
+                (action, error) -> handleActionFailure(client, userId, action, error));
+    }
+
+    /** 判断是否有必须先由用户补充地点、时间或偏好的工作流。 */
+    private boolean hasBlockingPending(String userId) {
+        return sessions.hasPendingWeatherLocations(userId)
+                || planWorkflow.hasPendingPlan(userId)
+                || planWorkflow.hasPendingCalendarSync(userId)
+                || calendarWorkflow.hasPending(userId)
+                || healthDietWorkflow.hasPending(userId)
+                || travelWorkflow.hasPendingLocation(userId)
+                || nearbyFoodWorkflow.hasPendingLocation(userId);
+    }
+
+    /** 记录单个动作的错误并继续后续动作，避免一个工具失败导致整段请求中断。 */
+    private void handleActionFailure(ILinkClient client, String userId,
+                                     IntentAction action, Exception error) throws Exception {
+        String actionName = intentName(action.route().intent());
+        System.err.println("[动作执行] " + actionName + "失败: " + error.getMessage());
+        replySender.sendReply(client, userId, actionName + "执行失败，已继续处理其他要求。");
     }
 
     /** 处理绘图请求；缺少尺寸时先保存提示词，等待用户补充。 */
@@ -187,9 +269,13 @@ public final class UserRequestHandler {
         arguments.addProperty("image_size", route.imageSize());
         ToolResult result = toolManager.execute(
                 DrawTool.NAME, new ToolContext(userId), arguments);
-        byte[] image = result.dataAs(byte[].class);
+        GeneratedImage image = result.dataAs(GeneratedImage.class);
         if (result.success() && image != null) {
-            client.sendImage(userId, image, "draw.png", route.cnDescription());
+            Path saved = mediaStore.save(userId, "image", image.bytes(), image.extension());
+            documentSessions.clear(userId);
+            sessions.setLastImage(userId, saved.toString());
+            chatHistory.addMedia(userId, "图片", saved.toString(), route.cnDescription());
+            client.sendImage(userId, image.bytes(), image.fileName("draw"), route.cnDescription());
         } else {
             replySender.sendReply(client, userId, result.output());
         }
@@ -213,9 +299,13 @@ public final class UserRequestHandler {
         arguments.addProperty("image_size", route.imageSize());
         ToolResult result = toolManager.execute(
                 DrawTool.NAME, new ToolContext(userId), arguments);
-        byte[] image = result.dataAs(byte[].class);
+        GeneratedImage image = result.dataAs(GeneratedImage.class);
         if (result.success() && image != null) {
-            client.sendImage(userId, image, "draw.png", "已按你的要求生成");
+            Path saved = mediaStore.save(userId, "image", image.bytes(), image.extension());
+            documentSessions.clear(userId);
+            sessions.setLastImage(userId, saved.toString());
+            chatHistory.addMedia(userId, "图片", saved.toString(), "已按你的要求生成");
+            client.sendImage(userId, image.bytes(), image.fileName("draw"), "已按你的要求生成");
         } else {
             replySender.sendReply(client, userId, result.output());
         }
@@ -231,7 +321,8 @@ public final class UserRequestHandler {
         if (result.success()) {
             chatHistory.add(userId, userText, result.output());
         }
-        replySender.sendReply(client, userId, result.output(), route.replyMode(), route.voiceStyle());
+        // 人格定义会决定之后语音回复的音色，但切换人格本身只做文字确认。
+        client.sendText(userId, result.output());
     }
 
     /** 查找历史语音，必要时调用转写服务并返回文字。 */
@@ -272,12 +363,13 @@ public final class UserRequestHandler {
             arguments.addProperty("prompt", route.imagePrompt());
             ToolResult result = toolManager.execute(
                     ImageEditTool.NAME, new ToolContext(userId), arguments);
-            byte[] edited = result.dataAs(byte[].class);
+            GeneratedImage edited = result.dataAs(GeneratedImage.class);
             if (result.success() && edited != null) {
-                Path saved = mediaStore.save(userId, "image", edited, "png");
+                Path saved = mediaStore.save(userId, "image", edited.bytes(), edited.extension());
+                documentSessions.clear(userId);
                 sessions.setLastImage(userId, saved.toString());
                 chatHistory.addMedia(userId, "图片", saved.toString(), "已根据用户要求修改图片");
-                client.sendImage(userId, edited, "edited.png", "已完成图片修改");
+                client.sendImage(userId, edited.bytes(), edited.fileName("edited"), "已完成图片修改");
             } else {
                 replySender.sendReply(client, userId, result.output());
             }
@@ -381,8 +473,8 @@ public final class UserRequestHandler {
     private void sendWeatherReply(ILinkClient client, String userId, String userText,
                                   WeatherLocation location, String weatherDay,
                                   String replyMode, String voiceStyle) throws Exception {
-        int dayOffset = "tomorrow".equals(weatherDay) ? 1 : 0;
-        String reply = weatherService.queryWeather(location, dayOffset);
+        int dayOffset = WeatherService.dayOffset(weatherDay);
+        String reply = weatherService.queryWeather(location, dayOffset, WeatherService.period(weatherDay));
         chatHistory.add(userId, userText, reply);
         replySender.applyReplyMode(userId, replyMode);
         replySender.sendReply(client, userId, reply, replyMode, voiceStyle);
@@ -409,6 +501,12 @@ public final class UserRequestHandler {
     /** 处理文档问答、总结、生成和 DOCX 编辑请求。 */
     private void handleDocumentAction(ILinkClient client, String userId, String userText,
                                       IntentResult route) throws Exception {
+        handleDocumentAction(client, userId, userText, route, route.outputFileType());
+    }
+
+    /** 处理文档动作；forcedOutputType 用于继续上一轮文件格式确认。 */
+    private void handleDocumentAction(ILinkClient client, String userId, String userText,
+                                      IntentResult route, String forcedOutputType) throws Exception {
         DocumentRecord document = documentSessions.get(userId);
         if (document == null && !"generate_file".equals(route.intent())) {
             replySender.sendReply(client, userId, "请先发送 PDF、DOC、DOCX 或 TXT 文件");
@@ -427,8 +525,16 @@ public final class UserRequestHandler {
             return;
         }
 
-        String outputType = "pdf".equals(route.outputFileType()) ? "pdf"
-                : "docx".equals(route.outputFileType()) ? "docx" : defaultDocumentOutputType(document);
+        String outputType = "pdf".equals(forcedOutputType) ? "pdf"
+                : "docx".equals(forcedOutputType) ? "docx" : "none";
+        if ("generate_file".equals(route.intent()) && "none".equals(outputType)) {
+            pendingFileExports.put(userId, new PendingFileExport(userText, route));
+            replySender.sendReply(client, userId, "你想生成 PDF 还是 Word 文件？回复格式即可，回复“取消”可结束。");
+            return;
+        }
+        if ("none".equals(outputType)) {
+            outputType = defaultDocumentOutputType(document);
+        }
         JsonObject arguments = new JsonObject();
         arguments.addProperty("request", userText);
         arguments.addProperty("output_type", outputType);
@@ -450,6 +556,9 @@ public final class UserRequestHandler {
     private String defaultDocumentOutputType(DocumentRecord document) {
         if (document == null) return "docx";
         return "pdf".equals(document.extension()) ? "pdf" : "docx";
+    }
+
+    private record PendingFileExport(String userText, IntentResult route) {
     }
 
     /** 根据意图结果调用基础计算工具。 */

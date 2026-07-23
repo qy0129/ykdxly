@@ -13,12 +13,19 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /** 高德地点、驾车路线和静态地图接口的轻量封装。 */
 public final class AmapService {
 
+    private static final long DRIVING_REQUEST_INTERVAL_MILLIS = 600;
+    private static final long DRIVING_RETRY_DELAY_MILLIS = 1200;
+
     private final HttpClient client;
+    private final Object drivingRequestLock = new Object();
+    private long nextDrivingRequestTime;
 
     public AmapService(HttpClient client) {
         this.client = client;
@@ -26,7 +33,20 @@ public final class AmapService {
 
     public boolean isConfigured() { return !Config.AMAP_API_KEY.isBlank(); }
 
+    /**
+     * 解析用户描述的地点。
+     * 园区、车站和商场优先按 POI 搜索，避免普通地址地理编码把同名区域解析到错误行政区。
+     */
     public Place geocode(String name) throws Exception {
+        List<Place> poiCandidates = searchPlaceCandidates(name);
+        if (!poiCandidates.isEmpty()) {
+            return poiCandidates.get(0);
+        }
+        return geocodeAddress(name);
+    }
+
+    /** 使用地址地理编码作为 POI 搜索没有结果时的兜底。 */
+    private Place geocodeAddress(String name) throws Exception {
         JsonObject json = getJson("https://restapi.amap.com/v3/geocode/geo", "address=" + encode(name));
         JsonArray geocodes = json.getAsJsonArray("geocodes");
         if (geocodes == null || geocodes.isEmpty()) return null;
@@ -36,20 +56,55 @@ public final class AmapService {
     }
 
     public Route driving(Place from, Place to) throws Exception {
+        return driving(from, null, to);
+    }
+
+    /**
+     * 规划经过指定地点的完整驾车路线。
+     * 一次请求即可获得“起点-途经点-终点”的总耗时，用于计算餐厅真实绕路时间。
+     */
+    public Route drivingVia(Place from, Place via, Place to) throws Exception {
+        return driving(from, via, to);
+    }
+
+    /** 构造普通路线或带单个途经点的路线，并解析统一的路线结果。 */
+    private Route driving(Place from, Place via, Place to) throws Exception {
         String query = "origin=" + from.location() + "&destination=" + to.location() + "&extensions=base";
-        JsonObject json = getJson("https://restapi.amap.com/v3/direction/driving", query);
+        if (via != null) query += "&waypoints=" + via.location();
+        JsonObject json = getDrivingJson(query);
         JsonArray paths = json.getAsJsonObject("route").getAsJsonArray("paths");
         if (paths == null || paths.isEmpty()) return null;
         JsonObject path = paths.get(0).getAsJsonObject();
         JsonArray steps = path.getAsJsonArray("steps");
-        String midpoint = from.location();
-        if (steps != null && !steps.isEmpty()) {
-            JsonObject step = steps.get(steps.size() / 2).getAsJsonObject();
-            String polyline = step.get("polyline").getAsString();
-            if (!polyline.isBlank()) midpoint = polyline.split(";")[0];
-        }
+        List<String> sampledLocations = sampleRouteLocations(steps, from.location());
         return new Route(Integer.parseInt(path.get("distance").getAsString()),
-                Integer.parseInt(path.get("duration").getAsString()), midpoint);
+                Integer.parseInt(path.get("duration").getAsString()), sampledLocations);
+    }
+
+    /** 驾车接口统一限速；遇到高德每秒配额限制时等待后只重试一次。 */
+    private JsonObject getDrivingJson(String query) throws Exception {
+        try {
+            return getDrivingJsonOnce(query);
+        } catch (IllegalStateException error) {
+            if (!error.getMessage().contains("CUQPS_HAS_EXCEEDED_THE_LIMIT")) throw error;
+            Thread.sleep(DRIVING_RETRY_DELAY_MILLIS);
+            return getDrivingJsonOnce(query);
+        }
+    }
+
+    /** 等待可用请求时隙后调用高德驾车路线接口。 */
+    private JsonObject getDrivingJsonOnce(String query) throws Exception {
+        waitForDrivingRequestSlot();
+        return getJson("https://restapi.amap.com/v3/direction/driving", query);
+    }
+
+    /** 保证同一个机器人实例不会在一秒内密集发送多次驾车请求。 */
+    private void waitForDrivingRequestSlot() throws InterruptedException {
+        synchronized (drivingRequestLock) {
+            long waitMillis = nextDrivingRequestTime - System.currentTimeMillis();
+            if (waitMillis > 0) Thread.sleep(waitMillis);
+            nextDrivingRequestTime = System.currentTimeMillis() + DRIVING_REQUEST_INTERVAL_MILLIS;
+        }
     }
 
     /** 根据用户当前位置检索两公里内的餐饮 POI，结果来自高德而非语言模型猜测。 */
@@ -101,13 +156,17 @@ public final class AmapService {
 
     /** 下载带起终点标记的静态地图图片，直接作为微信图片发送。 */
     public byte[] staticMap(Place from, Place to) throws Exception {
-        String markers = "mid,,A:" + from.location() + "|mid,,B:" + to.location();
-        String url = "https://restapi.amap.com/v3/staticmap?key=" + encode(Config.AMAP_API_KEY)
-                + "&size=750*400&markers=" + encode(markers);
-        HttpRequest request = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(20)).GET().build();
-        HttpResponse<byte[]> response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
-        if (response.statusCode() != 200 || response.body().length == 0) return null;
-        return response.body();
+        return staticMap(List.of(from, to));
+    }
+
+    /** 下载标记起点、全部途经点和终点的行程总览地图。 */
+    public byte[] staticMap(List<Place> itinerary) throws Exception {
+        StringBuilder markers = new StringBuilder();
+        for (int index = 0; index < itinerary.size(); index++) {
+            if (index > 0) markers.append('|');
+            markers.append("mid,,").append(index + 1).append(':').append(itinerary.get(index).location());
+        }
+        return staticMap(markers.toString());
     }
 
     /** 将当前位置与候选店铺同时标记在一张静态地图上，方便用户先看分布再选店。 */
@@ -130,8 +189,9 @@ public final class AmapService {
     }
 
     /** 动态导航由高德官方页面承接，用户可以继续缩放、换路线或唤起 App。 */
-    public String navigationUrl(Place to) {
-        return "https://uri.amap.com/navigation?to=" + to.location() + "," + encode(to.name())
+    public String navigationUrl(Place from, Place to) {
+        return "https://uri.amap.com/navigation?from=" + from.location() + "," + encode(from.name())
+                + "&to=" + to.location() + "," + encode(to.name())
                 + "&mode=car&coordinate=gaode&callnative=1";
     }
 
@@ -164,11 +224,39 @@ public final class AmapService {
 
     private String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8); }
 
+    /**
+     * 从导航步骤的折线坐标中抽取 25%、50% 和 75% 三个沿途采样点。
+     * 这些点用于筛选顺路餐厅，不将单一路线中点误当作整条路线的代表。
+     */
+    private List<String> sampleRouteLocations(JsonArray steps, String fallbackLocation) {
+        List<String> locations = new ArrayList<>();
+        if (steps != null) {
+            for (int index = 0; index < steps.size(); index++) {
+                JsonObject step = steps.get(index).getAsJsonObject();
+                if (!step.has("polyline")) continue;
+                String polyline = step.get("polyline").getAsString();
+                if (polyline.isBlank()) continue;
+                for (String location : polyline.split(";")) {
+                    if (!location.isBlank()) locations.add(location);
+                }
+            }
+        }
+        if (locations.isEmpty()) return List.of(fallbackLocation);
+
+        Set<String> samples = new LinkedHashSet<>();
+        int lastIndex = locations.size() - 1;
+        for (int ratio : List.of(1, 2, 3)) {
+            samples.add(locations.get(lastIndex * ratio / 4));
+        }
+        return List.copyOf(samples);
+    }
+
     public record Place(String name, String longitude, String latitude) {
         public String location() { return longitude + "," + latitude; }
     }
 
-    public record Route(int distanceMeters, int durationSeconds, String midpoint) { }
+    /** 驾车路线的距离、耗时和用于沿途服务的采样坐标。 */
+    public record Route(int distanceMeters, int durationSeconds, List<String> sampledLocations) { }
 
     public record Restaurant(String name, String address, String longitude, String latitude) {
         public String location() { return longitude + "," + latitude; }

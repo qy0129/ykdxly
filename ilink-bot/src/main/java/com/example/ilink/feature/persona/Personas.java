@@ -37,6 +37,13 @@ import java.util.stream.Collectors;
 public class Personas {
 
     private static final Map<String, String> ALL = new LinkedHashMap<>();
+    private static final Map<String, String> VOICE_STYLES = Map.of(
+            "温柔", "warm",
+            "成熟男性", "male",
+            "成熟女性", "female",
+            "阳光男孩", "boy",
+            "活泼女孩", "girl",
+            "活泼伙伴", "lively");
 
     static {
         loadFromResources();
@@ -101,6 +108,11 @@ public class Personas {
     /** 按人设名称获取提示词，不存在时返回 null。 */
     public static String get(String name) {
         return ALL.get(name);
+    }
+
+    /** 返回人格绑定的默认音色；没有单独绑定时使用系统默认音色。 */
+    public static String voiceStyle(String name) {
+        return VOICE_STYLES.getOrDefault(name, "default");
     }
 
     /** 返回全部人设的只读视图，供提示和校验使用。 */

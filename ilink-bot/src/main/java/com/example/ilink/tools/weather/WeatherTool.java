@@ -27,7 +27,8 @@ public final class WeatherTool implements Tool {
         properties.add("location", ToolDefinition.stringProperty(
                 "需要查询的英文地点名，尽量包含城市、省份或国家，例如 Beijing, China"));
         properties.add("day", ToolDefinition.enumStringProperty(
-                "查询日期，today 表示今天，tomorrow 表示明天", "today", "tomorrow"));
+                "查询日期和时段", "today", "tomorrow", "today_morning", "today_afternoon",
+                "today_evening", "tomorrow_morning", "tomorrow_afternoon", "tomorrow_evening"));
         this.definition = new ToolDefinition(
                 NAME,
                 "天气查询",
@@ -57,8 +58,9 @@ public final class WeatherTool implements Tool {
                     new WeatherOutput(locations, day, null));
         }
 
-        int dayOffset = "tomorrow".equals(day) ? 1 : 0;
-        String weatherText = weatherService.queryWeather(locations.get(0), dayOffset);
+        int dayOffset = WeatherService.dayOffset(day);
+        String weatherText = weatherService.queryWeather(
+                locations.get(0), dayOffset, WeatherService.period(day));
         return ToolResult.success(weatherText, new WeatherOutput(locations, day, weatherText));
     }
 

@@ -45,9 +45,11 @@ public final class PersonaSwitchTool implements Tool {
     /** 校验并保存用户选择的人设。 */
     @Override
     public ToolResult execute(ToolContext context, JsonObject arguments) {
-        String persona = ToolArguments.requireString(arguments, "persona");
+        String persona = ToolArguments.string(arguments, "persona", "").trim();
         if (Personas.get(persona) == null) {
-            return ToolResult.failure("不存在该人设，可用人设：" + String.join("、", Personas.getAll().keySet()));
+            String requested = persona.isBlank() ? "该人格" : "“" + persona + "”";
+            return ToolResult.failure(requested + "尚未预置。可用人格："
+                    + String.join("、", Personas.getAll().keySet()));
         }
         sessions.setPersona(context.userId(), persona);
         return ToolResult.success("好的，已切换为" + persona + "风格。");

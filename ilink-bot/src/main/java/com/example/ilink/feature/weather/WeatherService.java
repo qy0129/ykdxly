@@ -76,6 +76,12 @@ public final class WeatherService {
      */
     public String queryWeather(WeatherLocation location, int dayOffset)
             throws IOException, InterruptedException {
+        return queryWeather(location, dayOffset, "day");
+    }
+
+    /** 查询指定地点某一天的全天或上午、下午、晚上天气。 */
+    public String queryWeather(WeatherLocation location, int dayOffset, String period)
+            throws IOException, InterruptedException {
         if (dayOffset < 0 || dayOffset > 1) {
             throw new IllegalArgumentException("仅支持查询今天或明天的天气");
         }
@@ -84,9 +90,13 @@ public final class WeatherService {
                 + "?latitude=" + location.latitude()
                 + "&longitude=" + location.longitude()
                 + "&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m"
+                + "&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m"
                 + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
                 + "&forecast_days=2&timezone=auto");
         JsonObject response = getJson(uri);
+        if (!"day".equals(period)) {
+            return buildPeriodWeather(location, response, dayOffset, period);
+        }
         JsonObject daily = response.getAsJsonObject("daily");
 
         String dayName = dayOffset == 0 ? "今天" : "明天";
@@ -110,6 +120,69 @@ public final class WeatherService {
                     .append(formatNumber(current.get("wind_speed_10m").getAsDouble())).append(" km/h");
         }
         return reply.toString();
+    }
+
+    /** 把小时预报汇总为一个易读的时段天气结果。 */
+    private String buildPeriodWeather(WeatherLocation location, JsonObject response,
+                                      int dayOffset, String period) {
+        int startHour = switch (period) {
+            case "morning" -> 6;
+            case "afternoon" -> 12;
+            case "evening" -> 18;
+            default -> 0;
+        };
+        int endHour = "day".equals(period) ? 24 : Math.min(24, startHour + 6);
+        int startIndex = dayOffset * 24 + startHour;
+        int endIndex = dayOffset * 24 + endHour;
+        JsonObject hourly = response.getAsJsonObject("hourly");
+        JsonArray temperatures = hourly.getAsJsonArray("temperature_2m");
+        JsonArray rainProbabilities = hourly.getAsJsonArray("precipitation_probability");
+        JsonArray weatherCodes = hourly.getAsJsonArray("weather_code");
+        JsonArray windSpeeds = hourly.getAsJsonArray("wind_speed_10m");
+
+        double minTemperature = Double.MAX_VALUE;
+        double maxTemperature = -Double.MAX_VALUE;
+        double maxWindSpeed = 0;
+        int maxRainProbability = 0;
+        int representativeCode = weatherCodes.get(startIndex).getAsInt();
+        for (int index = startIndex; index < endIndex; index++) {
+            double temperature = temperatures.get(index).getAsDouble();
+            int rainProbability = rainProbabilities.get(index).getAsInt();
+            minTemperature = Math.min(minTemperature, temperature);
+            maxTemperature = Math.max(maxTemperature, temperature);
+            maxWindSpeed = Math.max(maxWindSpeed, windSpeeds.get(index).getAsDouble());
+            if (rainProbability >= maxRainProbability) {
+                maxRainProbability = rainProbability;
+                representativeCode = weatherCodes.get(index).getAsInt();
+            }
+        }
+
+        String dayName = dayOffset == 0 ? "今天" : "明天";
+        String periodName = switch (period) {
+            case "morning" -> "上午";
+            case "afternoon" -> "下午";
+            case "evening" -> "晚上";
+            default -> "全天";
+        };
+        return new StringBuilder(location.displayName()).append(dayName).append(periodName)
+                .append("天气：").append(weatherDescription(representativeCode))
+                .append("\n温度：").append(formatNumber(minTemperature)).append("℃ 至 ")
+                .append(formatNumber(maxTemperature)).append("℃")
+                .append("\n最高降水概率：").append(maxRainProbability).append('%')
+                .append("，最大风速：").append(formatNumber(maxWindSpeed)).append(" km/h")
+                .toString();
+    }
+
+    /** 从路由字段中解析今天或明天。 */
+    public static int dayOffset(String weatherDay) {
+        return weatherDay != null && weatherDay.startsWith("tomorrow") ? 1 : 0;
+    }
+
+    /** 从路由字段中解析上午、下午、晚上；没有时段时返回全天。 */
+    public static String period(String weatherDay) {
+        if (weatherDay == null) return "day";
+        int separator = weatherDay.indexOf('_');
+        return separator < 0 ? "day" : weatherDay.substring(separator + 1);
     }
 
     private JsonObject getJson(URI uri) throws IOException, InterruptedException {

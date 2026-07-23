@@ -14,6 +14,7 @@ import com.example.ilink.feature.document.DocumentAiService;
 import com.example.ilink.feature.document.DocumentService;
 import com.example.ilink.feature.finance.ExpenseSplitService;
 import com.example.ilink.feature.image.ImageService;
+import com.example.ilink.feature.image.GeneratedImage;
 import com.example.ilink.feature.persona.Personas;
 import com.example.ilink.feature.planning.TaskPlanningService;
 import com.example.ilink.feature.calculator.CalculatorService;
@@ -150,7 +151,7 @@ public final class MessageDispatcher implements AutoCloseable {
     private final CalculatorTextRouter calculatorTextRouter = new CalculatorTextRouter(toolManager);
     private final Set<String> voiceReplyUsers = ConcurrentHashMap.newKeySet();
     private final ReplySender replySender = new ReplySender(
-            audioService, mediaStore, audioHistory, toolManager);
+            audioService, mediaStore, audioHistory, toolManager, sessions);
     private final CalendarService calendarService = new CalendarService(new CalendarEventStore());
     private final CalendarWorkflow calendarWorkflow = new CalendarWorkflow(
             calendarService, new CalendarSessionStore(), replySender);
@@ -185,17 +186,18 @@ public final class MessageDispatcher implements AutoCloseable {
     public void handleMessage(ILinkClient client, WeixinMessage message) {
         activeClient = client;
         String userId = message.getFrom_user_id();
+        long startedAtMillis = System.currentTimeMillis();
         boolean voiceOnly = voiceReplyUsers.contains(userId)
                 || "voice".equalsIgnoreCase(Config.REPLY_MODE);
         ScheduledFuture<?> progressTask = progressScheduler.schedule(() -> {
             try {
-                if (!voiceOnly) {
+                if (!voiceOnly && !replySender.hasSentReplySince(userId, startedAtMillis)) {
                     client.sendText(userId, "正在回复中，请稍等......");
                 }
             } catch (Exception e) {
                 System.err.println("发送处理中提示失败: " + e.getMessage());
             }
-        }, 5, TimeUnit.SECONDS);
+        }, 12, TimeUnit.SECONDS);
 
         try {
             handleMessageInternal(client, message);
@@ -213,28 +215,45 @@ public final class MessageDispatcher implements AutoCloseable {
             if (items == null || items.isEmpty()) return;
 
             com.github.wechat.ilink.sdk.core.model.MessageItem first = items.get(0);
-            if (first.getText_item() != null) {
-                String text = first.getText_item().getText();
+            com.github.wechat.ilink.sdk.core.model.MessageItem textMessage = items.stream()
+                    .filter(item -> item.getText_item() != null)
+                    .findFirst().orElse(null);
+            com.github.wechat.ilink.sdk.core.model.MessageItem imageMessage = items.stream()
+                    .filter(item -> item.getImage_item() != null)
+                    .findFirst().orElse(null);
+
+            // 图片优先落盘，再处理同一消息携带的文字要求，确保视觉工具能取得当前图片。
+            if (imageMessage != null) {
+                byte[] image = client.downloadImageFromMessageItem(imageMessage);
+                if (image == null || image.length == 0) {
+                    replySender.sendReply(client, userId, "图片下载失败");
+                    return;
+                }
+
+                GeneratedImage receivedImage = GeneratedImage.from(image, null);
+                Path saved = mediaStore.save(userId, "image", image, receivedImage.extension());
+                documentSessions.clear(userId);
+                sessions.setLastImage(userId, saved.toString());
+                sessions.setPendingImage(userId, saved.toString());
+                String caption = textMessage == null ? "" : textMessage.getText_item().getText();
+                if (caption != null && !caption.isBlank()) {
+                    System.out.println("[" + userId + "] [图片] " + caption);
+                    requestHandler.handle(client, userId, caption);
+                } else {
+                    replySender.sendReply(client, userId,
+                            "我已经收到这张图片。你想让我做什么：分析内容、解答题目，还是修改图片？");
+                }
+                return;
+            }
+
+            if (textMessage != null) {
+                String text = textMessage.getText_item().getText();
                 System.out.println("[" + userId + "] " + text);
                 if (calculatorTextRouter.isCalculatorCommand(text)) {
                     replySender.sendReply(client, userId, calculatorTextRouter.handle(userId, text));
                     return;
                 }
                 requestHandler.handle(client, userId, text);
-                return;
-            }
-
-            if (first.getImage_item() != null) {
-                byte[] image = client.downloadImageFromMessageItem(first);
-                if (image == null || image.length == 0) {
-                    replySender.sendReply(client, userId, "图片下载失败");
-                    return;
-                }
-
-                Path saved = mediaStore.save(userId, "image", image, "png");
-                sessions.setLastImage(userId, saved.toString());
-                sessions.setPendingImage(userId, saved.toString());
-                replySender.sendReply(client, userId, "我已经收到这张图片。你想让我做什么：分析内容、解答题目，还是修改图片？");
                 return;
             }
 
@@ -284,6 +303,8 @@ public final class MessageDispatcher implements AutoCloseable {
 
                 Path saved = mediaStore.save(userId, "file", file, extension);
                 try {
+                    sessions.clearPendingImage(userId);
+                    sessions.clearPendingDraw(userId);
                     DocumentService.ParsedDocument parsed = documentService.parse(saved, fileName);
                     documentSessions.set(userId, new DocumentRecord(
                             parsed.fileName(), parsed.extension(), saved.toString(), parsed.text()));
@@ -313,7 +334,7 @@ public final class MessageDispatcher implements AutoCloseable {
         } catch (Exception e) {
             System.err.println("处理消息异常: " + e.getMessage());
             try {
-                client.sendText(message.getFrom_user_id(), "网络波动了，请再发一次～");
+            replySender.sendReply(client, message.getFrom_user_id(), "网络波动了，请再发一次～");
             } catch (Exception ignored) {}
         }
     }

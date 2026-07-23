@@ -2,6 +2,8 @@ package com.example.ilink.conversation;
 
 import com.example.ilink.model.DocumentRecord;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -13,16 +15,31 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class DocumentSessionStore {
 
-    private final Map<String, DocumentRecord> documents = new ConcurrentHashMap<>();
+    private static final Duration SESSION_TTL = Duration.ofHours(1);
+    private final Map<String, DocumentSession> documents = new ConcurrentHashMap<>();
 
     /** 保存用户当前文档。 */
     public void set(String userId, DocumentRecord document) {
         // 新文档会覆盖该用户之前的当前文档。
-        documents.put(userId, document);
+        documents.put(userId, new DocumentSession(document, Instant.now()));
     }
 
     /** 获取用户当前文档，没有文档时返回 null。 */
     public DocumentRecord get(String userId) {
-        return documents.get(userId);
+        DocumentSession session = documents.get(userId);
+        if (session == null) return null;
+        if (session.createdAt().plus(SESSION_TTL).isBefore(Instant.now())) {
+            documents.remove(userId, session);
+            return null;
+        }
+        return session.document();
+    }
+
+    /** 用户进入其他媒体工作流时清除当前文档，避免旧状态污染意图判断。 */
+    public void clear(String userId) {
+        documents.remove(userId);
+    }
+
+    private record DocumentSession(DocumentRecord document, Instant createdAt) {
     }
 }

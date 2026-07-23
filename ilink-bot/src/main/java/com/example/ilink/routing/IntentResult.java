@@ -1,5 +1,7 @@
 package com.example.ilink.routing;
 
+import java.util.List;
+
 /**
  * 意图识别结果。
  *
@@ -33,6 +35,7 @@ public record IntentResult(
         String calculationDiscountPercent,
         String travelOrigin,
         String travelDestination,
+        List<String> travelStops,
         String travelDepartureTime,
         int timeBudgetMinutes,
         String mealKeyword,

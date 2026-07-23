@@ -36,9 +36,20 @@ public final class UserSessionStore {
 
     /** 获取用户当前人设对应的系统提示词。 */
     public String getPersonaPrompt(String userId) {
+        String name = getPersonaName(userId);
+        return name == null ? null : Personas.get(name);
+    }
+
+    /** 获取当前有效人格名称；已删除或未知的人格会回退到默认人格。 */
+    public String getPersonaName(String userId) {
         ensurePersonaLoaded(userId);
         String name = personas.getOrDefault(userId, Personas.DEFAULT);
-        return name == null ? null : Personas.get(name);
+        return Personas.get(name) == null ? Personas.DEFAULT : name;
+    }
+
+    /** 获取当前人格绑定的默认 TTS 音色。 */
+    public String getPersonaVoiceStyle(String userId) {
+        return Personas.voiceStyle(getPersonaName(userId));
     }
 
     /** 用户首次访问时从 MySQL 恢复上次选择的人设。 */

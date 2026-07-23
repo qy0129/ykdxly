@@ -11,14 +11,24 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
 
 /**
  * 唯一的用户意图识别入口。
  *
  * <p>把用户自然语言和会话上下文发送给路由模型，并将模型返回的 JSON
- * 转换为 {@link IntentResult}。本类只负责识别，不执行具体业务。</p>
+ * 转换为 {@link IntentPlan}。本类只负责识别，不执行具体业务。</p>
  */
 public final class IntentRecognizer {
+
+    private static final Set<String> ALLOWED_INTENTS = Set.of(
+            "chat", "draw", "persona_switch", "audio_transcribe", "image_action", "draw_size",
+            "document_summary", "document_question", "generate_file", "document_edit", "weather",
+            "task_plan", "plan_adjust", "plan_progress", "calculator", "expense_split",
+            "deadline_countdown", "travel_plan", "diet_plan", "nearby_food", "calendar_event",
+            "planning_capabilities");
 
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
@@ -28,8 +38,8 @@ public final class IntentRecognizer {
         this.httpClient = httpClient;
     }
 
-    /** 调用路由模型，把自然语言转换为结构化意图结果。 */
-    public IntentResult recognize(String userId, String userMessage, IntentContext context) {
+    /** 调用路由模型，把一段自然语言转换为一个或多个有序动作。 */
+    public IntentPlan recognize(String userId, String userMessage, IntentContext context) {
         // 路由模型只输出结构化意图，业务执行由 UserRequestHandler 负责。
         try {
             JsonObject body = new JsonObject();
@@ -67,61 +77,208 @@ public final class IntentRecognizer {
             String content = responseJson.getAsJsonArray("choices").get(0).getAsJsonObject()
                     .getAsJsonObject("message").get("content").getAsString();
             JsonObject result = parseJsonObject(content);
-
-            String intent = result.get("intent").getAsString();
-            return new IntentResult(
-                    intent,
-                    result.get("en_prompt").getAsString(),
-                    result.get("cn_description").getAsString(),
-                    result.get("image_size").getAsString(),
-                    result.get("reply_mode").getAsString(),
-                    result.get("voice_style").getAsString(),
-                    result.get("persona").getAsString(),
-                    result.get("image_action").getAsString(),
-                    result.get("image_prompt").getAsString(),
-                    result.get("audio_source").getAsString(),
-                    result.get("audio_index").getAsInt(),
-                    result.get("document_action").getAsString(),
-                    result.get("output_file_type").getAsString(),
-                    result.get("weather_location").getAsString(),
-                    result.get("weather_day").getAsString(),
-                    string(result, "plan_goal"),
-                    string(result, "plan_deadline"),
-                    string(result, "plan_available_time"),
-                    string(result, "calculation_operation"),
-                    string(result, "calculation_left"),
-                    string(result, "calculation_right"),
-                    string(result, "calculation_quantity"),
-                    string(result, "calculation_unit_price"),
-                    string(result, "calculation_discount_percent"),
-                    string(result, "travel_origin"),
-                    string(result, "travel_destination"),
-                    string(result, "travel_departure_time"),
-                    integer(result, "time_budget_minutes", 0),
-                    string(result, "meal_keyword"),
-                    string(result, "diet_goal"),
-                    string(result, "nearby_location"),
-                    string(result, "nearby_action"),
-                    string(result, "calendar_action"),
-                    string(result, "calendar_title"),
-                    string(result, "calendar_time"),
-                    string(result, "calendar_recurrence"),
-                    integer(result, "calendar_reminder_minutes", 0));
+            List<IntentAction> actions = new ArrayList<>();
+            if (result.has("actions") && result.get("actions").isJsonArray()) {
+                JsonArray actionArray = result.getAsJsonArray("actions");
+                boolean hasModelDrawAction = containsIntent(actionArray, "draw");
+                boolean hasModelImageAction = containsIntent(actionArray, "image_action");
+                for (int index = 0; index < actionArray.size() && index < 6; index++) {
+                    JsonObject action = actionArray.get(index).getAsJsonObject();
+                    String actionText = string(action, "action_text");
+                    String modelIntent = string(action, "intent");
+                    normalizeAction(userMessage, actionText, action, context);
+                    String normalizedIntent = string(action, "intent");
+                    logCorrection(modelIntent, normalizedIntent, actionText.isBlank() ? userMessage : actionText);
+                    if ("generate_file".equals(modelIntent) && "draw".equals(normalizedIntent)
+                            && hasModelDrawAction) {
+                        continue;
+                    }
+                    if ("document_edit".equals(modelIntent) && "image_action".equals(normalizedIntent)
+                            && hasModelImageAction) {
+                        continue;
+                    }
+                    actions.add(new IntentAction(actionText.isBlank() ? userMessage : actionText,
+                            toIntentResult(action)));
+                }
+            } else {
+                // 兼容旧版单意图 JSON，避免路由模型偶尔未按新格式返回时中断请求。
+                String modelIntent = string(result, "intent");
+                normalizeAction(userMessage, userMessage, result, context);
+                logCorrection(modelIntent, string(result, "intent"), userMessage);
+                actions.add(new IntentAction(userMessage, toIntentResult(result)));
+            }
+            return new IntentPlan(actions);
         } catch (Exception e) {
             System.err.println("[意图识别] 识别失败：" + e.getMessage());
             return null;
         }
     }
 
+    /** 记录被规则层纠正的模型意图，方便复盘误判而不输出完整用户上下文。 */
+    private void logCorrection(String modelIntent, String normalizedIntent, String actionText) {
+        if (!modelIntent.equals(normalizedIntent)) {
+            System.out.println("[意图校验] " + modelIntent + " -> " + normalizedIntent
+                    + "，动作=" + actionText);
+        }
+    }
+
+    /** 判断模型动作数组中是否已经包含指定意图，用于去掉纠正后的重复动作。 */
+    private boolean containsIntent(JsonArray actions, String intent) {
+        for (var element : actions) {
+            if (element.isJsonObject() && intent.equals(string(element.getAsJsonObject(), "intent"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 模型只负责提出候选动作；文件发送等高风险行为必须再次依据用户原话校验。
+     */
+    private void normalizeAction(String userMessage, String actionText,
+                                 JsonObject action, IntentContext context) {
+        String intent = string(action, "intent");
+        if (!ALLOWED_INTENTS.contains(intent)) {
+            action.addProperty("intent", "chat");
+            clearOutputFields(action);
+            return;
+        }
+
+        boolean imageCreation = IntentPolicy.isExplicitImageCreation(userMessage);
+        boolean imageEdit = IntentPolicy.isExplicitImageEdit(userMessage);
+        boolean fileRequest = IntentPolicy.hasExplicitFileRequest(userMessage);
+
+        if ("generate_file".equals(intent) && !fileRequest) {
+            if (imageCreation) {
+                action.addProperty("intent", "draw");
+                action.addProperty("en_prompt", defaultPrompt(action, actionText, userMessage));
+                action.addProperty("cn_description", actionText.isBlank() ? userMessage : actionText);
+            } else if (imageEdit && (context.pendingImage() || context.hasLastImage())) {
+                action.addProperty("intent", "image_action");
+                action.addProperty("image_action", "edit");
+                action.addProperty("image_prompt", actionText.isBlank() ? userMessage : actionText);
+            } else {
+                action.addProperty("intent", "chat");
+            }
+            action.addProperty("output_file_type", "none");
+            return;
+        }
+
+        if ("document_edit".equals(intent)) {
+            if (imageEdit && (context.pendingImage() || context.hasLastImage())) {
+                action.addProperty("intent", "image_action");
+                action.addProperty("image_action", "edit");
+                action.addProperty("image_prompt", actionText.isBlank() ? userMessage : actionText);
+                action.addProperty("output_file_type", "none");
+                return;
+            }
+            if (!context.hasDocument() || !IntentPolicy.isExplicitDocumentEdit(userMessage)) {
+                action.addProperty("intent", "chat");
+                action.addProperty("output_file_type", "none");
+                return;
+            }
+        }
+
+        if ("generate_file".equals(intent)) {
+            // 文件类型只能来自用户原话，不能采用模型自行补出的 PDF/DOCX。
+            action.addProperty("output_file_type", IntentPolicy.explicitOutputFileType(userMessage));
+        } else if ("task_plan".equals(intent)) {
+            action.addProperty("output_file_type", fileRequest
+                    ? IntentPolicy.explicitOutputFileType(userMessage) : "none");
+        } else {
+            action.addProperty("output_file_type", "none");
+        }
+
+        if ("draw".equals(string(action, "intent"))) {
+            if (string(action, "en_prompt").isBlank()) {
+                action.addProperty("en_prompt", defaultPrompt(action, actionText, userMessage));
+            }
+            if (string(action, "cn_description").isBlank()) {
+                action.addProperty("cn_description", actionText.isBlank() ? userMessage : actionText);
+            }
+            String imageSize = string(action, "image_size");
+            if (!Set.of("1024x1024", "768x1024", "1024x576").contains(imageSize)) {
+                action.addProperty("image_size", "none");
+            }
+        }
+    }
+
+    /** 清除不再适用于普通聊天的输出字段。 */
+    private void clearOutputFields(JsonObject action) {
+        action.addProperty("output_file_type", "none");
+        action.addProperty("image_action", "none");
+        action.addProperty("image_size", "none");
+    }
+
+    /** 绘图模型可直接理解中文，缺少英文提示词时使用用户原始要求兜底。 */
+    private String defaultPrompt(JsonObject action, String actionText, String userMessage) {
+        String prompt = string(action, "en_prompt");
+        if (!prompt.isBlank()) return prompt;
+        return actionText == null || actionText.isBlank() ? userMessage : actionText;
+    }
+
+    /** 把单个动作 JSON 转换为现有业务层能够直接使用的结构化参数。 */
+    private IntentResult toIntentResult(JsonObject result) {
+        return new IntentResult(
+                string(result, "intent"),
+                string(result, "en_prompt"),
+                string(result, "cn_description"),
+                defaultString(result, "image_size", "none"),
+                defaultString(result, "reply_mode", "keep"),
+                defaultString(result, "voice_style", "default"),
+                string(result, "persona"),
+                defaultString(result, "image_action", "none"),
+                string(result, "image_prompt"),
+                defaultString(result, "audio_source", "any"),
+                integer(result, "audio_index", 1),
+                defaultString(result, "document_action", "none"),
+                defaultString(result, "output_file_type", "none"),
+                string(result, "weather_location"),
+                defaultString(result, "weather_day", "today"),
+                string(result, "plan_goal"),
+                string(result, "plan_deadline"),
+                string(result, "plan_available_time"),
+                string(result, "calculation_operation"),
+                string(result, "calculation_left"),
+                string(result, "calculation_right"),
+                string(result, "calculation_quantity"),
+                string(result, "calculation_unit_price"),
+                string(result, "calculation_discount_percent"),
+                string(result, "travel_origin"),
+                string(result, "travel_destination"),
+                stringList(result, "travel_stops"),
+                string(result, "travel_departure_time"),
+                integer(result, "time_budget_minutes", 0),
+                string(result, "meal_keyword"),
+                string(result, "diet_goal"),
+                string(result, "nearby_location"),
+                defaultString(result, "nearby_action", "search"),
+                defaultString(result, "calendar_action", "create"),
+                string(result, "calendar_title"),
+                string(result, "calendar_time"),
+                defaultString(result, "calendar_recurrence", "none"),
+                integer(result, "calendar_reminder_minutes", 0));
+    }
+
     /** 构造路由模型的系统提示词和当前会话状态说明。 */
     private String buildSystemPrompt(String userId, IntentContext context) {
         StringBuilder prompt = new StringBuilder();
-        prompt.append("你只负责用户意图路由，不回答用户问题。必须严格依据语义判断，禁止仅凭单个词触发功能。只输出一行JSON。\n");
+        prompt.append("你只负责把用户请求拆成可执行动作，不回答用户问题。必须严格依据语义判断，禁止仅凭单个词触发功能。只输出一行JSON。\n");
         prompt.append("当前状态：pending_image=").append(context.pendingImage())
                 .append(", has_last_image=").append(context.hasLastImage())
                 .append(", pending_draw_size=").append(context.pendingDraw())
                 .append(", has_document=").append(context.hasDocument()).append("。\n");
         prompt.append("可选人设名称：").append(String.join("、", Personas.getAll().keySet())).append("。\n\n");
+
+        prompt.append("多动作拆分规则：\n");
+        prompt.append("- 输出actions数组。一段话有几个相互独立、需要调用不同功能完成的明确要求，就输出几个动作；最多6个。\n");
+        prompt.append("- 每个动作的action_text只保留该动作对应的原始要求，不能把整段话重复填给每个动作。\n");
+        prompt.append("- 保持用户表达的逻辑顺序；需要前一步结果的动作放在后面。可能要求补充地点或时间的动作也可暂停，用户确认后会自动继续。\n");
+        prompt.append("- 不要把同一任务的参数错误拆开。例如‘从A到B途中吃面’是一个travel_plan动作，meal_keyword=面；"
+                + "‘查天气并从A到B途中吃面’则拆成weather和travel_plan两个动作。\n");
+        prompt.append("- 例如‘查杭州今天下午天气，计算100加20，再从西湖去杭州西站途中吃面’必须输出三个动作："
+                + "weather、calculator、travel_plan。\n");
+        prompt.append("- 只有一个要求时actions数组只放一个动作，不能为了凑数量重复拆分。\n\n");
 
         prompt.append("意图规则：\n");
         prompt.append("1. chat：问答、聊天、讲笑话、写作、翻译、总结、建议以及所有不属于下述功能的请求。"
@@ -131,6 +288,8 @@ public final class IntentRecognizer {
                 + "必须存在创建视觉内容的明确语义；仅出现‘画面感’、‘讲故事’、‘声音’等词不能判为 draw。"
                 + "将英文绘图提示写入 en_prompt，中文画面说明写入 cn_description。\n");
         prompt.append("3. persona_switch：用户明确要求切换机器人长期说话人设时使用，persona 必须从可选人设名称中原样选择。"
+                + "人格切换只改变后续对话风格和默认音色，不代表本次要发送语音；因此 reply_mode 必须为 keep，voice_style 必须为 default。"
+                + "若用户指定的人格不在可选列表中，仍使用 persona_switch 并将用户原话填入 persona，由程序返回可用人格列表，禁止臆造或替换为其他人格。"
                 + "音色、男声、女声、温柔声音不属于人设切换。\n");
         prompt.append("4. audio_transcribe：用户明确要求获取某条历史语音的文字、转写或内容时使用。"
                 + "audio_source 表示机器人、用户或任意来源；audio_index 从最新一条开始计数。\n");
@@ -148,7 +307,8 @@ public final class IntentRecognizer {
         prompt.append("10. weather：用户明确查询某个城市、区县、乡镇的天气、温度、降雨或风力时使用。"
                 + "weather_location 必须填写可供 Open-Meteo 检索的英文地点名，例如北京填 Beijing，上海填 Shanghai，"
                 + "和平镇填 Heping；用户提供了省、市、县时也要保留这些英文行政区信息。"
-                + "今天或当前天气时 weather_day=today，明天天气时 weather_day=tomorrow。"
+                + "全天或未说明时段使用today或tomorrow；上午、下午、晚上分别使用today_morning、"
+                + "today_afternoon、today_evening或对应的tomorrow前缀。"
                 + "用户未说明地点时 weather_location 为空。\n\n");
         prompt.append("11. task_plan：用户要求制定学习、项目、工作或生活任务计划时使用。"
                 + "plan_goal 填写最终目标，plan_deadline 只填写真正的截止日期或时刻，例如后天或3天后，"
@@ -165,7 +325,9 @@ public final class IntentRecognizer {
         prompt.append("16. deadline_countdown：用户询问距离某个截止日期或时间还有多久、剩余几天几小时、是否超时时使用。"
                 + "将明确的时间表达写入 plan_deadline，例如明天下午六点、2026-07-25 18:00。\n\n");
         prompt.append("17. travel_plan：用户给出起点、终点并要求路线、导航、出行安排或中途停留时使用。"
-                + "travel_origin、travel_destination 必须分别填写地点；‘一个小时’等可用时长填入time_budget_minutes。"
+                + "travel_origin填写最初起点，travel_destination填写最终终点。"
+                + "用户说‘先去A、再去B、最后去C’时，A和B等中间地点按顺序写入travel_stops数组，不能忽略。"
+                + "没有途经点时travel_stops必须为空数组；‘一个小时’等可用时长填入time_budget_minutes。"
                 + "中途想吃面、咖啡等填入meal_keyword；明确出发时间填travel_departure_time。"
                 + "即使用户说‘帮我规划’，只要核心是从A到B出行，必须是travel_plan，绝不能是task_plan。\n");
         prompt.append("18. diet_plan：用户要求饮食规划、外卖推荐、减脂餐、增肌餐或控糖餐时使用。"
@@ -183,12 +345,13 @@ public final class IntentRecognizer {
         prompt.append("- voice_style：小男孩=boy，小女孩=girl，成年男声=male，成年女声=female，温柔柔和=warm，活泼元气=lively，无要求=default。\n");
         prompt.append("- 未使用的字符串字段填空字符串，image_size填none，image_action填none，audio_source填any，audio_index填1，weather_day填today。\n");
         prompt.append("最高优先级校验示例：用户输入‘用小男孩的音色给我讲个笑话’时，"
-                + "intent必须为chat，reply_mode必须为voice，voice_style必须为boy，"
+                + "actions只能有一个chat动作，reply_mode必须为voice，voice_style必须为boy，"
                 + "en_prompt和cn_description必须为空，image_size必须为none。\n");
         prompt.append("提交结果前逐项检查：音色要求是否正确写入voice_style；语音要求是否正确写入reply_mode；"
                 + "没有明确生成图片要求时intent绝不能为draw。");
-        prompt.append("\n输出必须包含以下全部字段："
-                + "{\"intent\":\"chat|draw|persona_switch|audio_transcribe|image_action|draw_size|document_summary|document_question|generate_file|document_edit|weather|task_plan|plan_adjust|plan_progress|calculator|expense_split|deadline_countdown|travel_plan|diet_plan|nearby_food|calendar_event|planning_capabilities\","
+        prompt.append("\n输出必须是以下结构，且每个动作包含全部字段："
+                + "{\"actions\":[{\"action_text\":\"当前动作对应的用户原始要求\","
+                + "\"intent\":\"chat|draw|persona_switch|audio_transcribe|image_action|draw_size|document_summary|document_question|generate_file|document_edit|weather|task_plan|plan_adjust|plan_progress|calculator|expense_split|deadline_countdown|travel_plan|diet_plan|nearby_food|calendar_event|planning_capabilities\","
                 + "\"en_prompt\":\"\",\"cn_description\":\"\","
                 + "\"image_size\":\"none|1024x1024|768x1024|1024x576\","
                 + "\"reply_mode\":\"keep|text|voice|both\","
@@ -196,18 +359,18 @@ public final class IntentRecognizer {
                 + "\"persona\":\"\",\"image_action\":\"none|analyze|solve|edit|clarify\","
                 + "\"image_prompt\":\"\",\"audio_source\":\"any|bot|user\",\"audio_index\":1,"
                 + "\"document_action\":\"none|summary|question\",\"output_file_type\":\"none|docx|pdf\","
-                + "\"weather_location\":\"\",\"weather_day\":\"today|tomorrow\","
+                + "\"weather_location\":\"\",\"weather_day\":\"today|tomorrow|today_morning|today_afternoon|today_evening|tomorrow_morning|tomorrow_afternoon|tomorrow_evening\","
                 + "\"plan_goal\":\"\",\"plan_deadline\":\"\",\"plan_available_time\":\"\","
                 + "\"calculation_operation\":\"add|subtract|multiply|divide|percentage|total_price\","
                 + "\"calculation_left\":\"0\",\"calculation_right\":\"0\","
                 + "\"calculation_quantity\":\"1\",\"calculation_unit_price\":\"0\","
                 + "\"calculation_discount_percent\":\"0\","
-                + "\"travel_origin\":\"\",\"travel_destination\":\"\",\"travel_departure_time\":\"\","
+                + "\"travel_origin\":\"\",\"travel_destination\":\"\",\"travel_stops\":[],\"travel_departure_time\":\"\","
                 + "\"time_budget_minutes\":0,\"meal_keyword\":\"\",\"diet_goal\":\"\","
                 + "\"nearby_location\":\"\",\"nearby_action\":\"remember|search\","
                 + "\"calendar_action\":\"create|list|complete|cancel|snooze\",\"calendar_title\":\"\","
                 + "\"calendar_time\":\"\",\"calendar_recurrence\":\"none|daily|weekly|monthly|yearly\","
-                + "\"calendar_reminder_minutes\":0}。");
+                + "\"calendar_reminder_minutes\":0}]}。");
         return prompt.toString();
     }
 
@@ -228,6 +391,23 @@ public final class IntentRecognizer {
     private String string(JsonObject object, String name) {
         return object.has(name) && !object.get(name).isJsonNull()
                 ? object.get(name).getAsString() : "";
+    }
+
+    /** 读取可选字符串字段，字段为空时也使用调用方给出的默认值。 */
+    private String defaultString(JsonObject object, String name, String defaultValue) {
+        String value = string(object, name);
+        return value.isBlank() ? defaultValue : value;
+    }
+
+    /** 读取字符串数组字段，并忽略模型返回的空白元素。 */
+    private List<String> stringList(JsonObject object, String name) {
+        if (!object.has(name) || !object.get(name).isJsonArray()) return List.of();
+        List<String> values = new ArrayList<>();
+        for (var element : object.getAsJsonArray(name)) {
+            String value = element.getAsString().trim();
+            if (!value.isBlank()) values.add(value);
+        }
+        return List.copyOf(values);
     }
 
     /** 读取可选整数，模型遗漏或格式异常时使用默认值，避免路由失败影响普通聊天。 */

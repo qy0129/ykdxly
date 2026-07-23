@@ -29,6 +29,7 @@ import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -48,18 +49,22 @@ public final class ReplySender {
     private final MediaStore mediaStore;
     private final AudioHistoryStore audioHistory;
     private final ToolManager toolManager;
+    private final UserSessionStore sessions;
     private final Set<String> voiceReplyUsers = ConcurrentHashMap.newKeySet();
+    private final Map<String, Long> lastReplyTimes = new ConcurrentHashMap<>();
 
     /** 创建回复发送器并注入音频、媒体和语音历史依赖。 */
     public ReplySender(
             AudioService audioService,
             MediaStore mediaStore,
             AudioHistoryStore audioHistory,
-            ToolManager toolManager) {
+            ToolManager toolManager,
+            UserSessionStore sessions) {
         this.audioService = audioService;
         this.mediaStore = mediaStore;
         this.audioHistory = audioHistory;
         this.toolManager = toolManager;
+        this.sessions = sessions;
     }
     /** 按用户当前默认回复模式发送一条回复。 */
     public void sendReply(ILinkClient client, String userId, String text) throws Exception {
@@ -80,12 +85,14 @@ public final class ReplySender {
 
         if (!voice || both) {
             client.sendText(userId, text);
+            markReplySent(userId);
         }
         if (voice) {
             try {
+                String resolvedVoiceStyle = resolveVoiceStyle(userId, voiceStyle);
                 JsonObject arguments = new JsonObject();
                 arguments.addProperty("text", text);
-                arguments.addProperty("voice_style", voiceStyle == null ? "default" : voiceStyle);
+                arguments.addProperty("voice_style", resolvedVoiceStyle);
 
                 ToolResult result = toolManager.execute(
                         SpeechTool.NAME,
@@ -103,15 +110,25 @@ public final class ReplySender {
                         throw mp3SendError;
                     }
                     System.err.println("[TTS] MP3 发送失败，改用 WAV: " + mp3SendError.getMessage());
-                    sendAudio(client, userId, text, audioService.synthesizeWav(text, voiceStyle));
+                    sendAudio(client, userId, text, audioService.synthesizeWav(text, resolvedVoiceStyle));
                 }
             } catch (Exception e) {
                 if (!both) {
                     client.sendText(userId, text);
+                    markReplySent(userId);
                 }
                 System.err.println("[TTS] 语音回复失败: " + e.getMessage());
             }
         }
+    }
+
+    /** 未显式指定音色时，使用当前人格绑定的默认音色。 */
+    private String resolveVoiceStyle(String userId, String requestedVoiceStyle) {
+        if (requestedVoiceStyle == null || requestedVoiceStyle.isBlank()
+                || "default".equalsIgnoreCase(requestedVoiceStyle)) {
+            return sessions.getPersonaVoiceStyle(userId);
+        }
+        return requestedVoiceStyle;
     }
 
     /** 发送实际格式的音频，并在发送成功后保存历史记录。 */
@@ -121,6 +138,7 @@ public final class ReplySender {
         System.out.println("[TTS] 准备发送 " + audio.format().toUpperCase()
                 + " 文件，字节数=" + audio.bytes().length);
         client.sendFile(userId, audio.bytes(), fileName, "语音回复");
+        markReplySent(userId);
         try {
             Path savedAudio = mediaStore.save(userId, "audio", audio.bytes(), audio.format());
             audioHistory.add(userId, AudioSource.BOT, savedAudio.toString(), text);
@@ -141,5 +159,14 @@ public final class ReplySender {
     /** 判断该用户是否被设置为只接收语音回复。 */
     public boolean isVoiceOnly(String userId) {
         return voiceReplyUsers.contains(userId) || "voice".equalsIgnoreCase(Config.REPLY_MODE);
+    }
+
+    /** 判断当前处理开始后是否已经成功发出回复。 */
+    public boolean hasSentReplySince(String userId, long startedAtMillis) {
+        return lastReplyTimes.getOrDefault(userId, 0L) >= startedAtMillis;
+    }
+
+    private void markReplySent(String userId) {
+        lastReplyTimes.put(userId, System.currentTimeMillis());
     }
 }
