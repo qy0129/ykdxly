@@ -10,6 +10,7 @@ import com.example.ilink.feature.audio.SynthesizedAudio;
 import com.example.ilink.feature.document.DocumentService;
 import com.example.ilink.feature.image.ImageService;
 import com.example.ilink.feature.persona.Personas;
+import com.example.ilink.feature.web.TextLinkFormatter;
 import com.example.ilink.model.AudioRecord;
 import com.example.ilink.model.AudioSource;
 import com.example.ilink.model.DocumentRecord;
@@ -50,8 +51,10 @@ public final class ReplySender {
     private final AudioHistoryStore audioHistory;
     private final ToolManager toolManager;
     private final UserSessionStore sessions;
+    private final ChatHistoryStore chatHistory;
     private final Set<String> voiceReplyUsers = ConcurrentHashMap.newKeySet();
     private final Map<String, Long> lastReplyTimes = new ConcurrentHashMap<>();
+    private final Map<String, String> lastTextReplies = new ConcurrentHashMap<>();
 
     /** 创建回复发送器并注入音频、媒体和语音历史依赖。 */
     public ReplySender(
@@ -59,12 +62,14 @@ public final class ReplySender {
             MediaStore mediaStore,
             AudioHistoryStore audioHistory,
             ToolManager toolManager,
-            UserSessionStore sessions) {
+            UserSessionStore sessions,
+            ChatHistoryStore chatHistory) {
         this.audioService = audioService;
         this.mediaStore = mediaStore;
         this.audioHistory = audioHistory;
         this.toolManager = toolManager;
         this.sessions = sessions;
+        this.chatHistory = chatHistory;
     }
     /** 按用户当前默认回复模式发送一条回复。 */
     public void sendReply(ILinkClient client, String userId, String text) throws Exception {
@@ -74,6 +79,7 @@ public final class ReplySender {
     /** 根据指定的回复模式和音色发送文本、语音或两者。 */
     public void sendReply(ILinkClient client, String userId, String text,
                            String replyMode, String voiceStyle) throws Exception {
+        String displayText = TextLinkFormatter.format(text);
         boolean voice = voiceReplyUsers.contains(userId)
                 || "voice".equalsIgnoreCase(Config.REPLY_MODE)
                 || "both".equalsIgnoreCase(Config.REPLY_MODE)
@@ -84,8 +90,9 @@ public final class ReplySender {
                 || "both".equalsIgnoreCase(replyMode);
 
         if (!voice || both) {
-            client.sendText(userId, text);
+            client.sendText(userId, displayText);
             markReplySent(userId);
+            rememberText(userId, displayText);
         }
         if (voice) {
             try {
@@ -114,8 +121,9 @@ public final class ReplySender {
                 }
             } catch (Exception e) {
                 if (!both) {
-                    client.sendText(userId, text);
+                    client.sendText(userId, displayText);
                     markReplySent(userId);
+                    rememberText(userId, displayText);
                 }
                 System.err.println("[TTS] 语音回复失败: " + e.getMessage());
             }
@@ -139,6 +147,7 @@ public final class ReplySender {
                 + " 文件，字节数=" + audio.bytes().length);
         client.sendFile(userId, audio.bytes(), fileName, "语音回复");
         markReplySent(userId);
+        rememberText(userId, text);
         try {
             Path savedAudio = mediaStore.save(userId, "audio", audio.bytes(), audio.format());
             audioHistory.add(userId, AudioSource.BOT, savedAudio.toString(), text);
@@ -167,6 +176,22 @@ public final class ReplySender {
     }
 
     private void markReplySent(String userId) {
+        markSent(userId);
+    }
+
+    /** 供非文字回复链路标记已经开始发送，避免处理中提示插入图片组。 */
+    public void markSent(String userId) {
         lastReplyTimes.put(userId, System.currentTimeMillis());
+    }
+
+    /** 保存最后一条可重发的文字内容。 */
+    public void rememberText(String userId, String text) {
+        if (userId == null || text == null || text.isBlank()) return;
+        lastTextReplies.put(userId, text);
+        if (chatHistory != null) chatHistory.addAssistantMessage(userId, text);
+    }
+
+    public String lastText(String userId) {
+        return lastTextReplies.getOrDefault(userId, "");
     }
 }

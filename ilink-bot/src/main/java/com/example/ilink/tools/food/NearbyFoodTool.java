@@ -23,6 +23,7 @@ public final class NearbyFoodTool implements Tool {
         properties.add("location", ToolDefinition.stringProperty("用户当前所在位置，例如杭州市阿里高桥园区"));
         properties.add("longitude", ToolDefinition.stringProperty("用户确认地点的经度；首次搜索时传空字符串"));
         properties.add("latitude", ToolDefinition.stringProperty("用户确认地点的纬度；首次搜索时传空字符串"));
+        properties.add("keyword", ToolDefinition.stringProperty("用户想吃的餐厅、品牌或餐品，例如麦当劳、面馆、咖啡"));
         definition = new ToolDefinition(NAME, "附近美食", "搜索用户当前位置附近的餐饮店铺，并生成手机端高德店铺链接。",
                 ToolDefinition.objectParameters(properties, "location"), true);
     }
@@ -36,33 +37,84 @@ public final class NearbyFoodTool implements Tool {
         String location = ToolArguments.requireString(arguments, "location");
         String longitude = ToolArguments.string(arguments, "longitude", "");
         String latitude = ToolArguments.string(arguments, "latitude", "");
+        String keyword = ToolArguments.string(arguments, "keyword", "").trim();
+        if (keyword.isBlank()) keyword = "美食";
         AmapService.Place center;
         if (longitude.isBlank() || latitude.isBlank()) {
             List<AmapService.Place> candidates = amapService.searchPlaceCandidates(location);
             if (candidates.isEmpty()) return ToolResult.failure("没有找到地点“" + location + "”，请补充城市或更完整的名称。");
             if (candidates.size() > 1) {
-                return ToolResult.success("找到多个同名地点，请回复序号确认。",
-                        new NearbyFoodOutput(candidates, List.of(), amapService.candidateStaticMap(candidates)));
+                return ToolResult.success(formatLocationChoices(candidates),
+                        new NearbyFoodOutput(candidates, List.of(), null,
+                                candidateMapImages(candidates)));
             }
             center = candidates.get(0);
         } else {
             center = new AmapService.Place(location, longitude, latitude);
         }
-        List<AmapService.Restaurant> restaurants = amapService.nearbyRestaurants(center);
-        if (restaurants.isEmpty()) return ToolResult.failure("没有找到附近餐饮店铺，请补充更完整的位置名称。");
-        StringBuilder reply = new StringBuilder("“").append(location).append("”附近可以看看：\n");
-        for (int index = 0; index < restaurants.size(); index++) {
-            AmapService.Restaurant restaurant = restaurants.get(index);
-            reply.append(index + 1).append(". ").append(restaurant.name()).append('\n')
-                    .append("   地址：").append(restaurant.address().isBlank() ? "以地图详情为准" : restaurant.address()).append('\n')
-                    .append("   手机查看：").append(amapService.restaurantUrl(restaurant)).append('\n');
+        List<AmapService.Restaurant> restaurants = amapService.nearbyRestaurants(center, keyword);
+        if (restaurants.isEmpty()) {
+            return ToolResult.failure("“" + location + "”附近暂时没有找到“" + keyword
+                    + "”相关店铺。可以换一个品牌、餐品名称，或扩大搜索范围。");
         }
-        reply.append("\n这些是店铺位置直达链接，不是外卖下单链接；下单链接需要美团或饿了么的门店数据接口。");
-        return ToolResult.success(reply.toString().trim(),
-                new NearbyFoodOutput(List.of(), restaurants, amapService.nearbyStaticMap(center, restaurants)));
+        return ToolResult.success(formatRestaurantTable(location, keyword, restaurants, amapService),
+                new NearbyFoodOutput(List.of(), restaurants,
+                        amapService.nearbyStaticMap(center, restaurants), List.of()));
     }
 
-    /** 工作流据此决定发送候选地点图还是附近餐饮地图。 */
-    public record NearbyFoodOutput(List<AmapService.Place> candidates, List<AmapService.Restaurant> restaurants,
-                                   byte[] mapImage) { }
+    private List<byte[]> candidateMapImages(List<AmapService.Place> candidates) throws Exception {
+        List<byte[]> images = new java.util.ArrayList<>();
+        for (int index = 0; index < Math.min(5, candidates.size()); index++) {
+            images.add(amapService.candidateStaticMap(candidates.get(index), index + 1));
+        }
+        return List.copyOf(images);
+    }
+
+    static String formatRestaurantTable(String location, String keyword,
+                                        List<AmapService.Restaurant> restaurants,
+                                        AmapService amapService) {
+        StringBuilder reply = new StringBuilder("**").append(cell(location)).append("**附近的**")
+                .append(cell(keyword)).append("**：\n\n")
+                .append("| 序号 | 店铺 | 地址 | 导航 |\n")
+                .append("| --- | --- | --- | --- |\n");
+        for (int index = 0; index < restaurants.size(); index++) {
+            AmapService.Restaurant restaurant = restaurants.get(index);
+            reply.append("| ").append(index + 1)
+                    .append(" | ").append(cell(restaurant.name()))
+                    .append(" | ").append(cell(restaurant.address().isBlank()
+                            ? "以地图详情为准" : restaurant.address()))
+                    .append(" | [点击此链接跳转](")
+                    .append(amapService.restaurantUrl(restaurant)).append(") |\n");
+        }
+        return reply.append("\n> 以上为高德店铺位置链接，不是外卖下单链接。")
+                .toString().trim();
+    }
+
+    private static String formatLocationChoices(List<AmapService.Place> candidates) {
+        StringBuilder text = new StringBuilder("找到多个同名地点，请回复序号确认：\n\n")
+                .append("| 序号 | 地点 |\n")
+                .append("| --- | --- |\n");
+        for (int index = 0; index < candidates.size(); index++) {
+            text.append("| ").append(index + 1).append(" | ")
+                    .append(cell(candidates.get(index).name())).append(" |\n");
+        }
+        return text.append("\n回复“取消”可结束搜索。").toString();
+    }
+
+    private static String cell(String value) {
+        return value == null ? "" : value.replace("|", "\\|")
+                .replaceAll("[\\r\\n]+", " ").trim();
+    }
+
+    /** 工作流据此保存地点候选和餐厅选择结果。 */
+    public record NearbyFoodOutput(List<AmapService.Place> candidates,
+                                   List<AmapService.Restaurant> restaurants,
+                                   byte[] mapImage,
+                                   List<byte[]> candidateMapImages) {
+        public NearbyFoodOutput {
+            candidates = candidates == null ? List.of() : List.copyOf(candidates);
+            restaurants = restaurants == null ? List.of() : List.copyOf(restaurants);
+            candidateMapImages = candidateMapImages == null ? List.of() : List.copyOf(candidateMapImages);
+        }
+    }
 }

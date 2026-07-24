@@ -59,7 +59,32 @@ public class Config {
     public static final String AMAP_API_KEY = loadProperty("amap.api.key", "");
     public static final boolean LOGIN_BRIEFING_ENABLED =
             Boolean.parseBoolean(loadProperty("briefing.login.enabled", "true"));
+    public static final boolean BRIEFING_POLISH_ENABLED =
+            Boolean.parseBoolean(loadProperty("briefing.polish.enabled", "true"));
+    public static final Duration BRIEFING_POLISH_TIMEOUT = Duration.ofSeconds(
+            Long.parseLong(loadProperty("briefing.polish.timeout.seconds", "60")));
     public static final String BRIEFING_DEFAULT_LOCATION = loadProperty("briefing.default.location", "");
+    public static final boolean DAILY_DASHBOARD_ENABLED =
+            Boolean.parseBoolean(loadProperty("dashboard.enabled", "true"));
+    public static final String DAILY_DASHBOARD_BIND_ADDRESS =
+            loadProperty("dashboard.bind.address", "0.0.0.0");
+    public static final int DAILY_DASHBOARD_PORT =
+            Integer.parseInt(loadProperty("dashboard.port", "8787"));
+    public static final String DAILY_DASHBOARD_PUBLIC_URL =
+            loadProperty("dashboard.public.url", "");
+    public static final boolean DAILY_DASHBOARD_TUNNEL_ENABLED =
+            Boolean.parseBoolean(loadProperty("dashboard.tunnel.enabled", "false"));
+    public static final String DAILY_DASHBOARD_TUNNEL_COMMAND =
+            loadProperty("dashboard.tunnel.command", "data/tools/cloudflared.exe");
+    public static final Duration DAILY_DASHBOARD_TUNNEL_TIMEOUT = Duration.ofSeconds(
+            Long.parseLong(loadProperty("dashboard.tunnel.timeout.seconds", "25")));
+    public static final boolean VISUAL_CARDS_ENABLED =
+            Boolean.parseBoolean(loadProperty("visual.cards.enabled", "true"));
+    public static final String VISUAL_CARDS_MODE = loadProperty("visual.cards.mode", "image");
+    public static final int VISUAL_CARDS_MAX_DECK_SIZE = Math.max(1, Math.min(6,
+            Integer.parseInt(loadProperty("visual.cards.max.deck.size", "6"))));
+    public static final boolean VISUAL_LINK_QRCODE =
+            Boolean.parseBoolean(loadProperty("visual.cards.link.qrcode", "true"));
     public static final String TAVILY_API_KEY = loadProperty("web.search.tavily.api.key", "");
     public static final int WEB_SEARCH_TIMEOUT_SECONDS =
             Integer.parseInt(loadProperty("web.search.timeout.seconds", "20"));

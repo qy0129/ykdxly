@@ -81,6 +81,7 @@ public final class UserRequestHandler {
     private final HealthDietWorkflow healthDietWorkflow;
     private final TravelWorkflow travelWorkflow;
     private final NearbyFoodWorkflow nearbyFoodWorkflow;
+    private final FoodOrderWorkflow foodOrderWorkflow;
     private final MemoryService memoryService;
     private final TodoService todoService;
     private final WebSearchService webSearchService;
@@ -88,6 +89,7 @@ public final class UserRequestHandler {
     private final BilibiliSearchService bilibiliSearchService;
     private final MediaKnowledgeService mediaKnowledgeService;
     private final QqMailService qqMailService;
+    private final VisualCardWorkflow visualCardWorkflow;
     private final ActionPlanExecutor actionPlanExecutor = new ActionPlanExecutor();
     private final Map<String, PendingFileExport> pendingFileExports = new ConcurrentHashMap<>();
 
@@ -98,12 +100,14 @@ public final class UserRequestHandler {
                               WeatherService weatherService, MediaStore mediaStore,
                               ReplySender replySender, ToolManager toolManager,
                               PlanWorkflow planWorkflow, CalculatorService calculatorService,
-                              CalendarWorkflow calendarWorkflow, HealthDietWorkflow healthDietWorkflow,
-                              TravelWorkflow travelWorkflow, NearbyFoodWorkflow nearbyFoodWorkflow,
+                               CalendarWorkflow calendarWorkflow, HealthDietWorkflow healthDietWorkflow,
+                               TravelWorkflow travelWorkflow, NearbyFoodWorkflow nearbyFoodWorkflow,
+                               FoodOrderWorkflow foodOrderWorkflow,
                               MemoryService memoryService, TodoService todoService,
                               WebSearchService webSearchService, NewsSearchService newsSearchService,
                               BilibiliSearchService bilibiliSearchService,
-                              MediaKnowledgeService mediaKnowledgeService, QqMailService qqMailService) {
+                              MediaKnowledgeService mediaKnowledgeService, QqMailService qqMailService,
+                              VisualCardWorkflow visualCardWorkflow) {
         this.chatHistory = chatHistory;
         this.sessions = sessions;
         this.documentSessions = documentSessions;
@@ -119,6 +123,7 @@ public final class UserRequestHandler {
         this.healthDietWorkflow = healthDietWorkflow;
         this.travelWorkflow = travelWorkflow;
         this.nearbyFoodWorkflow = nearbyFoodWorkflow;
+        this.foodOrderWorkflow = foodOrderWorkflow;
         this.memoryService = memoryService;
         this.todoService = todoService;
         this.webSearchService = webSearchService;
@@ -126,10 +131,14 @@ public final class UserRequestHandler {
         this.bilibiliSearchService = bilibiliSearchService;
         this.mediaKnowledgeService = mediaKnowledgeService;
         this.qqMailService = qqMailService;
+        this.visualCardWorkflow = visualCardWorkflow;
     }
     /** 识别用户意图并调用对应功能处理器。 */
     public void handle(ILinkClient client, String userId, String text) throws Exception {
         if (handleMemoryCommand(client, userId, text)) return;
+        if (handleRepeatCommand(client, userId, text)) return;
+        if (visualCardWorkflow.hasPending(userId) && visualCardWorkflow.handle(client, userId, text)) return;
+        if (visualCardWorkflow.handle(client, userId, text)) return;
         if (handleDirectCommand(client, userId, text)) return;
 
         PendingFileExport pendingFileExport = pendingFileExports.get(userId);
@@ -202,6 +211,11 @@ public final class UserRequestHandler {
             resumeActionPlan(client, userId);
             return;
         }
+        if (foodOrderWorkflow.hasPending(userId)) {
+            foodOrderWorkflow.handlePending(client, userId, text);
+            resumeActionPlan(client, userId);
+            return;
+        }
 
         // 根据当前用户的临时状态构造上下文，让意图识别知道用户正在处理什么。
         IntentContext context = new IntentContext(
@@ -228,6 +242,21 @@ public final class UserRequestHandler {
                 action -> executeAction(client, userId, action),
                 () -> hasBlockingPending(userId),
                 (action, error) -> handleActionFailure(client, userId, action, error));
+    }
+
+    /** 重发上一条回复，不调用大模型，避免被误识别为邮箱查询。 */
+    private boolean handleRepeatCommand(ILinkClient client, String userId, String text) throws Exception {
+        if (!IntentPolicy.isRepeatRequest(text)) return false;
+        String previous = replySender.lastText(userId);
+        if (previous.isBlank()) previous = chatHistory.lastAssistantMessage(userId);
+        if (previous.isBlank()) {
+            replySender.sendReply(client, userId, "我暂时找不到可以重发的上一条回复。 ");
+        } else {
+            client.sendText(userId, previous);
+            replySender.markSent(userId);
+            replySender.rememberText(userId, previous);
+        }
+        return true;
     }
 
     /** 高确定性的记忆指令直接执行，避免继续扩大通用路由模型负担。 */
@@ -305,15 +334,26 @@ public final class UserRequestHandler {
 
     private void queryExpress(ILinkClient client, String userId, String text) throws Exception {
         String trackingNo = ExpressService.extractTrackingNo(text);
-        if (trackingNo.isBlank()) {
-            replySender.sendReply(client, userId, "请把需要查询的快递单号发给我。");
+        String phone = extractExpressPhone(text);
+        if (trackingNo.isBlank() && phone.isBlank()) {
+            replySender.sendReply(client, userId, "请把快递单号或手机号发给我。");
             return;
         }
         JsonObject arguments = new JsonObject();
-        arguments.addProperty("tracking_no", trackingNo);
+        if (!trackingNo.isBlank()) arguments.addProperty("tracking_no", trackingNo);
+        if (!phone.isBlank()) arguments.addProperty("phone", phone);
         ToolResult result = toolManager.execute(ExpressTool.NAME, new ToolContext(userId), arguments);
         chatHistory.add(userId, text, result.output());
-        replySender.sendReply(client, userId, result.output());
+        visualCardWorkflow.sendTextResult(client, userId, "物流进度", trackingNo, result.output());
+    }
+
+    private String extractExpressPhone(String text) {
+        java.util.regex.Matcher full = java.util.regex.Pattern.compile("(?<!\\d)(1[3-9]\\d{9})(?!\\d)")
+                .matcher(text);
+        if (full.find()) return full.group(1);
+        java.util.regex.Matcher tail = java.util.regex.Pattern.compile("(?:尾号|后四位)[^0-9]*(\\d{4})(?!\\d)")
+                .matcher(text);
+        return tail.find() ? tail.group(1) : "";
     }
 
     private void createTodo(ILinkClient client, String userId, String text) throws Exception {
@@ -346,7 +386,8 @@ public final class UserRequestHandler {
         if (text.matches(".*(今天|今日|最新|实时).*")) query += " when:1d";
         try {
             List<SearchResult> results = newsSearchService.search(query, Config.WEB_SEARCH_RESULT_LIMIT);
-            replySender.sendReply(client, userId, formatSearchResults("实时新闻", results));
+            String reply = formatSearchResults("实时新闻", results);
+            visualCardWorkflow.sendSearchResults(client, userId, "实时新闻", results, reply);
         } catch (Exception e) {
             System.err.println("[实时新闻] 查询失败: " + e.getMessage());
             replySender.sendReply(client, userId, "这次实时新闻查询没有成功，我目前无法确认最新内容，请稍后再试。");
@@ -361,7 +402,8 @@ public final class UserRequestHandler {
         }
         try {
             List<SearchResult> results = webSearchService.search(query, Config.WEB_SEARCH_RESULT_LIMIT);
-            replySender.sendReply(client, userId, formatSearchResults("联网搜索结果", results));
+            String reply = formatSearchResults("联网搜索结果", results);
+            visualCardWorkflow.sendSearchResults(client, userId, "联网搜索结果", results, reply);
         } catch (Exception e) {
             System.err.println("[联网搜索] 查询失败: " + e.getMessage());
             replySender.sendReply(client, userId, "这次联网查询没有成功，我不会用旧知识冒充实时结果，请稍后再试。");
@@ -467,6 +509,7 @@ public final class UserRequestHandler {
             case "plan_adjust" -> planWorkflow.adjustPlan(client, userId, actionText, route);
             case "plan_progress" -> planWorkflow.queryProgress(client, userId, actionText, route);
             case "expense_split" -> handleExpenseSplit(client, userId, actionText, route);
+            case "food_order" -> handleFoodOrder(client, userId, actionText, route);
             case "deadline_countdown" -> handleDeadlineCountdown(client, userId, actionText, route);
             case "calculator" -> {
                 String reply = calculatorService.execute(userId, actionText);
@@ -505,7 +548,8 @@ public final class UserRequestHandler {
                 || calendarWorkflow.hasPending(userId)
                 || healthDietWorkflow.hasPending(userId)
                 || travelWorkflow.hasPendingLocation(userId)
-                || nearbyFoodWorkflow.hasPendingLocation(userId);
+                || nearbyFoodWorkflow.hasPendingLocation(userId)
+                || foodOrderWorkflow.hasPending(userId);
     }
 
     /** 搜索哔哩哔哩内容；具体视频不可用时服务会返回官方搜索入口。 */
@@ -514,7 +558,7 @@ public final class UserRequestHandler {
                 route.bilibiliQuery(), route.bilibiliCategory());
         String reply = bilibiliSearchService.formatReply(results);
         chatHistory.add(userId, route.bilibiliQuery(), reply);
-        replySender.sendReply(client, userId, reply, "text", "default");
+        visualCardWorkflow.sendBilibiliResults(client, userId, results, reply);
     }
 
     /** 查询动漫或音乐资料，并继续提供哔哩哔哩入口。 */
@@ -527,14 +571,14 @@ public final class UserRequestHandler {
                 knowledge.bilibiliQuery(), knowledge.bilibiliCategory());
         String reply = knowledge.text() + "\n\n" + bilibiliSearchService.formatReply(videos);
         chatHistory.add(userId, requestText, reply);
-        replySender.sendReply(client, userId, reply, "text", "default");
+        visualCardWorkflow.sendMediaResults(client, userId, query, knowledge.text(), videos, reply);
     }
 
     /** 只读查询绑定用户的 QQ 邮箱。 */
     private void queryEmail(ILinkClient client, String userId, IntentResult route) throws Exception {
         String reply = qqMailService.query(userId, route.emailAction(), route.emailKeyword());
         chatHistory.add(userId, "QQ邮箱查询", reply);
-        replySender.sendReply(client, userId, reply, "text", "default");
+        visualCardWorkflow.sendTextResult(client, userId, "QQ 邮箱", "邮件查询结果", reply);
     }
 
     /** 记录单个动作的错误并继续后续动作，避免一个工具失败导致整段请求中断。 */
@@ -680,6 +724,13 @@ public final class UserRequestHandler {
         chatHistory.add(userId, userText, result.output());
         replySender.applyReplyMode(userId, route.replyMode());
         replySender.sendReply(client, userId, result.output(), route.replyMode(), route.voiceStyle());
+    }
+
+    /** 根据当前位置查找具体分店，并生成平台门店链接或精确搜索入口。 */
+    private void handleFoodOrder(ILinkClient client, String userId, String userText,
+                                 IntentResult route) throws Exception {
+        replySender.applyReplyMode(userId, route.replyMode());
+        foodOrderWorkflow.handle(client, userId, route);
     }
 
     /** 调用截止时间工具，返回用户距离目标时间的剩余时长。 */
@@ -915,6 +966,7 @@ public final class UserRequestHandler {
             case "plan_adjust" -> "调整计划";
             case "plan_progress" -> "查询计划进度";
             case "expense_split" -> "费用分摊";
+            case "food_order" -> "点餐";
             case "deadline_countdown" -> "截止时间倒计时";
             case "calculator" -> "基础计算";
             default -> intent;

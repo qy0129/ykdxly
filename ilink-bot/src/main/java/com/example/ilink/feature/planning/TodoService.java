@@ -33,9 +33,7 @@ public final class TodoService {
     }
 
     public String list(String userId) {
-        List<TodoItem> active = store.list(userId).stream()
-                .filter(todo -> "pending".equals(todo.status()))
-                .toList();
+        List<TodoItem> active = activeItems(userId);
         if (active.isEmpty()) return "你目前没有待完成事项。";
         StringBuilder text = new StringBuilder("你的待办：\n");
         for (int index = 0; index < active.size(); index++) {
@@ -45,6 +43,29 @@ public final class TodoService {
             text.append('\n');
         }
         return text.toString().trim();
+    }
+
+    /** 返回用户全部待办记录，供日报页面计算完成进度。 */
+    public List<TodoItem> items(String userId) {
+        return store.list(userId);
+    }
+
+    /** 返回按截止时间排序的未完成待办。 */
+    public List<TodoItem> activeItems(String userId) {
+        return store.list(userId).stream()
+                .filter(todo -> "pending".equals(todo.status()))
+                .toList();
+    }
+
+    /** 按稳定 ID 完成待办，避免网页上存在同名事项时误操作。 */
+    public boolean completeById(String userId, String todoId) {
+        TodoItem todo = store.list(userId).stream()
+                .filter(item -> item.id().equals(todoId) && "pending".equals(item.status()))
+                .findFirst().orElse(null);
+        if (todo == null) return false;
+        store.save(todo.withStatus("completed"));
+        if (!todo.calendarEventId().isBlank()) calendarService.complete(todo.calendarEventId());
+        return true;
     }
 
     public String completeLatest(String userId) {

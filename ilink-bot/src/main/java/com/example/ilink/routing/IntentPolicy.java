@@ -30,6 +30,14 @@ public final class IntentPolicy {
     private IntentPolicy() {
     }
 
+    /** “重新发一遍”属于会话控制命令，不应交给邮箱或通用语义路由。 */
+    public static boolean isRepeatRequest(String text) {
+        if (text == null) return false;
+        String value = text.replaceAll("[，,。.!！?？\\s]", "");
+        return value.matches("^(你)?(请)?(帮我)?(把)?(刚才的|上一条|上一个回复)?"
+                + "(重新发|重发|再发|再说)(一遍|一次|一下)?(给我)?$");
+    }
+
     /** 用户是否明确要求创建视觉内容。 */
     public static boolean isExplicitImageCreation(String text) {
         return text != null && IMAGE_CREATION.matcher(text).find();

@@ -58,5 +58,6 @@ public record IntentResult(
         String mediaQuery,
         String mediaCategory,
         String emailAction,
-        String emailKeyword) {
+        String emailKeyword,
+        String foodOrderRestaurants) {
 }

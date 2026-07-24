@@ -100,6 +100,17 @@ public final class CalendarService {
                 .toList();
     }
 
+    /** 返回闭区间日期范围内的有效事件，供周计划和日报页面使用。 */
+    public List<CalendarEvent> eventsBetween(String userId, LocalDate from, LocalDate to) {
+        return store.list(userId).stream()
+                .filter(event -> "active".equals(event.status()))
+                .filter(event -> {
+                    LocalDate date = event.startAt().toLocalDate();
+                    return !date.isBefore(from) && !date.isAfter(to);
+                })
+                .toList();
+    }
+
     public void complete(String eventId) {
         CalendarEvent event = store.get(eventId);
         if (event != null) {

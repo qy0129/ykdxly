@@ -35,6 +35,14 @@ class IntentPolicyTest {
     }
 
     @Test
+    void repeatReplyCommandsAreHandledLocally() {
+        assertTrue(IntentPolicy.isRepeatRequest("你重新发一遍"));
+        assertTrue(IntentPolicy.isRepeatRequest("上一条再发一次"));
+        assertTrue(IntentPolicy.isRepeatRequest("帮我重发一下"));
+        assertFalse(IntentPolicy.isRepeatRequest("帮我重新发送一封邮件"));
+    }
+
+    @Test
     void wrongFileIntentIsCorrectedToDraw() throws Exception {
         IntentRecognizer recognizer = new IntentRecognizer(HttpClient.newHttpClient());
         JsonObject action = new JsonObject();
@@ -68,5 +76,55 @@ class IntentPolicyTest {
 
         assertEquals("chat", action.get("intent").getAsString());
         assertEquals("none", action.get("output_file_type").getAsString());
+    }
+
+    @Test
+    void locationAndFoodPreferenceBecomeKeywordNearbySearch() throws Exception {
+        IntentRecognizer recognizer = new IntentRecognizer(HttpClient.newHttpClient());
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "food_order");
+        action.addProperty("action_text", "我现在在阿里高桥云港园区，我想吃麦当劳了");
+        action.addProperty("food_order_restaurants", "麦当劳");
+
+        Method normalize = IntentRecognizer.class.getDeclaredMethod(
+                "normalizeAction", String.class, String.class, JsonObject.class, IntentContext.class);
+        normalize.setAccessible(true);
+        normalize.invoke(recognizer, "我现在在阿里高桥云港园区，我想吃麦当劳了",
+                "我现在在阿里高桥云港园区，我想吃麦当劳了", action,
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals("nearby_food", action.get("intent").getAsString());
+        assertEquals("麦当劳", action.get("meal_keyword").getAsString());
+        assertEquals("search", action.get("nearby_action").getAsString());
+    }
+
+    @Test
+    void nearbyKeywordCanBeRecoveredFromNaturalLanguage() {
+        assertTrue(IntentRecognizer.isNearbyDiningRequest("我现在在阿里高桥云港园区，我想吃麦当劳了"));
+        assertEquals("麦当劳", IntentRecognizer.inferNearbyFoodKeyword(
+                "我现在在阿里高桥云港园区，我想吃麦当劳了"));
+        assertEquals("麦当劳", IntentRecognizer.inferNearbyFoodKeyword("这附近有麦当劳吗"));
+        assertEquals("", IntentRecognizer.inferNearbyFoodKeyword("附近有什么好吃的"));
+        assertTrue(IntentRecognizer.isNearbyDiningRequest("我附近有什么好吃的"));
+        assertEquals("", IntentRecognizer.inferNearbyFoodKeyword("我现在在阿里高桥云港园区"));
+        assertFalse(IntentRecognizer.isNearbyDiningRequest("帮我点麦当劳外卖"));
+    }
+
+    @Test
+    void genericNearbyQuestionDoesNotBecomePoiKeyword() throws Exception {
+        IntentRecognizer recognizer = new IntentRecognizer(HttpClient.newHttpClient());
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "nearby_food");
+        action.addProperty("meal_keyword", "什么好吃的");
+        action.addProperty("nearby_action", "search");
+
+        Method normalize = IntentRecognizer.class.getDeclaredMethod(
+                "normalizeAction", String.class, String.class, JsonObject.class, IntentContext.class);
+        normalize.setAccessible(true);
+        normalize.invoke(recognizer, "附近有什么好吃的", "附近有什么好吃的",
+                action, new IntentContext(false, false, false, false, false));
+
+        assertEquals("", action.get("meal_keyword").getAsString());
+        assertEquals("search", action.get("nearby_action").getAsString());
     }
 }

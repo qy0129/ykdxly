@@ -28,6 +28,10 @@ public final class ExpressService {
 
     private static final String AUTO_NUMBER_URL = "https://www.kuaidi100.com/autonumber/auto?num=";
     private static final String PUBLIC_QUERY_URL = "https://www.kuaidi100.com/query?type=";
+    private static final String[] PHONE_QUERY_URLS = {
+            "https://www.kuaidi100.com/phoneorder/queryPhoneOrder?phone=",
+            "https://www.kuaidi100.com/phoneorder/query?phone="
+    };
     private static final URI ENTERPRISE_QUERY_URL = URI.create("https://poll.kuaidi100.com/poll/query.do");
     private static final Pattern TRACKING_PATTERN = Pattern.compile(
             "(?i)(?<![A-Z0-9])([A-Z]{2,6}[A-Z0-9-]{6,34}|\\d{12,30})(?![A-Z0-9])");
@@ -47,6 +51,10 @@ public final class ExpressService {
     }
 
     public ExpressResult query(String rawTrackingNo) throws IOException, InterruptedException {
+        return query(rawTrackingNo, "");
+    }
+
+    public ExpressResult query(String rawTrackingNo, String phone) throws IOException, InterruptedException {
         String trackingNo = normalizeTrackingNo(rawTrackingNo);
         if (!isTrackingNo(trackingNo)) {
             return ExpressResult.failure("快递单号格式不正确，请检查后重新发送。");
@@ -60,7 +68,7 @@ public final class ExpressService {
         if (hasEnterpriseCredentials()) {
             for (CourierInfo courier : couriers) {
                 try {
-                    lastResult = queryEnterprise(trackingNo, courier.code());
+                    lastResult = queryEnterprise(trackingNo, courier.code(), phone);
                     if (hasTracking(lastResult)) return lastResult;
                 } catch (IOException e) {
                     lastError = e;
@@ -69,7 +77,7 @@ public final class ExpressService {
         }
         for (CourierInfo courier : couriers) {
             try {
-                lastResult = queryPublic(trackingNo, courier.code());
+                lastResult = queryPublic(trackingNo, courier.code(), phone);
                 if (hasTracking(lastResult)) return lastResult;
             } catch (IOException e) {
                 lastError = e;
@@ -78,6 +86,73 @@ public final class ExpressService {
         if (lastResult != null) return lastResult;
         return ExpressResult.failure(lastError == null
                 ? "暂时没有查到物流信息，请稍后再试。" : lastError.getMessage());
+    }
+
+    public ExpressResult query(String rawTrackingNo, String courierCode, String phone)
+            throws IOException, InterruptedException {
+        String trackingNo = normalizeTrackingNo(rawTrackingNo);
+        if (!isTrackingNo(trackingNo) || courierCode == null || courierCode.isBlank()) {
+            return ExpressResult.failure("快递单号或快递公司不正确。");
+        }
+        ExpressResult result = null;
+        if (hasEnterpriseCredentials()) {
+            try {
+                result = queryEnterprise(trackingNo, courierCode, phone);
+                if (hasTracking(result)) return result;
+            } catch (IOException ignored) {
+                // 企业接口异常时继续使用公开接口，避免手机号批量查询被单个请求中断。
+            }
+        }
+        ExpressResult publicResult = queryPublic(trackingNo, courierCode, phone);
+        return hasTracking(publicResult) || result == null ? publicResult : result;
+    }
+
+    /** 按手机号查询关联单号，沿用来源项目的快递100公开 phoneorder 接口。 */
+    public List<PhoneOrder> queryByPhone(String phone) {
+        String cleanPhone = phone == null ? "" : phone.replaceAll("\\D", "");
+        if (cleanPhone.length() < 4) return List.of();
+        for (String endpoint : PHONE_QUERY_URLS) {
+            try {
+                String suffix = endpoint.contains("query?phone=")
+                        ? "&_=" + System.currentTimeMillis() : "";
+                List<PhoneOrder> orders = parsePhoneOrders(get(URI.create(endpoint + cleanPhone + suffix)));
+                if (!orders.isEmpty()) return orders;
+            } catch (Exception ignored) {
+                // 公开手机号接口不稳定时继续尝试下一地址。
+            }
+        }
+        return List.of();
+    }
+
+    static List<PhoneOrder> parsePhoneOrders(String body) {
+        if (body == null || body.isBlank()) return List.of();
+        try {
+            JsonElement root = JsonParser.parseString(body);
+            JsonArray data;
+            if (root.isJsonArray()) {
+                data = root.getAsJsonArray();
+            } else if (root.isJsonObject()) {
+                JsonElement value = root.getAsJsonObject().get("data");
+                data = value != null && value.isJsonArray() ? value.getAsJsonArray() : new JsonArray();
+            } else {
+                return List.of();
+            }
+            List<PhoneOrder> orders = new ArrayList<>();
+            for (JsonElement element : data) {
+                if (!element.isJsonObject()) continue;
+                JsonObject item = element.getAsJsonObject();
+                String trackingNo = firstString(item, "num", "trackingNo", "expressNo");
+                String courierCode = firstString(item, "com", "comCode", "courierCode");
+                if (trackingNo.isBlank() || courierCode.isBlank()) continue;
+                if (orders.stream().noneMatch(order -> order.trackingNo().equalsIgnoreCase(trackingNo))) {
+                    orders.add(new PhoneOrder(normalizeTrackingNo(trackingNo), courierCode,
+                            string(item, "state"), firstString(item, "comName", "companyName")));
+                }
+            }
+            return List.copyOf(orders);
+        } catch (RuntimeException ignored) {
+            return List.of();
+        }
     }
 
     public List<CourierInfo> detectCouriers(String trackingNo) throws IOException, InterruptedException {
@@ -102,12 +177,13 @@ public final class ExpressService {
         return guessCouriers(trackingNo);
     }
 
-    private ExpressResult queryEnterprise(String trackingNo, String courierCode)
+    private ExpressResult queryEnterprise(String trackingNo, String courierCode, String phone)
             throws IOException, InterruptedException {
         JsonObject parameterObject = new JsonObject();
         parameterObject.addProperty("com", courierCode);
         parameterObject.addProperty("num", trackingNo);
         parameterObject.addProperty("resultv2", "4");
+        if (phone != null && !phone.isBlank()) parameterObject.addProperty("phone", phone);
         String parameter = parameterObject.toString();
         String body = "customer=" + URLEncoder.encode(customer, StandardCharsets.UTF_8)
                 + "&sign=" + md5(parameter + key + customer)
@@ -120,10 +196,14 @@ public final class ExpressService {
         return parseResponse(send(request), trackingNo, courierCode);
     }
 
-    private ExpressResult queryPublic(String trackingNo, String courierCode)
+    private ExpressResult queryPublic(String trackingNo, String courierCode, String phone)
             throws IOException, InterruptedException {
-        URI uri = URI.create(PUBLIC_QUERY_URL + URLEncoder.encode(courierCode, StandardCharsets.UTF_8)
-                + "&postid=" + URLEncoder.encode(trackingNo, StandardCharsets.UTF_8));
+        String url = PUBLIC_QUERY_URL + URLEncoder.encode(courierCode, StandardCharsets.UTF_8)
+                + "&postid=" + URLEncoder.encode(trackingNo, StandardCharsets.UTF_8);
+        if (phone != null && !phone.isBlank()) {
+            url += "&phone=" + URLEncoder.encode(phone, StandardCharsets.UTF_8);
+        }
+        URI uri = URI.create(url);
         return parseResponse(get(uri), trackingNo, courierCode);
     }
 
@@ -159,7 +239,8 @@ public final class ExpressService {
             if (data != null) {
                 for (JsonElement element : data) {
                     JsonObject item = element.getAsJsonObject();
-                    items.add(new TrackingItem(firstString(item, "ftime", "time"), string(item, "context")));
+                    items.add(new TrackingItem(firstString(item, "ftime", "time"), string(item, "context"),
+                            firstString(item, "areaName", "location"), string(item, "areaCode")));
                 }
             }
             if (success && !items.isEmpty() && items.stream().noneMatch(ExpressService::isRealTrackingItem)) {
@@ -173,8 +254,10 @@ public final class ExpressService {
             String courierCode = string(result, "com");
             if (courierCode.isBlank()) courierCode = fallbackCourierCode;
             if (!success && message.isBlank()) message = "暂时没有查到物流信息，请稍后再试。";
+            String estimatedDeliveryAt = firstString(result, "predictTime", "estimatedDeliveryTime",
+                    "deliveryTime", "arrivalTime");
             return new ExpressResult(success, message, string(result, "state"), trackingNo,
-                    courierCode, courierName(courierCode), List.copyOf(items));
+                    courierCode, courierName(courierCode), List.copyOf(items), estimatedDeliveryAt);
         } catch (RuntimeException e) {
             return ExpressResult.failure("快递服务返回的数据无法解析，请稍后再试。");
         }
@@ -210,6 +293,9 @@ public final class ExpressService {
                 .append("\n单号：").append(result.trackingNo());
         String state = stateName(result.state());
         if (!state.isBlank()) text.append("\n状态：").append(state);
+        if (!result.estimatedDeliveryAt().isBlank()) {
+            text.append("\n预计送达：").append(result.estimatedDeliveryAt());
+        }
         if (result.items().isEmpty()) return text.append("\n暂无物流轨迹。").toString();
         text.append("\n\n最新物流：\n");
         for (TrackingItem item : result.items().stream().limit(5).toList()) {
@@ -300,13 +386,19 @@ public final class ExpressService {
     public record CourierInfo(String code, String name) {
     }
 
-    public record TrackingItem(String time, String context) {
+    public record TrackingItem(String time, String context, String areaName, String areaCode) {
+        public TrackingItem(String time, String context) {
+            this(time, context, "", "");
+        }
     }
 
     public record ExpressResult(boolean success, String message, String state, String trackingNo,
-                                String courierCode, String courierName, List<TrackingItem> items) {
+                                String courierCode, String courierName, List<TrackingItem> items,
+                                String estimatedDeliveryAt) {
         public static ExpressResult failure(String message) {
-            return new ExpressResult(false, message, "", "", "", "", List.of());
+            return new ExpressResult(false, message, "", "", "", "", List.of(), "");
         }
     }
+
+    public record PhoneOrder(String trackingNo, String courierCode, String state, String courierName) { }
 }

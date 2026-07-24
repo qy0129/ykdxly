@@ -10,9 +10,12 @@ import com.example.ilink.feature.memory.MemoryService;
 import com.example.ilink.feature.mail.QqMailService;
 import com.example.ilink.feature.weather.WeatherLocation;
 import com.example.ilink.feature.weather.WeatherService;
+import com.example.ilink.feature.web.NewsSearchService;
+import com.example.ilink.feature.web.WebSearchService;
 import com.example.ilink.model.CalendarEvent;
 import com.example.ilink.model.PlanTask;
 import com.example.ilink.model.ReminderDelivery;
+import com.example.ilink.model.SearchResult;
 import com.example.ilink.model.TaskPlan;
 
 import java.time.LocalDate;
@@ -37,11 +40,15 @@ public final class LoginBriefingService {
     private final HolidayService holidayService;
     private final MemoryService memoryService;
     private final QqMailService qqMailService;
+    private final NewsSearchService newsSearchService;
+    private final WebSearchService webSearchService;
+    private volatile CachedNews cachedNews;
 
     public LoginBriefingService(WeatherService weatherService, CalendarService calendarService,
                                 TodoService todoService, PlanSessionStore planSessions,
                                  UserSessionStore userSessions, HolidayService holidayService,
-                                 MemoryService memoryService, QqMailService qqMailService) {
+                                 MemoryService memoryService, QqMailService qqMailService,
+                                 NewsSearchService newsSearchService, WebSearchService webSearchService) {
         this.weatherService = weatherService;
         this.calendarService = calendarService;
         this.todoService = todoService;
@@ -50,6 +57,8 @@ public final class LoginBriefingService {
         this.holidayService = holidayService;
         this.memoryService = memoryService;
         this.qqMailService = qqMailService;
+        this.newsSearchService = newsSearchService;
+        this.webSearchService = webSearchService;
     }
 
     public String build(String userId, List<ReminderDelivery> overdueDeliveries) {
@@ -91,13 +100,67 @@ public final class LoginBriefingService {
         appendTodayPlan(text, userId, today);
         String mailBriefing = qqMailService == null ? "" : qqMailService.briefing(userId);
         if (!mailBriefing.isBlank()) text.append("\n\n").append(mailBriefing);
+        String newsBriefing = loadNews();
+        if (!newsBriefing.isBlank()) text.append("\n\n").append(newsBriefing);
 
         return text.append("\n不用着急，一件一件来就好，我会继续帮你记着。")
                 .toString().trim();
     }
 
+    private synchronized String loadNews() {
+        if (newsSearchService == null && webSearchService == null) return "";
+        CachedNews cache = cachedNews;
+        long cacheMinutes = cache != null && !cache.text().isBlank() ? 15 : 3;
+        if (cache != null && cache.loadedAt().isAfter(LocalDateTime.now().minusMinutes(cacheMinutes))) {
+            return cache.text();
+        }
+        List<SearchResult> results = searchNews(
+                newsSearchService == null ? null : newsSearchService::search,
+                webSearchService == null ? null : webSearchService::search);
+        String text = formatNews(results);
+        cachedNews = new CachedNews(LocalDateTime.now(), text);
+        return text;
+    }
+
+    static List<SearchResult> searchNews(NewsProvider primary, NewsProvider fallback) {
+        if (primary != null) {
+            try {
+                List<SearchResult> results = primary.search("最新热点 when:1d", 3);
+                if (results != null && !results.isEmpty()) return results;
+            } catch (Exception e) {
+                System.err.println("[登录简报] Google News 查询失败，尝试公共搜索: " + e.getMessage());
+            }
+        }
+        if (fallback != null) {
+            try {
+                List<SearchResult> results = fallback.search("今日热点新闻", 3);
+                return results == null ? List.of() : results;
+            } catch (Exception e) {
+                System.err.println("[登录简报] 热点新闻查询失败: " + e.getMessage());
+            }
+        }
+        return List.of();
+    }
+
+    static String formatNews(List<SearchResult> results) {
+        if (results == null || results.isEmpty()) return "";
+        StringBuilder text = new StringBuilder("近期热点：\n");
+        for (int index = 0; index < Math.min(3, results.size()); index++) {
+            SearchResult result = results.get(index);
+            text.append(index + 1).append(". ").append(result.title()).append('\n')
+                    .append("来源：").append(result.source().isBlank() ? "新闻网页" : result.source());
+            if (!result.publishedAt().isBlank()) text.append("｜").append(result.publishedAt());
+            if (!result.url().isBlank()) text.append('\n').append(result.url());
+            if (index < Math.min(3, results.size()) - 1) text.append("\n\n");
+        }
+        return text.toString();
+    }
+
     private String loadWeather(String userId) {
-        String locationName = userSessions.getCurrentLocation(userId);
+        String locationName = userSessions.getCurrentCity(userId);
+        if (locationName == null || locationName.isBlank()) {
+            locationName = userSessions.getCurrentLocation(userId);
+        }
         if ((locationName == null || locationName.isBlank()) && memoryService != null) {
             locationName = memoryService.value(userId, "home_location");
         }
@@ -151,5 +214,12 @@ public final class LoginBriefingService {
         if (hour < 12) return "早上好";
         if (hour < 18) return "下午好";
         return "晚上好";
+    }
+
+    private record CachedNews(LocalDateTime loadedAt, String text) { }
+
+    @FunctionalInterface
+    interface NewsProvider {
+        List<SearchResult> search(String query, int limit) throws Exception;
     }
 }

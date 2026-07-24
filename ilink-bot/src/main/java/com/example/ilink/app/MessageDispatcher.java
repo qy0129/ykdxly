@@ -13,7 +13,9 @@ import com.example.ilink.feature.chat.ChatService;
 import com.example.ilink.feature.document.DocumentAiService;
 import com.example.ilink.feature.document.DocumentService;
 import com.example.ilink.feature.express.ExpressService;
+import com.example.ilink.feature.express.ExpressPageService;
 import com.example.ilink.feature.finance.ExpenseSplitService;
+import com.example.ilink.feature.food.FoodOrderService;
 import com.example.ilink.feature.image.ImageService;
 import com.example.ilink.feature.image.GeneratedImage;
 import com.example.ilink.feature.persona.Personas;
@@ -34,12 +36,17 @@ import com.example.ilink.feature.web.WebSearchService;
 import com.example.ilink.feature.calendar.CalendarService;
 import com.example.ilink.feature.calendar.HolidayService;
 import com.example.ilink.feature.travel.AmapService;
+import com.example.ilink.feature.visual.QrCodeService;
+import com.example.ilink.feature.visual.VisualCardFactory;
+import com.example.ilink.feature.visual.VisualCardRenderer;
+import com.example.ilink.feature.visual.VisualDeckSender;
 import com.example.ilink.tools.audio.AudioTranscribeTool;
 import com.example.ilink.tools.audio.SpeechTool;
 import com.example.ilink.tools.core.ToolManager;
 import com.example.ilink.tools.finance.ExpenseSplitTool;
 import com.example.ilink.tools.express.ExpressTool;
 import com.example.ilink.tools.food.FoodDeliveryTool;
+import com.example.ilink.tools.food.FoodOrderTool;
 import com.example.ilink.tools.food.NearbyFoodTool;
 import com.example.ilink.tools.document.DocumentEditTool;
 import com.example.ilink.tools.document.DocumentGenerateTool;
@@ -119,7 +126,8 @@ public final class MessageDispatcher implements AutoCloseable {
     private final DocumentSessionStore documentSessions = new DocumentSessionStore();
     private final PlanSessionStore planSessions = new PlanSessionStore();
     private final MemoryService memoryService = new MemoryService();
-    private final IntentRecognizer intentRecognizer = new IntentRecognizer(httpClient);
+    private final IntentRecognizer intentRecognizer = new IntentRecognizer(
+            httpClient, chatHistory, memoryService, sessions);
     private final ChatService chatService = new ChatService(httpClient, chatHistory, sessions, memoryService);
     private final DocumentAiService documentAiService = new DocumentAiService(httpClient, chatHistory);
     private final AudioService audioService = new AudioService(httpClient);
@@ -138,8 +146,10 @@ public final class MessageDispatcher implements AutoCloseable {
     private final TaskPlanningService planningService = new TaskPlanningService(httpClient);
     private final ExpenseSplitService expenseSplitService = new ExpenseSplitService(httpClient);
     private final ExpressService expressService = new ExpressService(httpClient);
+    private final FoodOrderService foodOrderService = new FoodOrderService(httpClient);
     private final MediaStore mediaStore = new MediaStore();
     private final AmapService amapService = new AmapService(httpClient);
+    private final ExpressPageService expressPageService = new ExpressPageService(amapService);
     private final ToolManager toolManager = new ToolManager()
             .register(new WeatherTool(weatherService))
             .register(new DrawTool(imageService))
@@ -160,6 +170,7 @@ public final class MessageDispatcher implements AutoCloseable {
             .register(new PlanProgressTool(planningService, planSessions))
             .register(new CalculatorTool())
             .register(new ExpenseSplitTool(expenseSplitService))
+            .register(new FoodOrderTool(foodOrderService))
             .register(new FoodDeliveryTool())
             .register(new NearbyFoodTool(amapService))
             .register(new LengthTool())
@@ -176,13 +187,16 @@ public final class MessageDispatcher implements AutoCloseable {
             .register(new MortgageTool())
             .register(new ChineseMoneyTool())
             .register(new RelationTool())
-            .register(new ExpressTool(expressService));
+            .register(new ExpressTool(expressService, expressPageService));
 
     private final CalculatorService calculatorService = new CalculatorService(httpClient, toolManager);
     private final CalculatorTextRouter calculatorTextRouter = new CalculatorTextRouter(toolManager);
     private final Set<String> voiceReplyUsers = ConcurrentHashMap.newKeySet();
     private final ReplySender replySender = new ReplySender(
-            audioService, mediaStore, audioHistory, toolManager, sessions);
+            audioService, mediaStore, audioHistory, toolManager, sessions, chatHistory);
+    private final VisualCardFactory visualCardFactory = new VisualCardFactory();
+    private final VisualDeckSender visualDeckSender = new VisualDeckSender(
+            new VisualCardRenderer(new QrCodeService()), replySender::markSent, replySender::rememberText);
     private final CalendarService calendarService = new CalendarService(new CalendarEventStore());
     private final TodoService todoService = new TodoService(new TodoStore(), calendarService);
     private final CalendarWorkflow calendarWorkflow = new CalendarWorkflow(
@@ -191,27 +205,40 @@ public final class MessageDispatcher implements AutoCloseable {
             calendarService, new DietPlanSessionStore(), replySender, toolManager);
     private final NearbyFoodWorkflow nearbyFoodWorkflow = new NearbyFoodWorkflow(
             sessions, toolManager, replySender);
+    private final FoodOrderWorkflow foodOrderWorkflow = new FoodOrderWorkflow(
+            sessions, amapService, foodOrderService, replySender);
     private final TravelWorkflow travelWorkflow = new TravelWorkflow(
             amapService, calendarService, replySender);
     private final PlanWorkflow planWorkflow = new PlanWorkflow(
             toolManager, planSessions, chatHistory, replySender, documentService, calendarService);
+    private final VisualCardWorkflow visualCardWorkflow = new VisualCardWorkflow(
+            visualDeckSender, visualCardFactory, planSessions, calendarService, todoService,
+            toolManager, foodOrderService, qqMailService, newsSearchService,
+            mediaKnowledgeService, bilibiliSearchService, amapService);
     private final UserRequestHandler requestHandler = new UserRequestHandler(
             chatHistory, sessions, documentSessions,
             intentRecognizer, chatService, weatherService,
             mediaStore, replySender, toolManager, planWorkflow, calculatorService, calendarWorkflow,
-            healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, memoryService, todoService,
-            webSearchService, newsSearchService, bilibiliSearchService, mediaKnowledgeService, qqMailService);
+            healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, foodOrderWorkflow,
+            memoryService, todoService,
+            webSearchService, newsSearchService, bilibiliSearchService, mediaKnowledgeService,
+            qqMailService, visualCardWorkflow);
     private final ScheduledExecutorService progressScheduler = Executors.newScheduledThreadPool(1);
     private final ScheduledExecutorService reminderScheduler = Executors.newScheduledThreadPool(1);
     private final Set<String> knownUsers = ConcurrentHashMap.newKeySet();
     private final Set<String> briefedUsers = ConcurrentHashMap.newKeySet();
     private final LoginBriefingService loginBriefingService = new LoginBriefingService(
             weatherService, calendarService, todoService, planSessions, sessions,
-            new HolidayService(), memoryService, qqMailService);
+            new HolidayService(), memoryService, qqMailService, newsSearchService, webSearchService);
+    private final DailyDashboardServer dailyDashboardServer;
     private volatile ILinkClient activeClient;
 
     /** 创建分发器时就准备提醒扫描；真正发消息前必须等待登录客户端就绪。 */
     public MessageDispatcher() {
+        DailyDashboardService dashboardService = new DailyDashboardService(
+                todoService, calendarService, planSessions, weatherService, sessions, memoryService);
+        dailyDashboardServer = new DailyDashboardServer(dashboardService, expressPageService);
+        dailyDashboardServer.start();
         reminderScheduler.scheduleAtFixedRate(this::sendDueReminders, 1, 1, TimeUnit.SECONDS);
     }
 
@@ -228,6 +255,7 @@ public final class MessageDispatcher implements AutoCloseable {
     public void handleMessage(ILinkClient client, WeixinMessage message) {
         activeClient = client;
         String userId = message.getFrom_user_id();
+        dailyDashboardServer.useUser(userId);
         knownUsers.add(userId);
         if (Config.LOGIN_BRIEFING_ENABLED) {
             reminderScheduler.execute(() -> sendLoginBriefingForUser(client, userId));
@@ -285,6 +313,7 @@ public final class MessageDispatcher implements AutoCloseable {
                 String caption = textMessage == null ? "" : textMessage.getText_item().getText();
                 if (caption != null && !caption.isBlank()) {
                     System.out.println("[" + userId + "] [图片] " + caption);
+                    chatHistory.addUserMessage(userId, caption);
                     requestHandler.handle(client, userId, caption);
                 } else {
                     replySender.sendReply(client, userId,
@@ -296,6 +325,7 @@ public final class MessageDispatcher implements AutoCloseable {
             if (textMessage != null) {
                 String text = textMessage.getText_item().getText();
                 System.out.println("[" + userId + "] " + text);
+                chatHistory.addUserMessage(userId, text);
                 if (calculatorTextRouter.isCalculatorCommand(text)) {
                     replySender.sendReply(client, userId, calculatorTextRouter.handle(userId, text));
                     return;
@@ -330,6 +360,7 @@ public final class MessageDispatcher implements AutoCloseable {
 
                 chatHistory.addMedia(userId, "语音", saved.toString(), text);
                 System.out.println("[" + userId + "] [语音] " + text);
+                chatHistory.addUserMessage(userId, text);
                 requestHandler.handle(client, userId, text);
                 return;
             }
@@ -391,6 +422,7 @@ public final class MessageDispatcher implements AutoCloseable {
     public void close() {
         progressScheduler.shutdownNow();
         reminderScheduler.shutdownNow();
+        dailyDashboardServer.close();
     }
 
     /** 扫描并发送到期提醒，单条发送失败不会影响后续用户的提醒。 */
@@ -437,7 +469,11 @@ public final class MessageDispatcher implements AutoCloseable {
                 userId, LocalDateTime.now());
         try {
             String draft = loginBriefingService.build(userId, deliveries);
-            client.sendText(userId, chatService.polishBriefing(userId, draft));
+            String dashboardUrl = dailyDashboardServer.urlFor(userId);
+            String message = chatService.polishBriefing(userId, draft);
+            String textFallback = dashboardUrl.isBlank() ? message
+                    : message + "\n\n你的七日计划页：\n" + dashboardUrl;
+            visualDeckSender.sendText(client, userId, textFallback);
             for (ReminderDelivery delivery : deliveries) {
                 calendarService.markReminderSent(delivery, LocalDateTime.now());
             }

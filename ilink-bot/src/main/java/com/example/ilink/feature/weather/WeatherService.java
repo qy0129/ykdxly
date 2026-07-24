@@ -110,6 +110,44 @@ public final class WeatherService {
         return value == null || value.isJsonNull() ? fallback : value.getAsInt();
     }
 
+    private int optInt(JsonObject object, String name, int index, int fallback) {
+        JsonElement value = object == null ? null : object.get(name);
+        if (value == null || value.isJsonNull() || !value.isJsonArray()
+                || index < 0 || index >= value.getAsJsonArray().size()) return fallback;
+        return value.getAsJsonArray().get(index).getAsInt();
+    }
+
+    private double optDouble(JsonObject object, String name, double fallback) {
+        JsonElement value = object == null ? null : object.get(name);
+        return value == null || value.isJsonNull() ? fallback : value.getAsDouble();
+    }
+
+    private double optDouble(JsonObject object, String name, int index, double fallback) {
+        JsonElement value = object == null ? null : object.get(name);
+        if (value == null || value.isJsonNull() || !value.isJsonArray()
+                || index < 0 || index >= value.getAsJsonArray().size()) return fallback;
+        return value.getAsJsonArray().get(index).getAsDouble();
+    }
+
+    private String conditionGroup(int code) {
+        if (code <= 1) return "clear";
+        if (code <= 3) return "cloudy";
+        if (code == 45 || code == 48) return "fog";
+        if (code >= 51 && code <= 67 || code >= 80 && code <= 82) return "rain";
+        if (code >= 71 && code <= 77 || code == 85 || code == 86) return "snow";
+        if (code >= 95) return "storm";
+        return "unknown";
+    }
+
+    private double normalizeDegrees(double value) {
+        double normalized = value % 360;
+        return normalized < 0 ? normalized + 360 : normalized;
+    }
+
+    private double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
+    }
+
     /**
      * 查询指定地点的天气。
      *
@@ -132,14 +170,7 @@ public final class WeatherService {
         int dayOffset = Math.toIntExact(ChronoUnit.DAYS.between(LocalDate.now(), targetDate));
         if (dayOffset < 0 || dayOffset > 6) throw new IllegalArgumentException("仅支持查询未来七天内的天气");
 
-        URI uri = URI.create(FORECAST_API_URL
-                + "?latitude=" + location.latitude()
-                + "&longitude=" + location.longitude()
-                + "&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m"
-                + "&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m"
-                + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
-                + "&forecast_days=7&timezone=auto");
-        JsonObject response = getJson(uri);
+        JsonObject response = getJson(forecastUri(location));
         if (!"day".equals(period)) {
             return appendMetadata(buildPeriodWeather(location, response, dayOffset, targetDate, period), response);
         }
@@ -166,6 +197,51 @@ public final class WeatherService {
                     .append(formatNumber(current.get("wind_speed_10m").getAsDouble())).append(" km/h");
         }
         return appendMetadata(reply.toString(), response);
+    }
+
+    /** 获取日报文字和天气背景使用的结构化状态，两个结果来自同一次接口请求。 */
+    public WeatherSnapshot queryWeatherSnapshot(WeatherLocation location)
+            throws IOException, InterruptedException {
+        JsonObject response = getJson(forecastUri(location));
+        JsonObject daily = response.getAsJsonObject("daily");
+        JsonObject current = response.getAsJsonObject("current");
+        int weatherCode = optInt(current, "weather_code", 0);
+        double maxTemperature = optDouble(daily, "temperature_2m_max", 0, 0);
+        double minTemperature = optDouble(daily, "temperature_2m_min", 0, 0);
+        int rainProbability = optInt(daily, "precipitation_probability_max", 0, 0);
+        String text = new StringBuilder(location.displayName()).append("今天天气：")
+                .append(weatherDescription(weatherCode))
+                .append("\n温度：").append(formatNumber(minTemperature)).append("℃ 至 ")
+                .append(formatNumber(maxTemperature)).append("℃")
+                .append("\n降水概率：").append(rainProbability).append('%')
+                .append("\n当前温度：").append(formatNumber(optDouble(current, "temperature_2m", 0)))
+                .append("℃，体感 ").append(formatNumber(optDouble(current, "apparent_temperature", 0))).append("℃")
+                .append("\n湿度：").append(optInt(current, "relative_humidity_2m", 0)).append('%')
+                .append("，风速：").append(formatNumber(optDouble(current, "wind_speed_10m", 0))).append(" km/h")
+                .toString();
+        return new WeatherSnapshot(appendMetadata(text, response), new WeatherVisualState(
+                weatherCode,
+                conditionGroup(weatherCode),
+                weatherDescription(weatherCode),
+                optInt(current, "is_day", 1) == 1,
+                clamp(optDouble(current, "cloud_cover", 0) / 100.0, 0, 1),
+                Math.max(0, optDouble(current, "precipitation", 0)),
+                rainProbability,
+                Math.max(0, optDouble(current, "wind_speed_10m", 0)),
+                normalizeDegrees(optDouble(current, "wind_direction_10m", 0)),
+                optDouble(current, "temperature_2m", 0),
+                optDouble(current, "apparent_temperature", 0),
+                optionalString(response, "timezone")));
+    }
+
+    private URI forecastUri(WeatherLocation location) {
+        return URI.create(FORECAST_API_URL
+                + "?latitude=" + location.latitude()
+                + "&longitude=" + location.longitude()
+                + "&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m,wind_direction_10m,cloud_cover,precipitation,is_day"
+                + "&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m"
+                + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+                + "&forecast_days=7&timezone=auto");
     }
 
     /** 把小时预报汇总为一个易读的时段天气结果。 */

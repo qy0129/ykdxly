@@ -35,14 +35,19 @@ public final class ChatHistoryStore {
 
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
-    private final MySqlStore database = MySqlStore.getInstance();
+    private final MySqlStore database;
     private final Map<String, List<JsonObject>> chatHistory = new ConcurrentHashMap<>();
     private final Map<String, String> conversationSummary = new ConcurrentHashMap<>();
     private final Set<String> loadedUsers = ConcurrentHashMap.newKeySet();
 
     /** 创建历史存储器，并注入用于摘要压缩的 HTTP 客户端。 */
     public ChatHistoryStore(HttpClient httpClient) {
+        this(httpClient, MySqlStore.getInstance());
+    }
+
+    ChatHistoryStore(HttpClient httpClient, MySqlStore database) {
         this.httpClient = httpClient;
+        this.database = database;
     }
     /** 把图片、音频或文档等媒体事件加入对话历史。 */
     public void addMedia(String userId, String type, String path, String summary) {
@@ -51,27 +56,46 @@ public final class ChatHistoryStore {
 
     /** 追加一轮用户消息和机器人回复，自动记录时间戳。 */
     public void add(String userId, String userContent, String assistantContent) {
+        addUserMessage(userId, userContent);
+        addAssistantMessage(userId, assistantContent);
+    }
+
+    public void addUserMessage(String userId, String content) {
+        appendMessage(userId, "user", content);
+    }
+
+    public void addAssistantMessage(String userId, String content) {
+        appendMessage(userId, "assistant", content);
+    }
+
+    private void appendMessage(String userId, String role, String content) {
+        if (userId == null || userId.isBlank() || content == null || content.isBlank()) return;
         ensureLoaded(userId);
-        List<JsonObject> history = chatHistory.computeIfAbsent(userId, k -> Collections.synchronizedList(new LinkedList<>()));
-        String now = LocalDateTime.now().format(TIMESTAMP_FORMAT);
-        JsonObject userMsg = new JsonObject();
-        userMsg.addProperty("role", "user");
-        userMsg.addProperty("content", userContent);
-        userMsg.addProperty("created_at", now);
-        history.add(userMsg);
-        JsonObject assistantMsg = new JsonObject();
-        assistantMsg.addProperty("role", "assistant");
-        assistantMsg.addProperty("content", assistantContent);
-        assistantMsg.addProperty("created_at", now);
-        history.add(assistantMsg);
-        database.saveConversation(userId, userContent, assistantContent);
-        if (history.size() >= MAX_HISTORY) {
-            compress(userId);
+        List<JsonObject> history = chatHistory.computeIfAbsent(
+                userId, ignored -> Collections.synchronizedList(new LinkedList<>()));
+        synchronized (history) {
+            if (!history.isEmpty()) {
+                JsonObject last = history.getLast();
+                if (role.equals(last.get("role").getAsString())
+                        && content.equals(last.get("content").getAsString())) return;
+            }
+            JsonObject message = new JsonObject();
+            message.addProperty("role", role);
+            message.addProperty("content", content);
+            message.addProperty("created_at", LocalDateTime.now().format(TIMESTAMP_FORMAT));
+            history.add(message);
         }
+        if (database != null) database.saveMessage(userId, role, content);
+        if (history.size() >= MAX_HISTORY) compress(userId);
     }
 
     /** 将当前用户的摘要和最近消息复制到模型请求数组。 */
     public void addHistoryMessages(JsonArray target, String userId) {
+        addHistoryMessages(target, userId, null);
+    }
+
+    /** 复制历史时可排除已经提前记录的当前用户消息，避免模型收到两份相同输入。 */
+    public void addHistoryMessages(JsonArray target, String userId, String currentUserMessage) {
         ensureLoaded(userId);
         String summary = conversationSummary.get(userId);
         if (summary != null && !summary.isEmpty()) {
@@ -83,8 +107,13 @@ public final class ChatHistoryStore {
         List<JsonObject> history = chatHistory.get(userId);
         if (history != null) {
             synchronized (history) {
-                for (JsonObject msg : history) {
-                    target.add(msg);
+                for (int index = 0; index < history.size(); index++) {
+                    JsonObject msg = history.get(index);
+                    boolean currentInput = index == history.size() - 1
+                            && currentUserMessage != null
+                            && "user".equals(msg.get("role").getAsString())
+                            && currentUserMessage.equals(msg.get("content").getAsString());
+                    if (!currentInput) target.add(msg);
                 }
             }
         }
@@ -113,6 +142,22 @@ public final class ChatHistoryStore {
         return null;
     }
 
+    /** 返回最近一条机器人文字回复，供“重新发一遍”在进程重启后回退使用。 */
+    public String lastAssistantMessage(String userId) {
+        ensureLoaded(userId);
+        List<JsonObject> history = chatHistory.get(userId);
+        if (history == null) return "";
+        synchronized (history) {
+            for (int index = history.size() - 1; index >= 0; index--) {
+                JsonObject message = history.get(index);
+                if (!"assistant".equals(message.get("role").getAsString())) continue;
+                JsonElement content = message.get("content");
+                return content == null ? "" : content.getAsString();
+            }
+        }
+        return "";
+    }
+
     /** 压缩过长的历史，保留最近消息并更新摘要。 */
     private void compress(String userId) {
         List<JsonObject> history = chatHistory.get(userId);
@@ -133,13 +178,13 @@ public final class ChatHistoryStore {
             if (summary == null || summary.isBlank()) return;
             String mergedSummary = conversationSummary.merge(
                     userId, summary, (old, val) -> old + "\n" + val);
-            database.saveSummaryAndDeleteOldest(userId, mergedSummary, COMPRESS_BATCH);
+            if (database != null) database.saveSummaryAndDeleteOldest(userId, mergedSummary, COMPRESS_BATCH);
         } catch (Exception ignored) {}
     }
 
     /** 用户首次访问时从 MySQL 恢复摘要和最近消息。 */
     private void ensureLoaded(String userId) {
-        if (!database.isAvailable() || !loadedUsers.add(userId)) return;
+        if (database == null || !database.isAvailable() || !loadedUsers.add(userId)) return;
 
         String summary = database.loadConversationSummary(userId);
         if (summary != null && !summary.isBlank()) {

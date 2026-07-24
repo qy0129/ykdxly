@@ -1,6 +1,9 @@
 package com.example.ilink.routing;
 
 import com.example.ilink.config.Config;
+import com.example.ilink.conversation.ChatHistoryStore;
+import com.example.ilink.conversation.UserSessionStore;
+import com.example.ilink.feature.memory.MemoryService;
 import com.example.ilink.feature.persona.Personas;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -28,14 +31,25 @@ public final class IntentRecognizer {
             "document_summary", "document_question", "generate_file", "document_edit", "weather",
             "task_plan", "plan_adjust", "plan_progress", "calculator", "expense_split",
             "deadline_countdown", "travel_plan", "diet_plan", "nearby_food", "calendar_event",
-            "planning_capabilities", "bilibili_search", "media_lookup", "email_query");
+            "planning_capabilities", "bilibili_search", "media_lookup", "email_query", "food_order");
 
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
+    private final ChatHistoryStore history;
+    private final MemoryService memoryService;
+    private final UserSessionStore sessions;
 
     /** 创建意图识别器并注入 HTTP 客户端。 */
     public IntentRecognizer(HttpClient httpClient) {
+        this(httpClient, null, null, null);
+    }
+
+    public IntentRecognizer(HttpClient httpClient, ChatHistoryStore history,
+                            MemoryService memoryService, UserSessionStore sessions) {
         this.httpClient = httpClient;
+        this.history = history;
+        this.memoryService = memoryService;
+        this.sessions = sessions;
     }
 
     /** 调用路由模型，把一段自然语言转换为一个或多个有序动作。 */
@@ -52,6 +66,7 @@ public final class IntentRecognizer {
             system.addProperty("role", "system");
             system.addProperty("content", buildSystemPrompt(userId, context));
             messages.add(system);
+            if (history != null) history.addHistoryMessages(messages, userId, userMessage);
             JsonObject user = new JsonObject();
             user.addProperty("role", "user");
             user.addProperty("content", userMessage);
@@ -166,6 +181,11 @@ public final class IntentRecognizer {
             action.addProperty("bilibili_query", inferBilibiliQuery(requestText,
                     string(action, "bilibili_category")));
             intent = "bilibili_search";
+        } else if ("chat".equals(intent) && isNearbyDiningRequest(requestText)) {
+            action.addProperty("intent", "nearby_food");
+            action.addProperty("nearby_action", "search");
+            action.addProperty("meal_keyword", inferNearbyFoodKeyword(requestText));
+            intent = "nearby_food";
         }
 
         if ("generate_file".equals(intent) && !fileRequest) {
@@ -253,6 +273,28 @@ public final class IntentRecognizer {
                 action.addProperty("email_keyword", inferEmailKeyword(requestText));
             }
         }
+
+        String resolvedIntent = string(action, "intent");
+        if ("food_order".equals(resolvedIntent) && isNearbyDiningRequest(requestText)) {
+            action.addProperty("intent", "nearby_food");
+            action.addProperty("nearby_action", "search");
+            String restaurant = string(action, "food_order_restaurants");
+            action.addProperty("meal_keyword", restaurant.isBlank()
+                    ? inferNearbyFoodKeyword(requestText) : restaurant);
+            resolvedIntent = "nearby_food";
+        }
+        if ("nearby_food".equals(resolvedIntent)) {
+            String keyword = string(action, "meal_keyword");
+            if (isGenericNearbyFoodQuery(requestText) || isGenericNearbyFoodKeyword(keyword)) {
+                keyword = "";
+            } else if (keyword.isBlank()) {
+                keyword = inferNearbyFoodKeyword(requestText);
+            }
+            action.addProperty("meal_keyword", keyword);
+            if (requestText.matches(".*(想吃|想喝|找|有没有|附近有|有什么好吃|吃什么|推荐).*")) {
+                action.addProperty("nearby_action", "search");
+            }
+        }
     }
 
     /** 学习计划固定追加课程资源动作，避免路由模型漏掉用户没有明说的学习入口。 */
@@ -325,6 +367,40 @@ public final class IntentRecognizer {
                 .replaceAll("(我的)?(QQ)?邮箱", "")
                 .replaceAll("(最近|今天|近期)?(的)?(未读|重要|新)?邮件", "")
                 .replaceAll("[，,。？?]", " ").replaceAll("\\s+", " ").trim();
+    }
+
+    static boolean isNearbyDiningRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        boolean hasLocation = text.matches(".*(我现在在|我在|当前位置|这附近|附近).*" );
+        boolean explicitOrder = text.matches(".*(点外卖|外卖下单|下单|点餐|美团|饿了么|外卖链接).*" );
+        return hasLocation && !explicitOrder
+                && text.matches(".*(想吃|想喝|找|有没有|哪里有|附近有|有什么好吃|有啥好吃|吃什么|推荐.*(?:餐厅|美食|吃的)).*" );
+    }
+
+    static String inferNearbyFoodKeyword(String text) {
+        if (text == null || text.isBlank()) return "";
+        if (isGenericNearbyFoodQuery(text)) return "";
+        if (!text.matches(".*(想吃|想喝|找|有没有|附近有).*")) return "";
+        String value = text.replaceFirst("^.*?(想吃|想喝|找|有没有|附近有)", "")
+                .replaceFirst("^(附近的?|周边的?)", "")
+                .replaceAll("(了|呢|吗|呀|啊|附近的?|附近有吗)$", "")
+                .replaceAll("[，,。？?！!]", " ")
+                .replaceAll("\\s+", " ").trim();
+        return value.length() > 30 ? value.substring(0, 30).trim() : value;
+    }
+
+    static boolean isGenericNearbyFoodQuery(String text) {
+        if (text == null || text.isBlank()) return false;
+        String normalized = text.replaceAll("[，,。？?！!\\s]", "");
+        return normalized.matches(".*(?:附近|周边).*(?:有什么好吃的?|有啥好吃的?|吃什么|"
+                + "推荐(?:点|些)?(?:好吃的|餐厅|美食|吃的)).*");
+    }
+
+    static boolean isGenericNearbyFoodKeyword(String keyword) {
+        if (keyword == null || keyword.isBlank()) return false;
+        String normalized = keyword.replaceAll("[，,。？?！!\\s]", "");
+        return normalized.matches("(?:什么好吃的?|有啥好吃的?|好吃的?|吃什么|"
+                + "附近美食|附近餐厅|美食|餐厅|饭店|推荐)");
     }
 
     static String inferBilibiliCategory(String text) {
@@ -426,7 +502,8 @@ public final class IntentRecognizer {
                 string(result, "media_query"),
                 defaultString(result, "media_category", "music"),
                 defaultString(result, "email_action", "unread"),
-                string(result, "email_keyword"));
+                string(result, "email_keyword"),
+                string(result, "food_order_restaurants"));
     }
 
     /** 构造路由模型的系统提示词和当前会话状态说明。 */
@@ -438,6 +515,16 @@ public final class IntentRecognizer {
                 .append(", pending_draw_size=").append(context.pendingDraw())
                 .append(", has_document=").append(context.hasDocument())
                 .append(", pending_calendar=").append(context.pendingCalendar()).append("。\n");
+        if (sessions != null) {
+            String currentLocation = sessions.getCurrentLocation(userId);
+            if (currentLocation != null && !currentLocation.isBlank()) {
+                prompt.append("用户最近确认的当前位置：").append(currentLocation).append("。\n");
+            }
+        }
+        if (memoryService != null) {
+            String memory = memoryService.prompt(userId);
+            if (!memory.isBlank()) prompt.append(memory).append('\n');
+        }
         prompt.append("可选人设名称：").append(String.join("、", Personas.getAll().keySet())).append("。\n\n");
 
         prompt.append("多动作拆分规则：\n");
@@ -505,7 +592,11 @@ public final class IntentRecognizer {
         prompt.append("18. diet_plan：用户要求饮食规划、外卖推荐、减脂餐、增肌餐或控糖餐时使用。"
                 + "diet_goal 填减脂、增肌、控糖、维持体重或空字符串；不要把附近餐厅搜索判为diet_plan。\n");
         prompt.append("19. nearby_food：用户说自己在某位置、询问附近有什么好吃的、附近餐厅或附近外卖时使用。"
-                + "nearby_location 填用户明确说出的地点，未重复时可留空；nearby_action 只能是remember或search。\n");
+                + "nearby_location 填用户明确说出的地点，未重复时可留空；nearby_action 只能是remember或search；"
+                + "用户指定麦当劳、肯德基、咖啡、面馆等品牌或餐品时，必须原样写入meal_keyword；"
+                + "‘附近有什么好吃的’‘附近吃什么’等泛化查询的meal_keyword必须为空字符串，"
+                + "禁止填写‘什么好吃的’‘吃什么’。"
+                + "例如‘我现在在阿里园区，我想吃麦当劳’必须是nearby_food，meal_keyword=麦当劳，不是food_order。\n");
         prompt.append("20. calendar_event：用户创建、查询、完成、取消或延后提醒/日程时使用。"
                 + "calendar_action 为create|list|complete|cancel|snooze；创建时填写calendar_title、calendar_time、"
                 + "calendar_recurrence(none|daily|weekly|monthly|yearly)。"
@@ -527,7 +618,12 @@ public final class IntentRecognizer {
         prompt.append("24. email_query：用户查询QQ邮箱未读、重要邮件或按关键词搜索邮件时使用。"
                 + "email_action只能是unread、important或search；email_keyword只在搜索指定发件人、主题或内容时填写。"
                 + "例如‘我有什么未读邮件’使用unread；‘有没有重要邮件’使用important；"
-                + "‘查腾讯发来的邮件’使用search并填写腾讯。\n\n");
+                + "‘查腾讯发来的邮件’使用search并填写腾讯。\n");
+        prompt.append("25. food_order：用户明确指定餐厅，并要求点外卖、点餐或获取外卖平台入口时使用。"
+                + "food_order_restaurants填写餐厅名称，多个名称用逗号分隔。"
+                + "用户同时提供当前位置或收货地点时，将地点写入nearby_location。"
+                + "只表达‘我在某地，想吃某品牌/餐品’但没有要求下单时使用nearby_food；"
+                + "只问附近有什么餐厅时仍使用nearby_food；要求营养或减脂外卖建议时仍使用diet_plan。\n\n");
 
         prompt.append("Document rules: when has_document=true, use document_summary for summarizing, document_question for questions, document_edit when the user asks to modify, rewrite, delete, add, or correct the current document, and generate_file when the user asks for a PDF or DOCX output. document_action must be none, summary, question, or edit. output_file_type must be none, docx, or pdf.\n");
         prompt.append("输出规则：\n");
@@ -541,7 +637,7 @@ public final class IntentRecognizer {
                 + "没有明确生成图片要求时intent绝不能为draw。");
         prompt.append("\n输出必须是以下结构，且每个动作包含全部字段："
                 + "{\"actions\":[{\"action_text\":\"当前动作对应的用户原始要求\","
-                + "\"intent\":\"chat|draw|persona_switch|audio_transcribe|image_action|draw_size|document_summary|document_question|generate_file|document_edit|weather|task_plan|plan_adjust|plan_progress|calculator|expense_split|deadline_countdown|travel_plan|diet_plan|nearby_food|calendar_event|planning_capabilities|bilibili_search|media_lookup|email_query\","
+                + "\"intent\":\"chat|draw|persona_switch|audio_transcribe|image_action|draw_size|document_summary|document_question|generate_file|document_edit|weather|task_plan|plan_adjust|plan_progress|calculator|expense_split|deadline_countdown|travel_plan|diet_plan|nearby_food|calendar_event|planning_capabilities|bilibili_search|media_lookup|email_query|food_order\","
                 + "\"en_prompt\":\"\",\"cn_description\":\"\","
                 + "\"image_size\":\"none|1024x1024|768x1024|1024x576\","
                 + "\"reply_mode\":\"keep|text|voice|both\","
@@ -566,7 +662,8 @@ public final class IntentRecognizer {
                 + "\"calendar_lead_time_seconds\":0,\"bilibili_query\":\"\","
                 + "\"bilibili_category\":\"study|music|series|video\","
                 + "\"media_query\":\"\",\"media_category\":\"anime|music|lyrics\","
-                + "\"email_action\":\"unread|important|search\",\"email_keyword\":\"\"}]}。");
+                + "\"email_action\":\"unread|important|search\",\"email_keyword\":\"\","
+                + "\"food_order_restaurants\":\"\"}]}。");
         return prompt.toString();
     }
 

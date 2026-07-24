@@ -245,6 +245,60 @@ public final class MySqlStore {
         return events;
     }
 
+    /** 单独保存一条消息，供统一的入站和出站记录链路使用。 */
+    public void saveMessage(String userId, String role, String content) {
+        if (!isAvailable() || userId == null || userId.isBlank()
+                || content == null || content.isBlank()) return;
+        String sql = "INSERT INTO chat_messages (bot_id, user_id, role, content) VALUES (?, ?, ?, ?)";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, userId);
+            statement.setString(3, role);
+            statement.setString(4, content);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("保存聊天消息", e);
+        }
+    }
+
+    /** 保存可跨重启恢复的轻量用户状态。 */
+    public void saveUserState(String userId, String key, String value) {
+        if (!isAvailable() || userId == null || userId.isBlank()
+                || key == null || key.isBlank() || value == null || value.isBlank()) return;
+        String sql = "INSERT INTO user_states (bot_id, user_id, state_key, state_value) VALUES (?, ?, ?, ?) "
+                + "ON DUPLICATE KEY UPDATE state_value=?, updated_at=CURRENT_TIMESTAMP";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, userId);
+            statement.setString(3, key);
+            statement.setString(4, value);
+            statement.setString(5, value);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("保存用户状态", e);
+        }
+    }
+
+    /** 读取最近保存的轻量用户状态。 */
+    public String loadUserState(String userId, String key) {
+        if (!isAvailable()) return "";
+        String sql = "SELECT state_value FROM user_states WHERE bot_id=? AND user_id=? AND state_key=?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, userId);
+            statement.setString(3, key);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? result.getString("state_value") : "";
+            }
+        } catch (SQLException e) {
+            logFailure("读取用户状态", e);
+            return "";
+        }
+    }
+
     /** 在同一事务中保存计划及其全部任务。 */
     public void saveTaskPlan(String userId, TaskPlan plan) {
         if (!isAvailable()) return;
@@ -604,6 +658,14 @@ public final class MySqlStore {
                     + "persona VARCHAR(100),"
                     + "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
                     + "PRIMARY KEY (bot_id, user_id)"
+                    + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS user_states ("
+                    + "bot_id VARCHAR(128) NOT NULL,"
+                    + "user_id VARCHAR(255) NOT NULL,"
+                    + "state_key VARCHAR(100) NOT NULL,"
+                    + "state_value TEXT NOT NULL,"
+                    + "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+                    + "PRIMARY KEY (bot_id, user_id, state_key)"
                     + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS calendar_events ("
                     + "id VARCHAR(64) PRIMARY KEY,"

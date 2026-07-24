@@ -46,4 +46,37 @@ class ExpressServiceTest {
         assertFalse(result.success());
         assertTrue(result.message().contains("没有查到"));
     }
+
+    @Test
+    void parsesPhoneOrdersAndRemovesDuplicateTrackingNumbers() {
+        String response = """
+                {"data":[
+                  {"num":"SF1234567890","com":"shunfeng","state":"0","comName":"顺丰速运"},
+                  {"trackingNo":"sf1234567890","courierCode":"shunfeng"},
+                  {"expressNo":"JT1234567890","comCode":"jtexpress","companyName":"极兔速递"}
+                ]}
+                """;
+
+        var orders = ExpressService.parsePhoneOrders(response);
+
+        assertEquals(2, orders.size());
+        assertEquals("SF1234567890", orders.getFirst().trackingNo());
+        assertEquals("jtexpress", orders.get(1).courierCode());
+    }
+
+    @Test
+    void parsesRealAreaAndEstimatedDeliveryFromResponse() {
+        String response = """
+                {"status":"200","state":"0","predictTime":"2026-07-25 18:00:00","data":[
+                  {"ftime":"2026-07-24 12:00:00","context":"已到达转运中心", "areaName":"南京市", "areaCode":"320100"}
+                ]}
+                """;
+
+        ExpressService.ExpressResult result = ExpressService.parseResponse(
+                response, "SF1234567890", "shunfeng");
+
+        assertEquals("南京市", result.items().getFirst().areaName());
+        assertEquals("320100", result.items().getFirst().areaCode());
+        assertEquals("2026-07-25 18:00:00", result.estimatedDeliveryAt());
+    }
 }

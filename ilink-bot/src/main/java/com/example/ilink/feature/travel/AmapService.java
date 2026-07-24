@@ -205,6 +205,11 @@ public final class AmapService {
         return staticMap(markers.toString());
     }
 
+    /** 为单个地点候选生成独立地图，并保留它在候选列表中的序号。 */
+    public byte[] candidateStaticMap(Place candidate, int number) throws Exception {
+        return staticMap("mid,," + Math.max(1, number) + ':' + candidate.location());
+    }
+
     /** 动态导航由高德官方页面承接，用户可以继续缩放、换路线或唤起 App。 */
     public String navigationUrl(Place from, Place to) {
         return navigationUrl(List.of(from, to));

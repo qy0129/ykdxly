@@ -8,6 +8,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 用户临时会话状态存储。
@@ -16,6 +18,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * 人设会跨重启保存，其他短期状态仍只保存在内存。</p>
  */
 public final class UserSessionStore {
+
+    private static final String CURRENT_LOCATION_KEY = "current_location";
+    private static final String CURRENT_CITY_KEY = "current_city";
+    private static final Pattern CITY_PATTERN = Pattern.compile("(?:^|省)([^省市区县]{2,10})市");
 
     private final MySqlStore database = MySqlStore.getInstance();
     private final Map<String, String> personas = new ConcurrentHashMap<>();
@@ -26,6 +32,8 @@ public final class UserSessionStore {
     private final Map<String, List<WeatherLocation>> pendingWeatherLocations = new ConcurrentHashMap<>();
     private final Map<String, String> pendingWeatherDays = new ConcurrentHashMap<>();
     private final Map<String, String> currentLocations = new ConcurrentHashMap<>();
+    private final Map<String, String> currentCities = new ConcurrentHashMap<>();
+    private final Set<String> loadedLocationUsers = ConcurrentHashMap.newKeySet();
 
     /** 设置用户当前人设名称。 */
     public void setPersona(String userId, String persona) {
@@ -130,10 +138,40 @@ public final class UserSessionStore {
 
     /** 记录用户主动提供的当前位置，供“附近有什么好吃的”等连续问法使用。 */
     public void setCurrentLocation(String userId, String location) {
-        currentLocations.put(userId, location);
+        if (userId == null || userId.isBlank() || location == null || location.isBlank()) return;
+        loadedLocationUsers.add(userId);
+        String value = location.trim();
+        currentLocations.put(userId, value);
+        database.saveUserState(userId, CURRENT_LOCATION_KEY, value);
+        String city = extractCity(value);
+        if (!city.isBlank()) {
+            currentCities.put(userId, city);
+            database.saveUserState(userId, CURRENT_CITY_KEY, city);
+        }
     }
 
     public String getCurrentLocation(String userId) {
+        ensureLocationLoaded(userId);
         return currentLocations.get(userId);
+    }
+
+    public String getCurrentCity(String userId) {
+        ensureLocationLoaded(userId);
+        return currentCities.get(userId);
+    }
+
+    private void ensureLocationLoaded(String userId) {
+        if (userId == null || userId.isBlank() || !loadedLocationUsers.add(userId)) return;
+        String location = database.loadUserState(userId, CURRENT_LOCATION_KEY);
+        if (!location.isBlank()) currentLocations.put(userId, location);
+        String city = database.loadUserState(userId, CURRENT_CITY_KEY);
+        if (city.isBlank()) city = extractCity(location);
+        if (!city.isBlank()) currentCities.put(userId, city);
+    }
+
+    static String extractCity(String location) {
+        if (location == null || location.isBlank()) return "";
+        Matcher matcher = CITY_PATTERN.matcher(location.trim());
+        return matcher.find() ? matcher.group(1).trim() : "";
     }
 }
