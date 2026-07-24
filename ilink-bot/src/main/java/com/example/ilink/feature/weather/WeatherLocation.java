@@ -12,7 +12,13 @@ public record WeatherLocation(
         String admin2,
         String country,
         double latitude,
-        double longitude) {
+        double longitude,
+        int featurePriority,
+        int population) {
+
+    public boolean isClearlyPrimary() {
+        return featurePriority >= 70 && population > 100_000;
+    }
 
     /** 用于让用户从同名地点中选择的完整地点名称。 */
     public String displayName() {

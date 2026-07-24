@@ -42,4 +42,10 @@ public record CalendarEvent(
         return new CalendarEvent(id, userId, title, type, startAt, nextReminderAt, recurrence,
                 reminderMinutes, value, notes, createdAt);
     }
+
+    /** 周期提醒发送后，同时推进事件时间和提醒时间。 */
+    public CalendarEvent withSchedule(LocalDateTime newStartAt, LocalDateTime newReminderAt) {
+        return new CalendarEvent(id, userId, title, type, newStartAt, newReminderAt, recurrence,
+                reminderMinutes, status, notes, createdAt);
+    }
 }

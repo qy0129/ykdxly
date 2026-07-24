@@ -62,7 +62,7 @@ public final class TravelWorkflow {
         try {
             PendingTravel travel = new PendingTravel(locationNames, List.of(), 0,
                     route.travelDepartureTime(), Math.max(0, route.timeBudgetMinutes()),
-                    route.mealKeyword().trim(), List.of());
+                    route.mealKeyword().trim(), route.originCity(), route.destinationCity(), List.of());
             askForCurrentLocation(client, userId, travel);
         } catch (Exception error) {
             pendingTravels.remove(userId);
@@ -97,7 +97,7 @@ public final class TravelWorkflow {
     /** 搜索当前待确认地点；唯一结果自动确认，多条结果必须让用户选择。 */
     private void askForCurrentLocation(ILinkClient client, String userId, PendingTravel travel) throws Exception {
         String locationName = travel.currentLocationName();
-        List<AmapService.Place> candidates = locationCandidates(locationName);
+        List<AmapService.Place> candidates = locationCandidates(locationName, travel.cityForCurrentLocation());
         if (candidates.isEmpty()) {
             pendingTravels.remove(userId);
             replySender.sendReply(client, userId,
@@ -139,10 +139,14 @@ public final class TravelWorkflow {
     }
 
     /** 优先使用 POI 文本搜索；无 POI 时才使用地址地理编码兜底。 */
-    private List<AmapService.Place> locationCandidates(String locationName) throws Exception {
-        List<AmapService.Place> candidates = new ArrayList<>(amapService.searchPlaceCandidates(locationName));
+    private List<AmapService.Place> locationCandidates(String locationName, String city) throws Exception {
+        List<AmapService.Place> candidates = new ArrayList<>(amapService.searchPlaceCandidates(locationName, city));
+        if (candidates.isEmpty() && city != null && !city.isBlank()) {
+            candidates.addAll(amapService.searchPlaceCandidates(locationName));
+        }
         if (candidates.isEmpty()) {
-            AmapService.Place fallback = amapService.geocode(locationName);
+            AmapService.Place fallback = amapService.geocode(locationName, city);
+            if (fallback == null && city != null && !city.isBlank()) fallback = amapService.geocode(locationName);
             if (fallback != null) candidates.add(fallback);
         }
         return candidates;
@@ -179,14 +183,15 @@ public final class TravelWorkflow {
                 reply.append("\n\n第 ").append(index + 1).append(" 段：")
                         .append(from.name()).append(" → ").append(to.name())
                         .append("\n驾车约 ").append(formatDuration(legRoute.durationSeconds()))
-                        .append("，约 ").append(formatDistance(legRoute.distanceMeters()))
-                        .append("\n导航：").append(amapService.navigationUrl(from, to));
+                        .append("，约 ").append(formatDistance(legRoute.distanceMeters()));
             }
             if (legRoutes.size() > 1) {
                 reply.append("\n\n全程行驶约 ").append(formatDuration(totalDurationSeconds))
                         .append("，约 ").append(formatDistance(totalDistanceMeters))
                         .append("，不包含途经点停留时间。");
             }
+            reply.append("\n\n全程导航（高德地图）：\n")
+                    .append(amapService.navigationUrl(itinerary));
 
             appendMealRecommendations(reply, itinerary, legRoutes, pending.mealKeyword());
             appendTimeBudget(reply, totalDurationSeconds, pending.timeBudgetMinutes(), pending.mealKeyword());
@@ -222,11 +227,12 @@ public final class TravelWorkflow {
                         .append(" → ").append(itinerary.get(legIndex + 1).name())
                         .append("\n   地址：")
                         .append(restaurant.address().isBlank() ? "高德未提供具体门牌" : restaurant.address())
-                        .append("\n   高德：").append(amapService.restaurantUrl(restaurant));
+                        .append("\n   顺路导航：")
+                        .append(amapService.restaurantDetourUrl(itinerary, restaurant, legIndex));
             }
         } catch (Exception mealError) {
             System.err.println("[出行规划] 中途餐饮搜索失败: " + mealError.getMessage());
-            reply.append("\n\n中途餐饮暂时无法查询，各段导航链接仍然可以正常使用。");
+            reply.append("\n\n中途餐饮暂时无法查询，全程导航链接仍然可以正常使用。");
         }
     }
 
@@ -286,6 +292,8 @@ public final class TravelWorkflow {
                                  String departureText,
                                  int timeBudgetMinutes,
                                  String mealKeyword,
+                                 String originCity,
+                                 String destinationCity,
                                  List<AmapService.Place> candidates) {
 
         /** 复制列表，避免确认流程中的状态被外部修改。 */
@@ -300,6 +308,12 @@ public final class TravelWorkflow {
             return locationNames.get(currentLocationIndex);
         }
 
+        private String cityForCurrentLocation() {
+            if (currentLocationIndex == 0) return originCity;
+            if (currentLocationIndex == locationNames.size() - 1) return destinationCity;
+            return "";
+        }
+
         /** 根据地点在行程中的位置生成起点、途经点或终点说明。 */
         private String currentLocationRole() {
             if (currentLocationIndex == 0) return "起点";
@@ -310,7 +324,8 @@ public final class TravelWorkflow {
         /** 保存当前地点候选项，等待用户回复序号。 */
         private PendingTravel withCandidates(List<AmapService.Place> selectedCandidates) {
             return new PendingTravel(locationNames, confirmedLocations, currentLocationIndex,
-                    departureText, timeBudgetMinutes, mealKeyword, selectedCandidates);
+                    departureText, timeBudgetMinutes, mealKeyword,
+                    originCity, destinationCity, selectedCandidates);
         }
 
         /** 保存一个确认地点，并把待确认位置推进到下一个地点。 */
@@ -318,7 +333,8 @@ public final class TravelWorkflow {
             List<AmapService.Place> locations = new ArrayList<>(confirmedLocations);
             locations.add(selected);
             return new PendingTravel(locationNames, locations, currentLocationIndex + 1,
-                    departureText, timeBudgetMinutes, mealKeyword, List.of());
+                    departureText, timeBudgetMinutes, mealKeyword,
+                    originCity, destinationCity, List.of());
         }
 
         /** 判断地点链中的所有地点是否已经确认完成。 */

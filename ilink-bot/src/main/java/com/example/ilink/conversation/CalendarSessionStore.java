@@ -1,5 +1,7 @@
 package com.example.ilink.conversation;
 
+import com.example.ilink.feature.calendar.CalendarDraft;
+
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -25,6 +27,6 @@ public final class CalendarSessionStore {
     }
 
     /** 已识别标题和重复规则、但尚缺时间的事件草稿。 */
-    public record PendingEvent(String title, String type, String recurrence, int reminderMinutes) {
+    public record PendingEvent(CalendarDraft draft) {
     }
 }

@@ -57,6 +57,31 @@ public class Config {
     public static final String DATABASE_BOT_ID = loadProperty("database.bot.id", "ilink-bot-1");
     /** 高德 Web 服务 Key；为空时保留文字出行建议，不生成地图图片。 */
     public static final String AMAP_API_KEY = loadProperty("amap.api.key", "");
+    public static final boolean LOGIN_BRIEFING_ENABLED =
+            Boolean.parseBoolean(loadProperty("briefing.login.enabled", "true"));
+    public static final String BRIEFING_DEFAULT_LOCATION = loadProperty("briefing.default.location", "");
+    public static final String TAVILY_API_KEY = loadProperty("web.search.tavily.api.key", "");
+    public static final int WEB_SEARCH_TIMEOUT_SECONDS =
+            Integer.parseInt(loadProperty("web.search.timeout.seconds", "20"));
+    public static final int WEB_SEARCH_RESULT_LIMIT =
+            Integer.parseInt(loadProperty("web.search.result.limit", "5"));
+    public static final Path SDK_RESUME_CONTEXT_FILE =
+            Path.of(loadProperty("sdk.resume.context.file", "data/sdk-resume-context.json"));
+    public static final String KUAIDI100_CUSTOMER = loadProperty("kuaidi100.customer", "");
+    public static final String KUAIDI100_KEY = loadProperty("kuaidi100.key", "");
+    public static final String BANGUMI_API_BASE = loadProperty("bangumi.api.base", "https://api.bgm.tv");
+    public static final String MUSICBRAINZ_API_BASE = loadProperty(
+            "musicbrainz.api.base", "https://musicbrainz.org/ws/2");
+    public static final String MUSICBRAINZ_USER_AGENT = loadProperty(
+            "musicbrainz.user.agent", "ilink-bot/1.0");
+    public static final String LRCLIB_API_BASE = loadProperty("lrclib.api.base", "https://lrclib.net/api");
+    public static final boolean QQ_MAIL_ENABLED = Boolean.parseBoolean(
+            loadProperty("qq.mail.enabled", "false"));
+    public static final String QQ_MAIL_ADDRESS = loadProperty("qq.mail.address", "");
+    public static final String QQ_MAIL_AUTH_CODE = loadProperty("qq.mail.auth.code", "");
+    public static final String QQ_MAIL_OWNER_USER_ID = loadProperty("qq.mail.owner.user.id", "");
+    public static final String QQ_MAIL_IMAP_HOST = loadProperty("qq.mail.imap.host", "imap.qq.com");
+    public static final int QQ_MAIL_IMAP_PORT = Integer.parseInt(loadProperty("qq.mail.imap.port", "993"));
 
     /** 读取 API Key；不存在或仍为模板值时终止启动。 */
     private static String loadApiKey() {

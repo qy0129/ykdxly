@@ -38,16 +38,27 @@ public final class AmapService {
      * 园区、车站和商场优先按 POI 搜索，避免普通地址地理编码把同名区域解析到错误行政区。
      */
     public Place geocode(String name) throws Exception {
-        List<Place> poiCandidates = searchPlaceCandidates(name);
+        return geocode(name, "");
+    }
+
+    /** 在已知城市范围内解析地点，减少全国同名园区、车站和商场的干扰。 */
+    public Place geocode(String name, String city) throws Exception {
+        List<Place> poiCandidates = searchPlaceCandidates(name, city);
         if (!poiCandidates.isEmpty()) {
             return poiCandidates.get(0);
         }
-        return geocodeAddress(name);
+        return geocodeAddress(name, city);
     }
 
     /** 使用地址地理编码作为 POI 搜索没有结果时的兜底。 */
     private Place geocodeAddress(String name) throws Exception {
-        JsonObject json = getJson("https://restapi.amap.com/v3/geocode/geo", "address=" + encode(name));
+        return geocodeAddress(name, "");
+    }
+
+    private Place geocodeAddress(String name, String city) throws Exception {
+        String query = "address=" + encode(name);
+        if (city != null && !city.isBlank()) query += "&city=" + encode(city);
+        JsonObject json = getJson("https://restapi.amap.com/v3/geocode/geo", query);
         JsonArray geocodes = json.getAsJsonArray("geocodes");
         if (geocodes == null || geocodes.isEmpty()) return null;
         JsonObject result = geocodes.get(0).getAsJsonObject();
@@ -138,8 +149,14 @@ public final class AmapService {
 
     /** 搜索地点候选项；多条结果时由上层向用户确认，不能默认选择第一条。 */
     public List<Place> searchPlaceCandidates(String locationName) throws Exception {
-        JsonObject json = getJson("https://restapi.amap.com/v3/place/text",
-                "keywords=" + encode(locationName) + "&offset=5&page=1&extensions=base");
+        return searchPlaceCandidates(locationName, "");
+    }
+
+    /** 使用城市作为搜索范围；城市为空时保持原有全国搜索行为。 */
+    public List<Place> searchPlaceCandidates(String locationName, String city) throws Exception {
+        String query = "keywords=" + encode(locationName) + "&offset=5&page=1&extensions=base";
+        if (city != null && !city.isBlank()) query += "&city=" + encode(city);
+        JsonObject json = getJson("https://restapi.amap.com/v3/place/text", query);
         JsonArray pois = json.getAsJsonArray("pois");
         if (pois == null) return List.of();
         List<Place> candidates = new ArrayList<>();
@@ -190,9 +207,36 @@ public final class AmapService {
 
     /** 动态导航由高德官方页面承接，用户可以继续缩放、换路线或唤起 App。 */
     public String navigationUrl(Place from, Place to) {
-        return "https://uri.amap.com/navigation?from=" + from.location() + "," + encode(from.name())
-                + "&to=" + to.location() + "," + encode(to.name())
-                + "&mode=car&coordinate=gaode&callnative=1";
+        return navigationUrl(List.of(from, to));
+    }
+
+    /** 生成包含全部途经点的单一高德导航链接。 */
+    public String navigationUrl(List<Place> itinerary) {
+        if (itinerary == null || itinerary.size() < 2) return "";
+        Place from = itinerary.getFirst();
+        Place to = itinerary.getLast();
+        StringBuilder url = new StringBuilder("https://uri.amap.com/navigation?from=")
+                .append(from.location()).append(',').append(encode(from.name()))
+                .append("&to=").append(to.location()).append(',').append(encode(to.name()));
+        if (itinerary.size() > 2) {
+            url.append("&via=");
+            for (int index = 1; index < itinerary.size() - 1; index++) {
+                if (index > 1) url.append("%7C");
+                Place stop = itinerary.get(index);
+                url.append(stop.location()).append(',').append(encode(stop.name()));
+            }
+        }
+        return url.append("&mode=car&coordinate=gaode&callnative=1").toString();
+    }
+
+    /** 将推荐餐厅插入其所属路段，生成保持原有途经顺序的完整导航链接。 */
+    public String restaurantDetourUrl(List<Place> itinerary, Restaurant restaurant, int legIndex) {
+        if (itinerary == null || itinerary.size() < 2
+                || legIndex < 0 || legIndex >= itinerary.size() - 1) return "";
+        List<Place> detourItinerary = new ArrayList<>(itinerary);
+        detourItinerary.add(legIndex + 1, new Place(
+                restaurant.name(), restaurant.longitude(), restaurant.latitude()));
+        return navigationUrl(detourItinerary);
     }
 
     /** 手机端打开指定店铺位置，可继续查看详情或从当前位置导航。 */

@@ -7,9 +7,19 @@ import com.example.ilink.conversation.UserSessionStore;
 import com.example.ilink.feature.chat.ChatService;
 import com.example.ilink.feature.calculator.CalculatorService;
 import com.example.ilink.feature.image.GeneratedImage;
+import com.example.ilink.feature.express.ExpressService;
+import com.example.ilink.feature.memory.MemoryService;
+import com.example.ilink.feature.mail.QqMailService;
+import com.example.ilink.feature.media.MediaKnowledgeResponse;
+import com.example.ilink.feature.media.MediaKnowledgeService;
+import com.example.ilink.feature.planning.TodoService;
 import com.example.ilink.feature.weather.WeatherLocation;
 import com.example.ilink.feature.weather.WeatherService;
+import com.example.ilink.feature.web.NewsSearchService;
+import com.example.ilink.feature.web.BilibiliSearchService;
+import com.example.ilink.feature.web.WebSearchService;
 import com.example.ilink.model.DocumentRecord;
+import com.example.ilink.model.SearchResult;
 import com.example.ilink.routing.IntentContext;
 import com.example.ilink.routing.IntentAction;
 import com.example.ilink.routing.IntentPlan;
@@ -26,17 +36,22 @@ import com.example.ilink.tools.document.DocumentGenerateTool;
 import com.example.ilink.tools.document.DocumentQATool;
 import com.example.ilink.tools.document.DocumentToolOutput;
 import com.example.ilink.tools.finance.ExpenseSplitTool;
+import com.example.ilink.tools.express.ExpressTool;
 import com.example.ilink.tools.image.DrawTool;
 import com.example.ilink.tools.image.ImageAnalysisTool;
 import com.example.ilink.tools.image.ImageEditTool;
 import com.example.ilink.tools.math.CalculatorTool;
 import com.example.ilink.tools.persona.PersonaSwitchTool;
 import com.example.ilink.tools.planning.DeadlineCountdownTool;
+import com.example.ilink.tools.planning.DateTimeParser;
 import com.example.ilink.tools.weather.WeatherTool;
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.google.gson.JsonObject;
 
 import java.nio.file.Path;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -66,6 +81,13 @@ public final class UserRequestHandler {
     private final HealthDietWorkflow healthDietWorkflow;
     private final TravelWorkflow travelWorkflow;
     private final NearbyFoodWorkflow nearbyFoodWorkflow;
+    private final MemoryService memoryService;
+    private final TodoService todoService;
+    private final WebSearchService webSearchService;
+    private final NewsSearchService newsSearchService;
+    private final BilibiliSearchService bilibiliSearchService;
+    private final MediaKnowledgeService mediaKnowledgeService;
+    private final QqMailService qqMailService;
     private final ActionPlanExecutor actionPlanExecutor = new ActionPlanExecutor();
     private final Map<String, PendingFileExport> pendingFileExports = new ConcurrentHashMap<>();
 
@@ -77,7 +99,11 @@ public final class UserRequestHandler {
                               ReplySender replySender, ToolManager toolManager,
                               PlanWorkflow planWorkflow, CalculatorService calculatorService,
                               CalendarWorkflow calendarWorkflow, HealthDietWorkflow healthDietWorkflow,
-                              TravelWorkflow travelWorkflow, NearbyFoodWorkflow nearbyFoodWorkflow) {
+                              TravelWorkflow travelWorkflow, NearbyFoodWorkflow nearbyFoodWorkflow,
+                              MemoryService memoryService, TodoService todoService,
+                              WebSearchService webSearchService, NewsSearchService newsSearchService,
+                              BilibiliSearchService bilibiliSearchService,
+                              MediaKnowledgeService mediaKnowledgeService, QqMailService qqMailService) {
         this.chatHistory = chatHistory;
         this.sessions = sessions;
         this.documentSessions = documentSessions;
@@ -93,9 +119,19 @@ public final class UserRequestHandler {
         this.healthDietWorkflow = healthDietWorkflow;
         this.travelWorkflow = travelWorkflow;
         this.nearbyFoodWorkflow = nearbyFoodWorkflow;
+        this.memoryService = memoryService;
+        this.todoService = todoService;
+        this.webSearchService = webSearchService;
+        this.newsSearchService = newsSearchService;
+        this.bilibiliSearchService = bilibiliSearchService;
+        this.mediaKnowledgeService = mediaKnowledgeService;
+        this.qqMailService = qqMailService;
     }
     /** 识别用户意图并调用对应功能处理器。 */
     public void handle(ILinkClient client, String userId, String text) throws Exception {
+        if (handleMemoryCommand(client, userId, text)) return;
+        if (handleDirectCommand(client, userId, text)) return;
+
         PendingFileExport pendingFileExport = pendingFileExports.get(userId);
         if (pendingFileExport != null) {
             if (IntentPolicy.isFileTypeAnswer(text)) {
@@ -130,7 +166,24 @@ public final class UserRequestHandler {
             return;
         }
         if (calendarWorkflow.hasPending(userId)) {
-            calendarWorkflow.handle(client, userId, text);
+            IntentResult pendingRoute = null;
+            if (!"取消".equals(text.trim())) {
+                IntentContext pendingContext = new IntentContext(
+                        sessions.peekPendingImage(userId) != null,
+                        sessions.getLastImage(userId) != null,
+                        sessions.peekPendingDraw(userId) != null,
+                        documentSessions.get(userId) != null,
+                        true);
+                IntentPlan pendingPlan = intentRecognizer.recognize(userId, text, pendingContext);
+                if (pendingPlan != null) {
+                    pendingRoute = pendingPlan.actions().stream()
+                            .map(IntentAction::route)
+                            .filter(route -> "calendar_event".equals(route.intent()))
+                            .findFirst()
+                            .orElse(null);
+                }
+            }
+            calendarWorkflow.completePending(client, userId, text, pendingRoute);
             resumeActionPlan(client, userId);
             return;
         }
@@ -155,7 +208,8 @@ public final class UserRequestHandler {
                 sessions.peekPendingImage(userId) != null,
                 sessions.getLastImage(userId) != null,
                 sessions.peekPendingDraw(userId) != null,
-                documentSessions.get(userId) != null);
+                documentSessions.get(userId) != null,
+                false);
         IntentPlan plan = intentRecognizer.recognize(userId, text, context);
         if (plan == null || plan.isEmpty()) {
             replySender.sendReply(client, userId, "网络波动了，请再发一次～");
@@ -174,6 +228,215 @@ public final class UserRequestHandler {
                 action -> executeAction(client, userId, action),
                 () -> hasBlockingPending(userId),
                 (action, error) -> handleActionFailure(client, userId, action, error));
+    }
+
+    /** 高确定性的记忆指令直接执行，避免继续扩大通用路由模型负担。 */
+    private boolean handleMemoryCommand(ILinkClient client, String userId, String text) throws Exception {
+        String normalized = text.trim();
+        if (normalized.matches("^(请)?(帮我)?记住.*") || normalized.startsWith("以后记得")) {
+            String reply = memoryService.remember(userId, normalized);
+            String location = memoryService.value(userId, "home_location");
+            if (!location.isBlank()) sessions.setCurrentLocation(userId, location);
+            replySender.sendReply(client, userId, reply);
+            return true;
+        }
+        if (normalized.contains("忘记") || normalized.contains("忘掉") || normalized.contains("不要记得")) {
+            replySender.sendReply(client, userId, memoryService.forget(userId, normalized));
+            return true;
+        }
+        if (normalized.matches(".*(你记得我什么|记得我的什么|我的偏好是什么|我的长期记忆).*")) {
+            replySender.sendReply(client, userId, memoryService.describe(userId));
+            return true;
+        }
+        return false;
+    }
+
+    /** 待办、新闻、联网搜索和天气使用高确定性本地路由，避免被通用模型误分流。 */
+    private boolean handleDirectCommand(ILinkClient client, String userId, String text) throws Exception {
+        String normalized = text == null ? "" : text.trim();
+        if (normalized.isBlank()) return false;
+
+        if (normalized.matches("^(查看|查询|列出|打开)?(我的)?待办(事项|列表)?$|^我还有什么待办.*")) {
+            replySender.sendReply(client, userId, todoService.list(userId));
+            return true;
+        }
+        if (normalized.matches("^(完成|办完|搞定)(这个|最后一个|最新的)?待办.*")) {
+            String keyword = normalized.replaceFirst("^(完成|办完|搞定)(这个|最后一个|最新的)?待办[：:，, ]*", "").trim();
+            replySender.sendReply(client, userId, todoService.complete(userId, keyword));
+            return true;
+        }
+        if (normalized.matches("^(取消|删除)(这个|最后一个|最新的)?待办.*")) {
+            String keyword = normalized.replaceFirst("^(取消|删除)(这个|最后一个|最新的)?待办[：:，, ]*", "").trim();
+            replySender.sendReply(client, userId, todoService.cancel(userId, keyword));
+            return true;
+        }
+        if (normalized.matches("^(请)?(帮我)?(添加|新增|创建|记)(一个|个)?待办.*|^待办[：:].*")) {
+            createTodo(client, userId, normalized);
+            return true;
+        }
+
+        if (isExpressCommand(normalized)) {
+            queryExpress(client, userId, normalized);
+            return true;
+        }
+
+        if (isNewsCommand(normalized)) {
+            searchNews(client, userId, normalized);
+            return true;
+        }
+        if (normalized.matches("^(请)?(帮我)?(联网搜索|联网查|上网查|网页搜索|实时搜索).*")) {
+            searchWeb(client, userId, normalized);
+            return true;
+        }
+        if (isWeatherCommand(normalized)) {
+            queryWeatherDirect(client, userId, normalized);
+            return true;
+        }
+        return false;
+    }
+
+    private boolean isExpressCommand(String text) {
+        String trackingNo = ExpressService.extractTrackingNo(text);
+        boolean hasKeyword = text.matches(".*(快递|物流|包裹|运单|到哪了|到哪里了|是否签收).*" );
+        if (hasKeyword) return true;
+        if (trackingNo.isBlank()) return false;
+        return text.replaceAll("[\\s，,。？?]", "").equalsIgnoreCase(trackingNo);
+    }
+
+    private void queryExpress(ILinkClient client, String userId, String text) throws Exception {
+        String trackingNo = ExpressService.extractTrackingNo(text);
+        if (trackingNo.isBlank()) {
+            replySender.sendReply(client, userId, "请把需要查询的快递单号发给我。");
+            return;
+        }
+        JsonObject arguments = new JsonObject();
+        arguments.addProperty("tracking_no", trackingNo);
+        ToolResult result = toolManager.execute(ExpressTool.NAME, new ToolContext(userId), arguments);
+        chatHistory.add(userId, text, result.output());
+        replySender.sendReply(client, userId, result.output());
+    }
+
+    private void createTodo(ILinkClient client, String userId, String text) throws Exception {
+        LocalDateTime dueAt = DateTimeParser.parse(text);
+        String title = text.replaceFirst("^(请)?(帮我)?(添加|新增|创建|记)(一个|个)?待办[：:，, ]*", "")
+                .replaceFirst("^待办[：:，, ]*", "")
+                .replaceAll("(今天|今日|明天|明日|后天|\\d+天后|本周|这周|下周|下下周|周[一二三四五六日天]|星期[一二三四五六日天])", "")
+                .replaceAll("(?:(?:\\d{4})年)?\\d{1,2}月\\d{1,2}(?:日|号)?", "")
+                .replaceAll("(上午|中午|下午|傍晚|晚上|今晚)?[零一二三四五六七八九十两\\d]{1,3}点(半)?", "")
+                .replaceAll("\\d{1,2}[：:]\\d{2}", "")
+                .replaceAll("[，, ]+", " ").trim();
+        if (title.isBlank()) {
+            replySender.sendReply(client, userId, "请告诉我待办的具体内容。");
+            return;
+        }
+        var todo = todoService.create(userId, title, dueAt, 30);
+        String dueText = todo.dueAt() == null ? "" : "，时间是"
+                + todo.dueAt().format(DateTimeFormatter.ofPattern("M月d日 HH:mm"));
+        replySender.sendReply(client, userId, "好，已经记到待办里了：" + todo.title() + dueText + "。");
+    }
+
+    private boolean isNewsCommand(String text) {
+        return text.matches("^(请)?(帮我)?(查|查询|搜索|看看|获取)?(一下)?(今天|今日|最新|实时)?的?.*(新闻|资讯|热搜).*");
+    }
+
+    private void searchNews(ILinkClient client, String userId, String text) throws Exception {
+        String query = text.replaceFirst("^(请)?(帮我)?(查|查询|搜索|看看|获取)?(一下)?", "")
+                .replaceAll("(今天|今日|最新|实时)?的?(新闻|资讯|热搜)", "").trim();
+        if (query.isBlank()) query = "最新新闻";
+        if (text.matches(".*(今天|今日|最新|实时).*")) query += " when:1d";
+        try {
+            List<SearchResult> results = newsSearchService.search(query, Config.WEB_SEARCH_RESULT_LIMIT);
+            replySender.sendReply(client, userId, formatSearchResults("实时新闻", results));
+        } catch (Exception e) {
+            System.err.println("[实时新闻] 查询失败: " + e.getMessage());
+            replySender.sendReply(client, userId, "这次实时新闻查询没有成功，我目前无法确认最新内容，请稍后再试。");
+        }
+    }
+
+    private void searchWeb(ILinkClient client, String userId, String text) throws Exception {
+        String query = text.replaceFirst("^(请)?(帮我)?(联网搜索|联网查|上网查|网页搜索|实时搜索)(一下)?[：:，, ]*", "").trim();
+        if (query.isBlank()) {
+            replySender.sendReply(client, userId, "请告诉我需要联网查询什么内容。");
+            return;
+        }
+        try {
+            List<SearchResult> results = webSearchService.search(query, Config.WEB_SEARCH_RESULT_LIMIT);
+            replySender.sendReply(client, userId, formatSearchResults("联网搜索结果", results));
+        } catch (Exception e) {
+            System.err.println("[联网搜索] 查询失败: " + e.getMessage());
+            replySender.sendReply(client, userId, "这次联网查询没有成功，我不会用旧知识冒充实时结果，请稍后再试。");
+        }
+    }
+
+    private String formatSearchResults(String heading, List<SearchResult> results) {
+        if (results.isEmpty()) return heading + "暂时没有找到可靠结果。";
+        StringBuilder reply = new StringBuilder(heading).append("：\n");
+        for (int index = 0; index < results.size(); index++) {
+            SearchResult result = results.get(index);
+            reply.append(index + 1).append(". ").append(result.title()).append('\n');
+            if (!result.summary().isBlank()) reply.append(shorten(result.summary(), 180)).append('\n');
+            reply.append("来源：").append(result.source().isBlank() ? "网页" : result.source());
+            if (!result.publishedAt().isBlank()) reply.append("｜").append(result.publishedAt());
+            reply.append('\n').append(result.url()).append("\n\n");
+        }
+        return reply.toString().trim();
+    }
+
+    private String shorten(String text, int maxLength) {
+        String value = text.replaceAll("\\s+", " ").trim();
+        return value.length() <= maxLength ? value : value.substring(0, maxLength) + "…";
+    }
+
+    private boolean isWeatherCommand(String text) {
+        return text.matches(".*(天气预报|天气怎么样|天气如何|查天气|查询天气|气温多少|温度多少|会不会下雨).*" )
+                || text.matches("^[\\p{IsHan}A-Za-z· ]{2,30}(今天|明天|后天)?(的)?(天气|气温|温度)$");
+    }
+
+    private void queryWeatherDirect(ILinkClient client, String userId, String text) throws Exception {
+        LocalDateTime parsedDateTime = DateTimeParser.parse(text);
+        LocalDate targetDate = parsedDateTime == null ? LocalDate.now() : parsedDateTime.toLocalDate();
+        long dayOffset = java.time.temporal.ChronoUnit.DAYS.between(LocalDate.now(), targetDate);
+        if (dayOffset < 0 || dayOffset > 6) {
+            replySender.sendReply(client, userId, "目前可以查询今天起未来七天内的天气。");
+            return;
+        }
+        String period = text.contains("上午") ? "morning"
+                : text.contains("下午") ? "afternoon"
+                : text.matches(".*(晚上|今晚).*" ) ? "evening" : "day";
+        String locationName = extractWeatherLocation(text);
+        if (locationName.isBlank()) locationName = memoryService.value(userId, "home_location");
+        if (locationName.isBlank()) {
+            String currentLocation = sessions.getCurrentLocation(userId);
+            locationName = currentLocation == null ? "" : currentLocation;
+        }
+        if (locationName.isBlank()) {
+            replySender.sendReply(client, userId, "请告诉我要查询哪个城市；你也可以让我记住常住城市。");
+            return;
+        }
+        List<WeatherLocation> locations = weatherService.searchLocations(locationName);
+        if (locations.isEmpty()) {
+            replySender.sendReply(client, userId, "没有找到地点“" + locationName + "”，请补充省、市或国家。");
+            return;
+        }
+        String dayToken = targetDate + "_" + period;
+        WeatherLocation selected = WeatherService.clearlyPrimary(locations);
+        if (locations.size() > 1 && selected == null) {
+            sessions.setPendingWeatherLocations(userId, locations, dayToken);
+            replySender.sendReply(client, userId, buildWeatherLocationChoices(locations));
+            return;
+        }
+        if (selected == null) selected = locations.getFirst();
+        sessions.setCurrentLocation(userId, locationName);
+        sendWeatherReply(client, userId, text, selected, dayToken, "keep", "default");
+    }
+
+    private String extractWeatherLocation(String text) {
+        return text.replaceFirst("^(请)?(帮我)?(查|查询|看看|看一下)?", "")
+                .replaceAll("(今天|今日|明天|明日|后天|未来七天|未来7天)", "")
+                .replaceAll("(?:(?:\\d{4})年)?\\d{1,2}月\\d{1,2}(?:日|号)?", "")
+                .replaceAll("(上午|中午|下午|傍晚|晚上|今晚)", "")
+                .replaceAll("(的)?(天气预报|天气怎么样|天气如何|天气|气温多少|气温|温度多少|温度|会不会下雨|情况)", "")
+                .replaceAll("[？?，,。 ]+", "").trim();
     }
 
     /** 调用一个动作对应的原有业务处理器，动作之间由统一执行器负责排序。 */
@@ -196,6 +459,9 @@ public final class UserRequestHandler {
             case "diet_plan" -> healthDietWorkflow.handle(client, userId, route);
             case "nearby_food" -> nearbyFoodWorkflow.handle(client, userId, route);
             case "calendar_event" -> calendarWorkflow.handle(client, userId, actionText, route);
+            case "bilibili_search" -> searchBilibili(client, userId, route);
+            case "media_lookup" -> lookupMedia(client, userId, actionText, route);
+            case "email_query" -> queryEmail(client, userId, route);
             case "planning_capabilities" -> replySender.sendReply(client, userId, planningCapabilitiesText(),
                     route.replyMode(), route.voiceStyle());
             case "plan_adjust" -> planWorkflow.adjustPlan(client, userId, actionText, route);
@@ -236,11 +502,39 @@ public final class UserRequestHandler {
     private boolean hasBlockingPending(String userId) {
         return sessions.hasPendingWeatherLocations(userId)
                 || planWorkflow.hasPendingPlan(userId)
-                || planWorkflow.hasPendingCalendarSync(userId)
                 || calendarWorkflow.hasPending(userId)
                 || healthDietWorkflow.hasPending(userId)
                 || travelWorkflow.hasPendingLocation(userId)
                 || nearbyFoodWorkflow.hasPendingLocation(userId);
+    }
+
+    /** 搜索哔哩哔哩内容；具体视频不可用时服务会返回官方搜索入口。 */
+    private void searchBilibili(ILinkClient client, String userId, IntentResult route) throws Exception {
+        List<SearchResult> results = bilibiliSearchService.search(
+                route.bilibiliQuery(), route.bilibiliCategory());
+        String reply = bilibiliSearchService.formatReply(results);
+        chatHistory.add(userId, route.bilibiliQuery(), reply);
+        replySender.sendReply(client, userId, reply, "text", "default");
+    }
+
+    /** 查询动漫或音乐资料，并继续提供哔哩哔哩入口。 */
+    private void lookupMedia(ILinkClient client, String userId, String requestText,
+                             IntentResult route) throws Exception {
+        String query = route.mediaQuery().isBlank() ? requestText : route.mediaQuery();
+        MediaKnowledgeResponse knowledge = mediaKnowledgeService.lookup(
+                query, route.mediaCategory(), requestText);
+        List<SearchResult> videos = bilibiliSearchService.search(
+                knowledge.bilibiliQuery(), knowledge.bilibiliCategory());
+        String reply = knowledge.text() + "\n\n" + bilibiliSearchService.formatReply(videos);
+        chatHistory.add(userId, requestText, reply);
+        replySender.sendReply(client, userId, reply, "text", "default");
+    }
+
+    /** 只读查询绑定用户的 QQ 邮箱。 */
+    private void queryEmail(ILinkClient client, String userId, IntentResult route) throws Exception {
+        String reply = qqMailService.query(userId, route.emailAction(), route.emailKeyword());
+        chatHistory.add(userId, "QQ邮箱查询", reply);
+        replySender.sendReply(client, userId, reply, "text", "default");
     }
 
     /** 记录单个动作的错误并继续后续动作，避免一个工具失败导致整段请求中断。 */
@@ -455,9 +749,12 @@ public final class UserRequestHandler {
         }
 
         List<WeatherLocation> refinedLocations = weatherService.searchLocations(text);
-        if (refinedLocations.size() == 1) {
+        WeatherLocation selected = WeatherService.clearlyPrimary(refinedLocations);
+        if (refinedLocations.size() == 1 || selected != null) {
             sessions.clearPendingWeatherLocations(userId);
-            sendWeatherReply(client, userId, text, refinedLocations.get(0), weatherDay, "keep", "default");
+            sendWeatherReply(client, userId, text,
+                    selected == null ? refinedLocations.getFirst() : selected,
+                    weatherDay, "keep", "default");
             return;
         }
         if (refinedLocations.size() > 1) {
@@ -473,8 +770,7 @@ public final class UserRequestHandler {
     private void sendWeatherReply(ILinkClient client, String userId, String userText,
                                   WeatherLocation location, String weatherDay,
                                   String replyMode, String voiceStyle) throws Exception {
-        int dayOffset = WeatherService.dayOffset(weatherDay);
-        String reply = weatherService.queryWeather(location, dayOffset, WeatherService.period(weatherDay));
+        String reply = weatherService.queryWeather(location, WeatherService.date(weatherDay), WeatherService.period(weatherDay));
         chatHistory.add(userId, userText, reply);
         replySender.applyReplyMode(userId, replyMode);
         replySender.sendReply(client, userId, reply, replyMode, voiceStyle);
@@ -612,6 +908,9 @@ public final class UserRequestHandler {
             case "nearby_food" -> "附近美食";
             case "calendar_event" -> "日历事件";
             case "planning_capabilities" -> "规划能力说明";
+            case "bilibili_search" -> "哔哩哔哩内容";
+            case "media_lookup" -> "动漫音乐资料";
+            case "email_query" -> "QQ邮箱查询";
             case "task_plan" -> "制定计划";
             case "plan_adjust" -> "调整计划";
             case "plan_progress" -> "查询计划进度";

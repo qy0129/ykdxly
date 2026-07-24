@@ -28,7 +28,7 @@ public final class IntentRecognizer {
             "document_summary", "document_question", "generate_file", "document_edit", "weather",
             "task_plan", "plan_adjust", "plan_progress", "calculator", "expense_split",
             "deadline_countdown", "travel_plan", "diet_plan", "nearby_food", "calendar_event",
-            "planning_capabilities");
+            "planning_capabilities", "bilibili_search", "media_lookup", "email_query");
 
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
@@ -107,6 +107,7 @@ public final class IntentRecognizer {
                 logCorrection(modelIntent, string(result, "intent"), userMessage);
                 actions.add(new IntentAction(userMessage, toIntentResult(result)));
             }
+            appendLearningResources(userMessage, actions);
             return new IntentPlan(actions);
         } catch (Exception e) {
             System.err.println("[意图识别] 识别失败：" + e.getMessage());
@@ -147,6 +148,25 @@ public final class IntentRecognizer {
         boolean imageCreation = IntentPolicy.isExplicitImageCreation(userMessage);
         boolean imageEdit = IntentPolicy.isExplicitImageEdit(userMessage);
         boolean fileRequest = IntentPolicy.hasExplicitFileRequest(userMessage);
+
+        String requestText = actionText == null || actionText.isBlank() ? userMessage : actionText;
+        if ("chat".equals(intent) && isEmailRequest(requestText)) {
+            action.addProperty("intent", "email_query");
+            action.addProperty("email_action", inferEmailAction(requestText));
+            action.addProperty("email_keyword", inferEmailKeyword(requestText));
+            intent = "email_query";
+        } else if ("chat".equals(intent) && isMediaKnowledgeRequest(requestText)) {
+            action.addProperty("intent", "media_lookup");
+            action.addProperty("media_category", inferMediaCategory(requestText));
+            action.addProperty("media_query", inferMediaQuery(requestText));
+            intent = "media_lookup";
+        } else if ("chat".equals(intent) && isBilibiliMediaRequest(requestText)) {
+            action.addProperty("intent", "bilibili_search");
+            action.addProperty("bilibili_category", inferBilibiliCategory(requestText));
+            action.addProperty("bilibili_query", inferBilibiliQuery(requestText,
+                    string(action, "bilibili_category")));
+            intent = "bilibili_search";
+        }
 
         if ("generate_file".equals(intent) && !fileRequest) {
             if (imageCreation) {
@@ -201,6 +221,143 @@ public final class IntentRecognizer {
                 action.addProperty("image_size", "none");
             }
         }
+
+        if ("bilibili_search".equals(string(action, "intent"))) {
+            String category = string(action, "bilibili_category");
+            if (!Set.of("study", "music", "series", "video").contains(category)) {
+                category = inferBilibiliCategory(requestText);
+                action.addProperty("bilibili_category", category);
+            }
+            if (string(action, "bilibili_query").isBlank()) {
+                action.addProperty("bilibili_query", inferBilibiliQuery(requestText, category));
+            }
+        }
+
+        if ("media_lookup".equals(string(action, "intent"))) {
+            String category = string(action, "media_category");
+            if (!Set.of("anime", "music", "lyrics").contains(category)) {
+                category = inferMediaCategory(requestText);
+                action.addProperty("media_category", category);
+            }
+            if (string(action, "media_query").isBlank()) {
+                action.addProperty("media_query", inferMediaQuery(requestText));
+            }
+        }
+
+        if ("email_query".equals(string(action, "intent"))) {
+            String emailAction = string(action, "email_action");
+            if (!Set.of("unread", "important", "search").contains(emailAction)) {
+                action.addProperty("email_action", inferEmailAction(requestText));
+            }
+            if (string(action, "email_keyword").isBlank()) {
+                action.addProperty("email_keyword", inferEmailKeyword(requestText));
+            }
+        }
+    }
+
+    /** 学习计划固定追加课程资源动作，避免路由模型漏掉用户没有明说的学习入口。 */
+    private void appendLearningResources(String userMessage, List<IntentAction> actions) {
+        if (actions.size() >= 6 || !isLearningPlanRequest(userMessage)
+                || actions.stream().noneMatch(action -> "task_plan".equals(action.route().intent()))
+                || actions.stream().anyMatch(action -> "bilibili_search".equals(action.route().intent()))) {
+            return;
+        }
+        String goal = actions.stream()
+                .filter(action -> "task_plan".equals(action.route().intent()))
+                .map(action -> action.route().planGoal())
+                .filter(value -> value != null && !value.isBlank())
+                .findFirst()
+                .orElse(userMessage);
+        JsonObject resourceAction = new JsonObject();
+        resourceAction.addProperty("intent", "bilibili_search");
+        resourceAction.addProperty("bilibili_category", "study");
+        resourceAction.addProperty("bilibili_query", inferBilibiliQuery(goal, "study"));
+        actions.add(new IntentAction("查找与学习计划配套的哔哩哔哩课程", toIntentResult(resourceAction)));
+    }
+
+    static boolean isLearningPlanRequest(String text) {
+        return text != null
+                && text.matches(".*(学习|学一下|学会|备考|课程).*" )
+                && text.matches(".*(计划|规划|安排|预计|天|周|月).*" );
+    }
+
+    static boolean isBilibiliMediaRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        return text.matches(".*(哔哩哔哩|B站|b站).*(搜|找|看|听|播放|课程|视频).*" )
+                || text.matches(".*(想|要|帮我|给我).*(看|追).*(剧|电影|番|动漫|视频).*" )
+                || text.matches(".*(想|要|帮我|给我).*(听|播放).*(歌|音乐|歌曲).*" );
+    }
+
+    static boolean isMediaKnowledgeRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        return text.matches(".*(查|查询|介绍|资料|了解).*(动漫|动画|番剧|漫画|歌手|歌曲|专辑|歌词).*" )
+                || text.matches(".*(歌词|歌手资料|专辑资料|动漫资料|番剧资料).*" );
+    }
+
+    static boolean isEmailRequest(String text) {
+        return text != null && text.matches(".*(邮箱|邮件|未读邮件|重要邮件).*" )
+                && text.matches(".*(查|查询|看看|有什么|总结|搜索|找|未读|重要).*" );
+    }
+
+    static String inferMediaCategory(String text) {
+        if (text != null && text.contains("歌词")) return "lyrics";
+        if (text != null && text.matches(".*(动漫|动画|番剧|漫画).*")) return "anime";
+        return "music";
+    }
+
+    static String inferMediaQuery(String text) {
+        if (text == null) return "";
+        return text.replaceFirst("^(请)?(帮我)?(查|查询|搜索|找|介绍|了解)(一下)?", "")
+                .replaceAll("(的)?(资料|信息|歌词|歌手|歌曲|专辑|动漫|动画|番剧|漫画)", " ")
+                .replaceAll("[《》‘’“”\"，,。？?]", " ")
+                .replaceAll("\\s+", " ").trim();
+    }
+
+    static String inferEmailAction(String text) {
+        if (text != null && text.matches(".*(重要|需要回复|紧急).*")) return "important";
+        if (text != null && text.matches(".*(搜索|查找|找一下|谁发的|发来的).*")) return "search";
+        return "unread";
+    }
+
+    static String inferEmailKeyword(String text) {
+        if (text == null) return "";
+        return text.replaceFirst("^(请)?(帮我)?(查|查询|搜索|查找|找|看看|总结)(一下)?", "")
+                .replaceAll("(我的)?(QQ)?邮箱", "")
+                .replaceAll("(最近|今天|近期)?(的)?(未读|重要|新)?邮件", "")
+                .replaceAll("[，,。？?]", " ").replaceAll("\\s+", " ").trim();
+    }
+
+    static String inferBilibiliCategory(String text) {
+        if (text != null && text.matches(".*(歌|音乐|歌曲|听|播放).*")) return "music";
+        if (text != null && text.matches(".*(剧|电影|番|动漫|追剧).*")) return "series";
+        if (text != null && text.matches(".*(学习|课程|教程|备考|知识).*")) return "study";
+        return "video";
+    }
+
+    static String inferBilibiliQuery(String text, String category) {
+        String query = text == null ? "" : text.trim();
+        query = query.replaceAll("^(请)?(帮我|给我)?(在)?(哔哩哔哩|B站|b站)?", "")
+                .replaceAll("(帮我完成|制定|生成|做)(一份|一个)?(学习)?计划", "")
+                .replaceAll("预计.{0,12}(天|周|月)(左右)?", "")
+                .replaceAll("[，,。？?]", " ")
+                .replaceAll("\\s+", " ").trim();
+        return switch (category) {
+            case "music" -> {
+                String value = query.replaceAll("^(我)?(想|要)?(听|播放)(一下)?", "")
+                        .replaceAll("的?(歌|音乐|歌曲)$", "").trim();
+                yield value.isBlank() ? "热门音乐" : value + " 歌曲";
+            }
+            case "series" -> {
+                String value = query.replaceAll("^(我)?(想|要)?(看|追)(一下)?", "").trim();
+                yield value.isBlank() || "剧".equals(value) ? "热门电视剧" : value;
+            }
+            case "study" -> {
+                String value = query.replaceAll("^(我)?(想|要)?(学习|学一下)", "")
+                        .replaceAll("(学习)?计划$", "").trim();
+                yield value.isBlank() ? "系统学习课程" : value + " 系统课程";
+            }
+            default -> query.isBlank() ? "热门视频" : query;
+        };
     }
 
     /** 清除不再适用于普通聊天的输出字段。 */
@@ -247,6 +404,8 @@ public final class IntentRecognizer {
                 string(result, "travel_origin"),
                 string(result, "travel_destination"),
                 stringList(result, "travel_stops"),
+                string(result, "origin_city"),
+                string(result, "destination_city"),
                 string(result, "travel_departure_time"),
                 integer(result, "time_budget_minutes", 0),
                 string(result, "meal_keyword"),
@@ -257,7 +416,17 @@ public final class IntentRecognizer {
                 string(result, "calendar_title"),
                 string(result, "calendar_time"),
                 defaultString(result, "calendar_recurrence", "none"),
-                integer(result, "calendar_reminder_minutes", 0));
+                integer(result, "calendar_reminder_minutes", 0),
+                defaultString(result, "calendar_time_type", "auto"),
+                longInteger(result, "calendar_time_amount", 0),
+                string(result, "calendar_time_unit"),
+                integer(result, "calendar_lead_time_seconds", 0),
+                string(result, "bilibili_query"),
+                defaultString(result, "bilibili_category", "video"),
+                string(result, "media_query"),
+                defaultString(result, "media_category", "music"),
+                defaultString(result, "email_action", "unread"),
+                string(result, "email_keyword"));
     }
 
     /** 构造路由模型的系统提示词和当前会话状态说明。 */
@@ -267,7 +436,8 @@ public final class IntentRecognizer {
         prompt.append("当前状态：pending_image=").append(context.pendingImage())
                 .append(", has_last_image=").append(context.hasLastImage())
                 .append(", pending_draw_size=").append(context.pendingDraw())
-                .append(", has_document=").append(context.hasDocument()).append("。\n");
+                .append(", has_document=").append(context.hasDocument())
+                .append(", pending_calendar=").append(context.pendingCalendar()).append("。\n");
         prompt.append("可选人设名称：").append(String.join("、", Personas.getAll().keySet())).append("。\n\n");
 
         prompt.append("多动作拆分规则：\n");
@@ -326,6 +496,8 @@ public final class IntentRecognizer {
                 + "将明确的时间表达写入 plan_deadline，例如明天下午六点、2026-07-25 18:00。\n\n");
         prompt.append("17. travel_plan：用户给出起点、终点并要求路线、导航、出行安排或中途停留时使用。"
                 + "travel_origin填写最初起点，travel_destination填写最终终点。"
+                + "origin_city和destination_city只填写用户明确说出或能从明确地标确定的城市，无法确定时留空，禁止猜测。"
+                + "例如‘从杭州西湖去上海外滩’填写origin_city=杭州、destination_city=上海。"
                 + "用户说‘先去A、再去B、最后去C’时，A和B等中间地点按顺序写入travel_stops数组，不能忽略。"
                 + "没有途经点时travel_stops必须为空数组；‘一个小时’等可用时长填入time_budget_minutes。"
                 + "中途想吃面、咖啡等填入meal_keyword；明确出发时间填travel_departure_time。"
@@ -336,8 +508,26 @@ public final class IntentRecognizer {
                 + "nearby_location 填用户明确说出的地点，未重复时可留空；nearby_action 只能是remember或search。\n");
         prompt.append("20. calendar_event：用户创建、查询、完成、取消或延后提醒/日程时使用。"
                 + "calendar_action 为create|list|complete|cancel|snooze；创建时填写calendar_title、calendar_time、"
-                + "calendar_recurrence(none|daily|weekly|monthly|yearly)和calendar_reminder_minutes。\n");
+                + "calendar_recurrence(none|daily|weekly|monthly|yearly)。"
+                + "calendar_time_type为auto|relative|absolute。相对时间还要填写calendar_time_amount和calendar_time_unit(second|minute|hour|day)。"
+                + "提前提醒统一换算为calendar_lead_time_seconds。‘30秒后提醒我’表示relative/30/second，绝不能填成提前30分钟；"
+                + "只有‘明天8点开会，提前30分钟提醒’才把calendar_lead_time_seconds填为1800。"
+                + "pending_calendar=true时，用户是在补充上一轮日历时间，仍输出calendar_event/create并只填写本轮提供的时间字段。\n");
         prompt.append("21. planning_capabilities：用户询问‘你可以帮我做什么规划’、规划功能有哪些时使用。\n\n");
+        prompt.append("22. bilibili_search：用户想看剧、看电影、看视频、听歌、听音乐，或明确要求从哔哩哔哩寻找内容时使用。"
+                + "bilibili_query填写适合搜索的关键词，bilibili_category只能是study、music、series或video。"
+                + "例如‘我想听周杰伦的歌’填写周杰伦 歌曲/music；‘我想看剧’填写热门电视剧/series。"
+                + "用户要求制定学习计划时，必须先输出task_plan，再输出bilibili_search，学习资源关键词使用课程主题加‘系统课程’。"
+                + "例如‘我想学习线性代数，预计三十天，帮我完成一份计划’必须输出task_plan和bilibili_search两个动作。\n\n");
+        prompt.append("23. media_lookup：用户要求查询动漫、番剧、歌手、歌曲、专辑或歌词的资料时使用。"
+                + "media_query填写作品、歌手或歌曲关键词；media_category只能是anime、music或lyrics。"
+                + "查询完成后程序会自动追加哔哩哔哩入口，不要再输出重复的bilibili_search动作。"
+                + "例如‘查一下海贼王动漫资料’使用海贼王/anime；‘查周杰伦的专辑’使用周杰伦/music；"
+                + "‘找晴天的歌词’使用晴天/lyrics。单纯‘我想听周杰伦的歌’仍使用bilibili_search。\n");
+        prompt.append("24. email_query：用户查询QQ邮箱未读、重要邮件或按关键词搜索邮件时使用。"
+                + "email_action只能是unread、important或search；email_keyword只在搜索指定发件人、主题或内容时填写。"
+                + "例如‘我有什么未读邮件’使用unread；‘有没有重要邮件’使用important；"
+                + "‘查腾讯发来的邮件’使用search并填写腾讯。\n\n");
 
         prompt.append("Document rules: when has_document=true, use document_summary for summarizing, document_question for questions, document_edit when the user asks to modify, rewrite, delete, add, or correct the current document, and generate_file when the user asks for a PDF or DOCX output. document_action must be none, summary, question, or edit. output_file_type must be none, docx, or pdf.\n");
         prompt.append("输出规则：\n");
@@ -351,7 +541,7 @@ public final class IntentRecognizer {
                 + "没有明确生成图片要求时intent绝不能为draw。");
         prompt.append("\n输出必须是以下结构，且每个动作包含全部字段："
                 + "{\"actions\":[{\"action_text\":\"当前动作对应的用户原始要求\","
-                + "\"intent\":\"chat|draw|persona_switch|audio_transcribe|image_action|draw_size|document_summary|document_question|generate_file|document_edit|weather|task_plan|plan_adjust|plan_progress|calculator|expense_split|deadline_countdown|travel_plan|diet_plan|nearby_food|calendar_event|planning_capabilities\","
+                + "\"intent\":\"chat|draw|persona_switch|audio_transcribe|image_action|draw_size|document_summary|document_question|generate_file|document_edit|weather|task_plan|plan_adjust|plan_progress|calculator|expense_split|deadline_countdown|travel_plan|diet_plan|nearby_food|calendar_event|planning_capabilities|bilibili_search|media_lookup|email_query\","
                 + "\"en_prompt\":\"\",\"cn_description\":\"\","
                 + "\"image_size\":\"none|1024x1024|768x1024|1024x576\","
                 + "\"reply_mode\":\"keep|text|voice|both\","
@@ -365,12 +555,18 @@ public final class IntentRecognizer {
                 + "\"calculation_left\":\"0\",\"calculation_right\":\"0\","
                 + "\"calculation_quantity\":\"1\",\"calculation_unit_price\":\"0\","
                 + "\"calculation_discount_percent\":\"0\","
-                + "\"travel_origin\":\"\",\"travel_destination\":\"\",\"travel_stops\":[],\"travel_departure_time\":\"\","
+                + "\"travel_origin\":\"\",\"travel_destination\":\"\",\"travel_stops\":[],"
+                + "\"origin_city\":\"\",\"destination_city\":\"\",\"travel_departure_time\":\"\","
                 + "\"time_budget_minutes\":0,\"meal_keyword\":\"\",\"diet_goal\":\"\","
                 + "\"nearby_location\":\"\",\"nearby_action\":\"remember|search\","
                 + "\"calendar_action\":\"create|list|complete|cancel|snooze\",\"calendar_title\":\"\","
                 + "\"calendar_time\":\"\",\"calendar_recurrence\":\"none|daily|weekly|monthly|yearly\","
-                + "\"calendar_reminder_minutes\":0}]}。");
+                + "\"calendar_reminder_minutes\":0,\"calendar_time_type\":\"auto|relative|absolute\","
+                + "\"calendar_time_amount\":0,\"calendar_time_unit\":\"second|minute|hour|day\","
+                + "\"calendar_lead_time_seconds\":0,\"bilibili_query\":\"\","
+                + "\"bilibili_category\":\"study|music|series|video\","
+                + "\"media_query\":\"\",\"media_category\":\"anime|music|lyrics\","
+                + "\"email_action\":\"unread|important|search\",\"email_keyword\":\"\"}]}。");
         return prompt.toString();
     }
 
@@ -415,6 +611,15 @@ public final class IntentRecognizer {
         try {
             return object.has(name) && !object.get(name).isJsonNull()
                     ? object.get(name).getAsInt() : defaultValue;
+        } catch (RuntimeException ignored) {
+            return defaultValue;
+        }
+    }
+
+    private long longInteger(JsonObject object, String name, long defaultValue) {
+        try {
+            return object.has(name) && !object.get(name).isJsonNull()
+                    ? object.get(name).getAsLong() : defaultValue;
         } catch (RuntimeException ignored) {
             return defaultValue;
         }

@@ -117,9 +117,14 @@ public final class RouteMealPlanner {
         return candidates;
     }
 
-    /** 将“清淡”等抽象偏好转换为高德能够识别的真实餐饮搜索词。 */
+    /** 将抽象偏好和英文品牌名转换为高德能够识别的真实餐饮搜索词。 */
     private List<String> keywordsFor(String mealRequest) {
         String request = mealRequest == null ? "" : mealRequest.trim().toLowerCase(Locale.ROOT);
+        if (request.contains("kfc")) return List.of("肯德基");
+        if (request.contains("mcdonald")) return List.of("麦当劳");
+        if (request.contains("starbucks")) return List.of("星巴克");
+        if (request.contains("burger king")) return List.of("汉堡王");
+        if (request.contains("pizza hut")) return List.of("必胜客");
         if (request.contains("清淡") || request.contains("清谈") || request.contains("清爽")) {
             return List.of("轻食", "粥", "蒸菜");
         }

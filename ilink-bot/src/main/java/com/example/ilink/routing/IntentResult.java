@@ -36,6 +36,8 @@ public record IntentResult(
         String travelOrigin,
         String travelDestination,
         List<String> travelStops,
+        String originCity,
+        String destinationCity,
         String travelDepartureTime,
         int timeBudgetMinutes,
         String mealKeyword,
@@ -46,5 +48,15 @@ public record IntentResult(
         String calendarTitle,
         String calendarTime,
         String calendarRecurrence,
-        int calendarReminderMinutes) {
+        int calendarReminderMinutes,
+        String calendarTimeType,
+        long calendarTimeAmount,
+        String calendarTimeUnit,
+        int calendarLeadTimeSeconds,
+        String bilibiliQuery,
+        String bilibiliCategory,
+        String mediaQuery,
+        String mediaCategory,
+        String emailAction,
+        String emailKeyword) {
 }

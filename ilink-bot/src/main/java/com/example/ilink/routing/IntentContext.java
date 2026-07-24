@@ -10,5 +10,6 @@ public record IntentContext(
         boolean pendingImage,
         boolean hasLastImage,
         boolean pendingDraw,
-        boolean hasDocument) {
+        boolean hasDocument,
+        boolean pendingCalendar) {
 }

@@ -205,8 +205,9 @@ public final class PlanWorkflow {
         for (PlanTask task : plan.tasks()) {
             try {
                 LocalDate date = LocalDate.parse(task.scheduledDate());
-                calendarService.create(userId, task.title(), "学习", LocalDateTime.of(date, LocalTime.of(20, 0)),
-                        "none", 0);
+                var event = calendarService.create(userId, task.title(), "学习",
+                        LocalDateTime.of(date, LocalTime.of(20, 0)), "none", 0);
+                planSessions.linkTaskToCalendar(task.id(), event.id());
                 count++;
             } catch (Exception ignored) {
                 // 未获得明确日期的任务保留在文本计划中，不创建一个错误的日历提醒。

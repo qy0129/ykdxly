@@ -12,19 +12,33 @@ import com.example.ilink.feature.audio.AudioService;
 import com.example.ilink.feature.chat.ChatService;
 import com.example.ilink.feature.document.DocumentAiService;
 import com.example.ilink.feature.document.DocumentService;
+import com.example.ilink.feature.express.ExpressService;
 import com.example.ilink.feature.finance.ExpenseSplitService;
 import com.example.ilink.feature.image.ImageService;
 import com.example.ilink.feature.image.GeneratedImage;
 import com.example.ilink.feature.persona.Personas;
+import com.example.ilink.feature.memory.MemoryService;
+import com.example.ilink.feature.mail.QqMailService;
+import com.example.ilink.feature.media.BangumiService;
+import com.example.ilink.feature.media.LrcLibService;
+import com.example.ilink.feature.media.MediaKnowledgeService;
+import com.example.ilink.feature.media.MusicBrainzService;
 import com.example.ilink.feature.planning.TaskPlanningService;
+import com.example.ilink.feature.planning.TodoService;
 import com.example.ilink.feature.calculator.CalculatorService;
 import com.example.ilink.feature.weather.WeatherService;
+import com.example.ilink.feature.web.NewsSearchService;
+import com.example.ilink.feature.web.BilibiliSearchService;
+import com.example.ilink.feature.web.ShortLinkService;
+import com.example.ilink.feature.web.WebSearchService;
 import com.example.ilink.feature.calendar.CalendarService;
+import com.example.ilink.feature.calendar.HolidayService;
 import com.example.ilink.feature.travel.AmapService;
 import com.example.ilink.tools.audio.AudioTranscribeTool;
 import com.example.ilink.tools.audio.SpeechTool;
 import com.example.ilink.tools.core.ToolManager;
 import com.example.ilink.tools.finance.ExpenseSplitTool;
+import com.example.ilink.tools.express.ExpressTool;
 import com.example.ilink.tools.food.FoodDeliveryTool;
 import com.example.ilink.tools.food.NearbyFoodTool;
 import com.example.ilink.tools.document.DocumentEditTool;
@@ -63,8 +77,11 @@ import com.example.ilink.model.AudioSource;
 import com.example.ilink.model.DocumentRecord;
 import com.example.ilink.routing.IntentRecognizer;
 import com.example.ilink.storage.MediaStore;
+import com.example.ilink.storage.MySqlStore;
+import com.example.ilink.storage.TodoStore;
 import com.example.ilink.storage.CalendarEventStore;
 import com.example.ilink.model.CalendarEvent;
+import com.example.ilink.model.ReminderDelivery;
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.core.model.WeixinMessage;
 
@@ -76,6 +93,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.HashSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -100,15 +118,26 @@ public final class MessageDispatcher implements AutoCloseable {
     private final AudioHistoryStore audioHistory = new AudioHistoryStore();
     private final DocumentSessionStore documentSessions = new DocumentSessionStore();
     private final PlanSessionStore planSessions = new PlanSessionStore();
+    private final MemoryService memoryService = new MemoryService();
     private final IntentRecognizer intentRecognizer = new IntentRecognizer(httpClient);
-    private final ChatService chatService = new ChatService(httpClient, chatHistory, sessions);
+    private final ChatService chatService = new ChatService(httpClient, chatHistory, sessions, memoryService);
     private final DocumentAiService documentAiService = new DocumentAiService(httpClient, chatHistory);
     private final AudioService audioService = new AudioService(httpClient);
     private final DocumentService documentService = new DocumentService();
     private final ImageService imageService = new ImageService(httpClient);
     private final WeatherService weatherService = new WeatherService(httpClient);
+    private final WebSearchService webSearchService = new WebSearchService(httpClient);
+    private final ShortLinkService shortLinkService = new ShortLinkService();
+    private final BilibiliSearchService bilibiliSearchService = new BilibiliSearchService(
+            webSearchService, shortLinkService);
+    private final NewsSearchService newsSearchService = new NewsSearchService(httpClient);
+    private final MediaKnowledgeService mediaKnowledgeService = new MediaKnowledgeService(
+            new BangumiService(httpClient), new MusicBrainzService(httpClient),
+            new LrcLibService(httpClient), webSearchService);
+    private final QqMailService qqMailService = new QqMailService();
     private final TaskPlanningService planningService = new TaskPlanningService(httpClient);
     private final ExpenseSplitService expenseSplitService = new ExpenseSplitService(httpClient);
+    private final ExpressService expressService = new ExpressService(httpClient);
     private final MediaStore mediaStore = new MediaStore();
     private final AmapService amapService = new AmapService(httpClient);
     private final ToolManager toolManager = new ToolManager()
@@ -146,13 +175,16 @@ public final class MessageDispatcher implements AutoCloseable {
             .register(new TaxTool())
             .register(new MortgageTool())
             .register(new ChineseMoneyTool())
-            .register(new RelationTool());
+            .register(new RelationTool())
+            .register(new ExpressTool(expressService));
+
     private final CalculatorService calculatorService = new CalculatorService(httpClient, toolManager);
     private final CalculatorTextRouter calculatorTextRouter = new CalculatorTextRouter(toolManager);
     private final Set<String> voiceReplyUsers = ConcurrentHashMap.newKeySet();
     private final ReplySender replySender = new ReplySender(
             audioService, mediaStore, audioHistory, toolManager, sessions);
     private final CalendarService calendarService = new CalendarService(new CalendarEventStore());
+    private final TodoService todoService = new TodoService(new TodoStore(), calendarService);
     private final CalendarWorkflow calendarWorkflow = new CalendarWorkflow(
             calendarService, new CalendarSessionStore(), replySender);
     private final HealthDietWorkflow healthDietWorkflow = new HealthDietWorkflow(
@@ -167,25 +199,39 @@ public final class MessageDispatcher implements AutoCloseable {
             chatHistory, sessions, documentSessions,
             intentRecognizer, chatService, weatherService,
             mediaStore, replySender, toolManager, planWorkflow, calculatorService, calendarWorkflow,
-            healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow);
+            healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, memoryService, todoService,
+            webSearchService, newsSearchService, bilibiliSearchService, mediaKnowledgeService, qqMailService);
     private final ScheduledExecutorService progressScheduler = Executors.newScheduledThreadPool(1);
     private final ScheduledExecutorService reminderScheduler = Executors.newScheduledThreadPool(1);
+    private final Set<String> knownUsers = ConcurrentHashMap.newKeySet();
+    private final Set<String> briefedUsers = ConcurrentHashMap.newKeySet();
+    private final LoginBriefingService loginBriefingService = new LoginBriefingService(
+            weatherService, calendarService, todoService, planSessions, sessions,
+            new HolidayService(), memoryService, qqMailService);
     private volatile ILinkClient activeClient;
 
     /** 创建分发器时就准备提醒扫描；真正发消息前必须等待登录客户端就绪。 */
     public MessageDispatcher() {
-        reminderScheduler.scheduleAtFixedRate(this::sendDueReminders, 10, 60, TimeUnit.SECONDS);
+        reminderScheduler.scheduleAtFixedRate(this::sendDueReminders, 1, 1, TimeUnit.SECONDS);
     }
 
     /** 登录成功后注入长连接，供没有新入站消息时的主动提醒使用。 */
     public void onClientReady(ILinkClient client) {
         this.activeClient = client;
+        briefedUsers.clear();
+        if (Config.LOGIN_BRIEFING_ENABLED) {
+            reminderScheduler.execute(() -> sendLoginBriefings(client));
+        }
     }
 
     /** 接收一条 SDK 消息，并异步提交给内部处理流程。 */
     public void handleMessage(ILinkClient client, WeixinMessage message) {
         activeClient = client;
         String userId = message.getFrom_user_id();
+        knownUsers.add(userId);
+        if (Config.LOGIN_BRIEFING_ENABLED) {
+            reminderScheduler.execute(() -> sendLoginBriefingForUser(client, userId));
+        }
         long startedAtMillis = System.currentTimeMillis();
         boolean voiceOnly = voiceReplyUsers.contains(userId)
                 || "voice".equalsIgnoreCase(Config.REPLY_MODE);
@@ -210,6 +256,7 @@ public final class MessageDispatcher implements AutoCloseable {
     private void handleMessageInternal(ILinkClient client, WeixinMessage message) {
         try {
             String userId = message.getFrom_user_id();
+            knownUsers.add(userId);
             client.startTyping(userId);
             List<com.github.wechat.ilink.sdk.core.model.MessageItem> items = message.getItem_list();
             if (items == null || items.isEmpty()) return;
@@ -350,14 +397,74 @@ public final class MessageDispatcher implements AutoCloseable {
     private void sendDueReminders() {
         ILinkClient client = activeClient;
         if (client == null || !client.isLoggedIn()) return;
-        for (CalendarEvent event : calendarService.claimDueEvents(LocalDateTime.now())) {
+        Set<String> sendableUsers = sendableUsers(client);
+        if (sendableUsers.isEmpty()) return;
+        for (ReminderDelivery delivery : calendarService.claimDueReminders(LocalDateTime.now(), sendableUsers)) {
+            CalendarEvent event = calendarService.getEvent(delivery.eventId());
+            if (event == null) {
+                calendarService.markReminderFailed(delivery, LocalDateTime.now(), "日历事件不存在");
+                continue;
+            }
             try {
-                String repeat = "none".equals(event.recurrence()) ? "" : "这是一项" + recurrenceName(event.recurrence()) + "提醒。";
-                replySender.sendReply(client, event.userId(), "提醒你：" + event.title() + "\n" + repeat);
+                String repeat = "none".equals(event.recurrence()) ? ""
+                        : "\n这是你设置的" + recurrenceName(event.recurrence()) + "提醒，我会继续替你记着。";
+                replySender.sendReply(client, event.userId(),
+                        "时间到了，来轻轻提醒你一下：" + event.title() + "。"
+                                + repeat + "\n愿你接下来的安排顺顺利利。" );
+                calendarService.markReminderSent(delivery, LocalDateTime.now());
             } catch (Exception e) {
                 System.err.println("[日历提醒] 发送失败: " + e.getMessage());
+                calendarService.markReminderFailed(delivery, LocalDateTime.now(), e.getMessage());
             }
         }
+    }
+
+    /** 每次机器人登录后，为所有已知用户发送简报并补发逾期提醒。 */
+    private void sendLoginBriefings(ILinkClient client) {
+        if (client == null || !client.isLoggedIn()) return;
+        Set<String> users = new HashSet<>(MySqlStore.getInstance().loadKnownUserIds());
+        users.addAll(knownUsers);
+        for (String userId : users) {
+            sendLoginBriefingForUser(client, userId);
+        }
+    }
+
+    /** 用户具备上下文时发送一次简报；失败则允许后续消息再次触发。 */
+    private void sendLoginBriefingForUser(ILinkClient client, String userId) {
+        if (client == null || !client.isLoggedIn() || !hasSendContext(client, userId)
+                || !briefedUsers.add(userId)) return;
+        List<ReminderDelivery> deliveries = calendarService.claimOverdueRemindersForUser(
+                userId, LocalDateTime.now());
+        try {
+            String draft = loginBriefingService.build(userId, deliveries);
+            client.sendText(userId, chatService.polishBriefing(userId, draft));
+            for (ReminderDelivery delivery : deliveries) {
+                calendarService.markReminderSent(delivery, LocalDateTime.now());
+            }
+        } catch (Exception e) {
+            briefedUsers.remove(userId);
+            System.err.println("[登录简报] 发送失败 user=" + userId + ": " + e.getMessage());
+            for (ReminderDelivery delivery : deliveries) {
+                calendarService.markReminderFailed(delivery, LocalDateTime.now(), e.getMessage());
+            }
+        }
+    }
+
+    private boolean hasSendContext(ILinkClient client, String userId) {
+        var resume = client.exportResumeContext();
+        if (resume == null) return false;
+        var context = resume.getConversationContextMap().get(userId);
+        return context != null && context.hasContextToken();
+    }
+
+    private Set<String> sendableUsers(ILinkClient client) {
+        var resume = client.exportResumeContext();
+        if (resume == null) return Set.of();
+        Set<String> users = new HashSet<>();
+        resume.getConversationContextMap().forEach((userId, context) -> {
+            if (context != null && context.hasContextToken()) users.add(userId);
+        });
+        return users;
     }
 
     private String recurrenceName(String recurrence) {

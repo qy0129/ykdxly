@@ -46,7 +46,7 @@ class IntentPolicyTest {
                 "normalizeAction", String.class, String.class, JsonObject.class, IntentContext.class);
         normalize.setAccessible(true);
         normalize.invoke(recognizer, "生成一张城市夜景图片", "生成一张城市夜景图片",
-                action, new IntentContext(false, false, false, true));
+                action, new IntentContext(false, false, false, true, false));
 
         assertEquals("draw", action.get("intent").getAsString());
         assertEquals("none", action.get("output_file_type").getAsString());
@@ -64,7 +64,7 @@ class IntentPolicyTest {
                 "normalizeAction", String.class, String.class, JsonObject.class, IntentContext.class);
         normalize.setAccessible(true);
         normalize.invoke(recognizer, "给我讲个笑话", "给我讲个笑话",
-                action, new IntentContext(false, false, false, true));
+                action, new IntentContext(false, false, false, true, false));
 
         assertEquals("chat", action.get("intent").getAsString());
         assertEquals("none", action.get("output_file_type").getAsString());

@@ -1,0 +1,128 @@
+package com.example.ilink.feature.memory;
+
+import com.example.ilink.model.UserMemory;
+import com.example.ilink.storage.MySqlStore;
+
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Locale;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/** 个人记忆的提取、保存、查询和遗忘服务。 */
+public final class MemoryService {
+
+    private static final Pattern LOCATION_PATTERN = Pattern.compile(
+            "(?:我住在|我常住|我的常住地是|我所在的城市是|我家在)([^，。！？]{1,30})");
+    private static final Pattern SENSITIVE_PATTERN = Pattern.compile(
+            ".*(密码|身份证|银行卡|信用卡|验证码|支付口令).*", Pattern.CASE_INSENSITIVE);
+
+    private final MySqlStore database = MySqlStore.getInstance();
+    private final Map<String, List<UserMemory>> cache = new ConcurrentHashMap<>();
+
+    public String remember(String userId, String request) {
+        String content = cleanRememberRequest(request);
+        if (content.isBlank()) return "你希望我记住什么呢？";
+        if (SENSITIVE_PATTERN.matcher(content).matches()) {
+            return "这类信息比较敏感，我不会把它保存到长期记忆里。";
+        }
+
+        MemoryValue memoryValue = classify(content);
+        LocalDateTime now = LocalDateTime.now();
+        UserMemory memory = new UserMemory(UUID.randomUUID().toString(), userId, memoryValue.type(),
+                memoryValue.key(), memoryValue.value(), request, 1.0, "active", now, now, null);
+        database.saveMemory(memory);
+        List<UserMemory> updated = new ArrayList<>(load(userId));
+        updated.removeIf(existing -> existing.key().equals(memory.key()));
+        updated.addFirst(memory);
+        cache.put(userId, List.copyOf(updated));
+        return "好，我记住了：" + memoryValue.value();
+    }
+
+    public String forget(String userId, String request) {
+        String keyword = request.replace("忘记", "").replace("忘掉", "")
+                .replace("不要记得", "").replace("我的", "").trim();
+        if (keyword.isBlank()) return "请告诉我需要忘掉哪一项记忆。";
+        keyword = normalizeForgetKeyword(keyword);
+        List<UserMemory> current = new ArrayList<>(load(userId));
+        String finalKeyword = keyword;
+        int before = current.size();
+        current.removeIf(memory -> memory.key().contains(finalKeyword) || memory.value().contains(finalKeyword));
+        int memoryCount = before - current.size();
+        int count = Math.max(memoryCount, database.forgetMemories(userId, keyword));
+        cache.put(userId, List.copyOf(current));
+        return count > 0 ? "好的，我已经忘掉与“" + keyword + "”相关的记忆。"
+                : "我没有找到与“" + keyword + "”相关的长期记忆。";
+    }
+
+    public String describe(String userId) {
+        List<UserMemory> memories = load(userId);
+        if (memories.isEmpty()) return "我还没有保存你的个人偏好。你可以说“记住我住在杭州”。";
+        StringBuilder text = new StringBuilder("我目前记得这些：\n");
+        for (UserMemory memory : memories) text.append("- ").append(memory.value()).append('\n');
+        return text.append("你随时可以让我忘掉其中任何一项。").toString().trim();
+    }
+
+    public String value(String userId, String key) {
+        return load(userId).stream()
+                .filter(memory -> key.equals(memory.key()))
+                .map(UserMemory::value)
+                .findFirst().orElse("");
+    }
+
+    /** 生成只包含稳定事实的上下文，不注入来源原文和敏感数据。 */
+    public String prompt(String userId) {
+        List<UserMemory> memories = load(userId);
+        if (memories.isEmpty()) return "";
+        StringBuilder prompt = new StringBuilder("用户已明确授权保存的长期记忆：\n");
+        for (UserMemory memory : memories.stream().limit(20).toList()) {
+            prompt.append("- ").append(memory.value()).append('\n');
+        }
+        return prompt.toString().trim();
+    }
+
+    private List<UserMemory> load(String userId) {
+        return cache.computeIfAbsent(userId, database::loadMemories);
+    }
+
+    private String cleanRememberRequest(String request) {
+        if (request == null) return "";
+        return request.replaceFirst("^(请)?(帮我)?记住[：:，, ]*", "")
+                .replaceFirst("^以后记得[：:，, ]*", "").trim();
+    }
+
+    private MemoryValue classify(String content) {
+        Matcher location = LOCATION_PATTERN.matcher(content);
+        if (location.find()) {
+            String city = location.group(1).trim();
+            return new MemoryValue("location", "home_location", city);
+        }
+        if (content.contains("怕冷")) return new MemoryValue("preference", "temperature_preference", "我比较怕冷");
+        if (content.contains("怕热")) return new MemoryValue("preference", "temperature_preference", "我比较怕热");
+        if (content.matches(".*(不吃|忌口|过敏).*")) {
+            return new MemoryValue("preference", stableKey("diet", content), content);
+        }
+        if (content.matches(".*(喜欢|偏好|习惯).*")) {
+            return new MemoryValue("preference", stableKey("preference", content), content);
+        }
+        if (content.matches(".*(目标|计划).*")) return new MemoryValue("goal", stableKey("goal", content), content);
+        return new MemoryValue("profile", stableKey("fact", content), content);
+    }
+
+    private String stableKey(String prefix, String content) {
+        return prefix + "_" + Integer.toUnsignedString(content.toLowerCase(Locale.ROOT).hashCode(), 16);
+    }
+
+    private String normalizeForgetKeyword(String keyword) {
+        if (keyword.matches(".*(住址|常住地|城市|居住地|家庭地址).*")) return "home_location";
+        if (keyword.matches(".*(怕冷|怕热|温度偏好).*")) return "temperature_preference";
+        return keyword;
+    }
+
+    private record MemoryValue(String type, String key, String value) {
+    }
+}

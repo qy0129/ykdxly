@@ -53,15 +53,17 @@ public final class WeatherTool implements Tool {
             return ToolResult.failure("没有找到地点“" + locationName + "”，请补充省、市或国家。");
         }
 
-        if (locations.size() > 1) {
+        WeatherLocation selected = WeatherService.clearlyPrimary(locations);
+        if (locations.size() > 1 && selected == null) {
             return ToolResult.success("找到多个同名地点，需要用户选择。",
                     new WeatherOutput(locations, day, null));
         }
+        if (selected == null) selected = locations.getFirst();
 
         int dayOffset = WeatherService.dayOffset(day);
         String weatherText = weatherService.queryWeather(
-                locations.get(0), dayOffset, WeatherService.period(day));
-        return ToolResult.success(weatherText, new WeatherOutput(locations, day, weatherText));
+                selected, dayOffset, WeatherService.period(day));
+        return ToolResult.success(weatherText, new WeatherOutput(List.of(selected), day, weatherText));
     }
 
     /** 天气工具额外返回给应用层的结构化数据。 */

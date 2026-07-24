@@ -13,6 +13,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -64,9 +68,46 @@ public final class WeatherService {
                     optionalString(item, "admin2"),
                     optionalString(item, "country"),
                     item.get("latitude").getAsDouble(),
-                    item.get("longitude").getAsDouble()));
+                    item.get("longitude").getAsDouble(),
+                    featureCodePriority(item),
+                    optInt(item, "population", 0)));
         }
+        rankLocations(locations);
         return locations;
+    }
+
+    /** 行政中心优先，其次按人口排序，保证明显的主要城市排在同名乡镇之前。 */
+    static void rankLocations(List<WeatherLocation> locations) {
+        locations.sort((left, right) -> {
+            int priority = Integer.compare(right.featurePriority(), left.featurePriority());
+            return priority != 0 ? priority : Integer.compare(right.population(), left.population());
+        });
+    }
+
+    public static WeatherLocation clearlyPrimary(List<WeatherLocation> locations) {
+        if (locations == null || locations.isEmpty()) return null;
+        WeatherLocation best = locations.getFirst();
+        return best.isClearlyPrimary() ? best : null;
+    }
+
+    private int featureCodePriority(JsonObject item) {
+        String code = optionalString(item, "feature_code");
+        if (code == null || code.isBlank()) return 0;
+        return switch (code) {
+            case "PPLC" -> 100;
+            case "PPLA" -> 90;
+            case "PPLA2" -> 80;
+            case "PPLA3" -> 70;
+            case "PPLA4" -> 60;
+            case "PPL" -> 10;
+            case "PPLX" -> 5;
+            default -> 1;
+        };
+    }
+
+    private int optInt(JsonObject object, String name, int fallback) {
+        JsonElement value = object.get(name);
+        return value == null || value.isJsonNull() ? fallback : value.getAsInt();
     }
 
     /**
@@ -82,9 +123,14 @@ public final class WeatherService {
     /** 查询指定地点某一天的全天或上午、下午、晚上天气。 */
     public String queryWeather(WeatherLocation location, int dayOffset, String period)
             throws IOException, InterruptedException {
-        if (dayOffset < 0 || dayOffset > 1) {
-            throw new IllegalArgumentException("仅支持查询今天或明天的天气");
-        }
+        return queryWeather(location, LocalDate.now().plusDays(dayOffset), period);
+    }
+
+    /** 查询今天起未来七天内的指定日期天气。 */
+    public String queryWeather(WeatherLocation location, LocalDate targetDate, String period)
+            throws IOException, InterruptedException {
+        int dayOffset = Math.toIntExact(ChronoUnit.DAYS.between(LocalDate.now(), targetDate));
+        if (dayOffset < 0 || dayOffset > 6) throw new IllegalArgumentException("仅支持查询未来七天内的天气");
 
         URI uri = URI.create(FORECAST_API_URL
                 + "?latitude=" + location.latitude()
@@ -92,14 +138,14 @@ public final class WeatherService {
                 + "&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m"
                 + "&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m"
                 + "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
-                + "&forecast_days=2&timezone=auto");
+                + "&forecast_days=7&timezone=auto");
         JsonObject response = getJson(uri);
         if (!"day".equals(period)) {
-            return buildPeriodWeather(location, response, dayOffset, period);
+            return appendMetadata(buildPeriodWeather(location, response, dayOffset, targetDate, period), response);
         }
         JsonObject daily = response.getAsJsonObject("daily");
 
-        String dayName = dayOffset == 0 ? "今天" : "明天";
+        String dayName = dayName(targetDate, dayOffset);
         int weatherCode = daily.getAsJsonArray("weather_code").get(dayOffset).getAsInt();
         double maxTemperature = daily.getAsJsonArray("temperature_2m_max").get(dayOffset).getAsDouble();
         double minTemperature = daily.getAsJsonArray("temperature_2m_min").get(dayOffset).getAsDouble();
@@ -119,12 +165,12 @@ public final class WeatherService {
                     .append("，风速：")
                     .append(formatNumber(current.get("wind_speed_10m").getAsDouble())).append(" km/h");
         }
-        return reply.toString();
+        return appendMetadata(reply.toString(), response);
     }
 
     /** 把小时预报汇总为一个易读的时段天气结果。 */
     private String buildPeriodWeather(WeatherLocation location, JsonObject response,
-                                      int dayOffset, String period) {
+                                      int dayOffset, LocalDate targetDate, String period) {
         int startHour = switch (period) {
             case "morning" -> 6;
             case "afternoon" -> 12;
@@ -157,7 +203,7 @@ public final class WeatherService {
             }
         }
 
-        String dayName = dayOffset == 0 ? "今天" : "明天";
+        String dayName = dayName(targetDate, dayOffset);
         String periodName = switch (period) {
             case "morning" -> "上午";
             case "afternoon" -> "下午";
@@ -178,11 +224,33 @@ public final class WeatherService {
         return weatherDay != null && weatherDay.startsWith("tomorrow") ? 1 : 0;
     }
 
+    /** 从路由或一级路由保存的日期字段中还原目标日期。 */
+    public static LocalDate date(String weatherDay) {
+        if (weatherDay == null || weatherDay.isBlank()) return LocalDate.now();
+        String value = weatherDay.contains("_") ? weatherDay.substring(0, weatherDay.indexOf('_')) : weatherDay;
+        if (value.matches("\\d{4}-\\d{2}-\\d{2}")) return LocalDate.parse(value);
+        return LocalDate.now().plusDays(dayOffset(weatherDay));
+    }
+
     /** 从路由字段中解析上午、下午、晚上；没有时段时返回全天。 */
     public static String period(String weatherDay) {
         if (weatherDay == null) return "day";
         int separator = weatherDay.indexOf('_');
         return separator < 0 ? "day" : weatherDay.substring(separator + 1);
+    }
+
+    private String appendMetadata(String text, JsonObject response) {
+        JsonObject current = response.getAsJsonObject("current");
+        String updatedAt = current == null ? "" : optionalString(current, "time");
+        if (updatedAt.isBlank()) updatedAt = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"));
+        return text + "\n数据更新时间：" + updatedAt + "（当地时间）\n来源：Open-Meteo";
+    }
+
+    private String dayName(LocalDate targetDate, int dayOffset) {
+        if (dayOffset == 0) return "今天";
+        if (dayOffset == 1) return "明天";
+        if (dayOffset == 2) return "后天";
+        return targetDate.format(DateTimeFormatter.ofPattern("M月d日"));
     }
 
     private JsonObject getJson(URI uri) throws IOException, InterruptedException {

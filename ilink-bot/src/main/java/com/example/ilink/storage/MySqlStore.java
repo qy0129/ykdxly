@@ -2,6 +2,11 @@ package com.example.ilink.storage;
 
 import com.example.ilink.config.Config;
 import com.example.ilink.model.CalendarEvent;
+import com.example.ilink.model.PlanTask;
+import com.example.ilink.model.ReminderDelivery;
+import com.example.ilink.model.TaskPlan;
+import com.example.ilink.model.TodoItem;
+import com.example.ilink.model.UserMemory;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -13,6 +18,8 @@ import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 /**
  * 可选的 MySQL 持久化存储。
@@ -238,6 +245,339 @@ public final class MySqlStore {
         return events;
     }
 
+    /** 在同一事务中保存计划及其全部任务。 */
+    public void saveTaskPlan(String userId, TaskPlan plan) {
+        if (!isAvailable()) return;
+        String planSql = "INSERT INTO plans (id, bot_id, user_id, goal, deadline, available_time, created_date, status) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE goal=?, deadline=?, available_time=?, "
+                + "status=?, updated_at=CURRENT_TIMESTAMP";
+        String deleteTasksSql = "DELETE FROM plan_tasks WHERE bot_id=? AND plan_id=?";
+        String taskSql = "INSERT INTO plan_tasks (id, plan_id, bot_id, user_id, title, description, "
+                + "estimated_minutes, priority, scheduled_date, status, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        try (Connection connection = openConnection()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement planStatement = connection.prepareStatement(planSql);
+                 PreparedStatement deleteStatement = connection.prepareStatement(deleteTasksSql);
+                 PreparedStatement taskStatement = connection.prepareStatement(taskSql)) {
+                String status = plan.tasks().isEmpty() || plan.completedCount() < plan.tasks().size()
+                        ? "active" : "completed";
+                planStatement.setString(1, plan.id());
+                planStatement.setString(2, Config.DATABASE_BOT_ID);
+                planStatement.setString(3, userId);
+                planStatement.setString(4, plan.goal());
+                planStatement.setDate(5, java.sql.Date.valueOf(plan.deadline()));
+                planStatement.setString(6, plan.availableTime());
+                planStatement.setDate(7, java.sql.Date.valueOf(plan.createdDate()));
+                planStatement.setString(8, status);
+                planStatement.setString(9, plan.goal());
+                planStatement.setDate(10, java.sql.Date.valueOf(plan.deadline()));
+                planStatement.setString(11, plan.availableTime());
+                planStatement.setString(12, status);
+                planStatement.executeUpdate();
+
+                deleteStatement.setString(1, Config.DATABASE_BOT_ID);
+                deleteStatement.setString(2, plan.id());
+                deleteStatement.executeUpdate();
+
+                for (int index = 0; index < plan.tasks().size(); index++) {
+                    PlanTask task = plan.tasks().get(index);
+                    taskStatement.setString(1, task.id());
+                    taskStatement.setString(2, plan.id());
+                    taskStatement.setString(3, Config.DATABASE_BOT_ID);
+                    taskStatement.setString(4, userId);
+                    taskStatement.setString(5, task.title());
+                    taskStatement.setString(6, task.description());
+                    taskStatement.setInt(7, task.estimatedMinutes());
+                    taskStatement.setString(8, task.priority());
+                    if (task.scheduledDate().isBlank()) taskStatement.setNull(9, java.sql.Types.DATE);
+                    else taskStatement.setDate(9, java.sql.Date.valueOf(task.scheduledDate()));
+                    taskStatement.setString(10, task.status());
+                    taskStatement.setInt(11, index);
+                    taskStatement.addBatch();
+                }
+                taskStatement.executeBatch();
+                connection.commit();
+            } catch (Exception e) {
+                connection.rollback();
+                throw e;
+            }
+        } catch (Exception e) {
+            logFailure("保存任务计划", e);
+        }
+    }
+
+    /** 读取用户最近一份仍在执行的计划，没有活动计划时返回最近一份历史计划。 */
+    public TaskPlan loadCurrentTaskPlan(String userId) {
+        if (!isAvailable()) return null;
+        String planSql = "SELECT id, goal, deadline, available_time, created_date FROM plans "
+                + "WHERE bot_id=? AND user_id=? ORDER BY (status='active') DESC, updated_at DESC LIMIT 1";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(planSql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, userId);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) return null;
+                String planId = result.getString("id");
+                return new TaskPlan(planId, result.getString("goal"),
+                        result.getDate("deadline").toLocalDate().toString(),
+                        result.getString("available_time"),
+                        result.getDate("created_date").toLocalDate().toString(),
+                        loadPlanTasks(connection, planId));
+            }
+        } catch (SQLException e) {
+            logFailure("读取任务计划", e);
+            return null;
+        }
+    }
+
+    private List<PlanTask> loadPlanTasks(Connection connection, String planId) throws SQLException {
+        String sql = "SELECT id, title, description, estimated_minutes, priority, scheduled_date, status "
+                + "FROM plan_tasks WHERE bot_id=? AND plan_id=? ORDER BY sort_order, id";
+        List<PlanTask> tasks = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, planId);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    java.sql.Date date = result.getDate("scheduled_date");
+                    tasks.add(new PlanTask(result.getString("id"), result.getString("title"),
+                            result.getString("description"), result.getInt("estimated_minutes"),
+                            result.getString("priority"), date == null ? "" : date.toLocalDate().toString(),
+                            result.getString("status")));
+                }
+            }
+        }
+        return tasks;
+    }
+
+    /** 保存计划任务与日历事件的关联。 */
+    public void linkPlanTaskToCalendar(String taskId, String calendarEventId) {
+        if (!isAvailable()) return;
+        String sql = "INSERT INTO task_calendar_links (task_id, calendar_event_id, bot_id) VALUES (?, ?, ?) "
+                + "ON DUPLICATE KEY UPDATE calendar_event_id=?";
+        try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, taskId);
+            statement.setString(2, calendarEventId);
+            statement.setString(3, Config.DATABASE_BOT_ID);
+            statement.setString(4, calendarEventId);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("保存计划日历关联", e);
+        }
+    }
+
+    /** 保存或更新一条待办。 */
+    public void saveTodo(TodoItem todo) {
+        if (!isAvailable()) return;
+        String sql = "INSERT INTO todos (id, bot_id, user_id, title, due_at, status, calendar_event_id, created_at, updated_at) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE title=?, due_at=?, status=?, "
+                + "calendar_event_id=?, updated_at=?";
+        try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, todo.id());
+            statement.setString(2, Config.DATABASE_BOT_ID);
+            statement.setString(3, todo.userId());
+            statement.setString(4, todo.title());
+            setTimestamp(statement, 5, todo.dueAt());
+            statement.setString(6, todo.status());
+            statement.setString(7, todo.calendarEventId());
+            statement.setTimestamp(8, Timestamp.valueOf(todo.createdAt()));
+            statement.setTimestamp(9, Timestamp.valueOf(todo.updatedAt()));
+            statement.setString(10, todo.title());
+            setTimestamp(statement, 11, todo.dueAt());
+            statement.setString(12, todo.status());
+            statement.setString(13, todo.calendarEventId());
+            statement.setTimestamp(14, Timestamp.valueOf(todo.updatedAt()));
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("保存待办", e);
+        }
+    }
+
+    /** 读取用户全部待办，状态筛选交给领域服务处理。 */
+    public List<TodoItem> loadTodos(String userId) {
+        if (!isAvailable()) return List.of();
+        String sql = "SELECT id, title, due_at, status, calendar_event_id, created_at, updated_at "
+                + "FROM todos WHERE bot_id=? AND user_id=? ORDER BY created_at";
+        List<TodoItem> todos = new ArrayList<>();
+        try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, userId);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    todos.add(new TodoItem(result.getString("id"), userId, result.getString("title"),
+                            toLocalDateTime(result.getTimestamp("due_at")), result.getString("status"),
+                            result.getString("calendar_event_id"),
+                            result.getTimestamp("created_at").toLocalDateTime(),
+                            result.getTimestamp("updated_at").toLocalDateTime()));
+                }
+            }
+        } catch (SQLException e) {
+            logFailure("读取待办", e);
+        }
+        return todos;
+    }
+
+    public void saveReminderDelivery(ReminderDelivery delivery) {
+        if (!isAvailable()) return;
+        String sql = "INSERT INTO reminder_deliveries (id, bot_id, event_id, user_id, scheduled_at, status, retry_count, "
+                + "next_retry_at, sent_at, error_message, dedup_key, locked_until) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                + "ON DUPLICATE KEY UPDATE status=?, retry_count=?, next_retry_at=?, sent_at=?, error_message=?, locked_until=?";
+        try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, delivery.id());
+            statement.setString(2, Config.DATABASE_BOT_ID);
+            statement.setString(3, delivery.eventId());
+            statement.setString(4, delivery.userId());
+            statement.setTimestamp(5, Timestamp.valueOf(delivery.scheduledAt()));
+            statement.setString(6, delivery.status());
+            statement.setInt(7, delivery.retryCount());
+            setTimestamp(statement, 8, delivery.nextRetryAt());
+            setTimestamp(statement, 9, delivery.sentAt());
+            statement.setString(10, delivery.errorMessage());
+            statement.setString(11, delivery.dedupKey());
+            setTimestamp(statement, 12, delivery.lockedUntil());
+            statement.setString(13, delivery.status());
+            statement.setInt(14, delivery.retryCount());
+            setTimestamp(statement, 15, delivery.nextRetryAt());
+            setTimestamp(statement, 16, delivery.sentAt());
+            statement.setString(17, delivery.errorMessage());
+            setTimestamp(statement, 18, delivery.lockedUntil());
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("保存提醒投递", e);
+        }
+    }
+
+    /** 启动时恢复未完成投递，发送中的过期租约也会由领取逻辑接管。 */
+    public List<ReminderDelivery> loadActiveReminderDeliveries() {
+        if (!isAvailable()) return List.of();
+        String sql = "SELECT id, event_id, user_id, scheduled_at, status, retry_count, next_retry_at, sent_at, "
+                + "error_message, dedup_key, locked_until FROM reminder_deliveries WHERE bot_id=? "
+                + "AND status IN ('pending','failed','sending')";
+        List<ReminderDelivery> deliveries = new ArrayList<>();
+        try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    deliveries.add(new ReminderDelivery(result.getString("id"), result.getString("event_id"),
+                            result.getString("user_id"), result.getTimestamp("scheduled_at").toLocalDateTime(),
+                            result.getString("status"), result.getInt("retry_count"),
+                            toLocalDateTime(result.getTimestamp("next_retry_at")),
+                            toLocalDateTime(result.getTimestamp("sent_at")), result.getString("error_message"),
+                            result.getString("dedup_key"), toLocalDateTime(result.getTimestamp("locked_until"))));
+                }
+            }
+        } catch (SQLException e) {
+            logFailure("读取提醒投递", e);
+        }
+        return deliveries;
+    }
+
+    public boolean reminderDeliveryExists(String dedupKey) {
+        if (!isAvailable()) return false;
+        String sql = "SELECT 1 FROM reminder_deliveries WHERE bot_id=? AND dedup_key=? LIMIT 1";
+        try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, dedupKey);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next();
+            }
+        } catch (SQLException e) {
+            logFailure("检查提醒去重键", e);
+            return false;
+        }
+    }
+
+    /** 查询所有已知用户，用于机器人登录后主动发送简报。 */
+    public Set<String> loadKnownUserIds() {
+        if (!isAvailable()) return Set.of();
+        String sql = "SELECT user_id FROM user_settings WHERE bot_id=? UNION "
+                + "SELECT user_id FROM chat_messages WHERE bot_id=? UNION "
+                + "SELECT user_id FROM calendar_events WHERE bot_id=? UNION "
+                + "SELECT user_id FROM plans WHERE bot_id=? UNION SELECT user_id FROM todos WHERE bot_id=?";
+        Set<String> users = new LinkedHashSet<>();
+        try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            for (int index = 1; index <= 5; index++) statement.setString(index, Config.DATABASE_BOT_ID);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) users.add(result.getString("user_id"));
+            }
+        } catch (SQLException e) {
+            logFailure("读取已知用户", e);
+        }
+        return users;
+    }
+
+    public void saveMemory(UserMemory memory) {
+        if (!isAvailable()) return;
+        String sql = "INSERT INTO user_memories (id, bot_id, user_id, memory_type, memory_key, memory_value, source, "
+                + "confidence, status, created_at, updated_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                + "ON DUPLICATE KEY UPDATE memory_value=?, source=?, confidence=?, status='active', "
+                + "updated_at=?, last_used_at=?";
+        try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, memory.id());
+            statement.setString(2, Config.DATABASE_BOT_ID);
+            statement.setString(3, memory.userId());
+            statement.setString(4, memory.type());
+            statement.setString(5, memory.key());
+            statement.setString(6, memory.value());
+            statement.setString(7, memory.source());
+            statement.setDouble(8, memory.confidence());
+            statement.setString(9, memory.status());
+            statement.setTimestamp(10, Timestamp.valueOf(memory.createdAt()));
+            statement.setTimestamp(11, Timestamp.valueOf(memory.updatedAt()));
+            setTimestamp(statement, 12, memory.lastUsedAt());
+            statement.setString(13, memory.value());
+            statement.setString(14, memory.source());
+            statement.setDouble(15, memory.confidence());
+            statement.setTimestamp(16, Timestamp.valueOf(memory.updatedAt()));
+            setTimestamp(statement, 17, memory.lastUsedAt());
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("保存个人记忆", e);
+        }
+    }
+
+    public List<UserMemory> loadMemories(String userId) {
+        if (!isAvailable()) return List.of();
+        String sql = "SELECT id, memory_type, memory_key, memory_value, source, confidence, status, created_at, "
+                + "updated_at, last_used_at FROM user_memories WHERE bot_id=? AND user_id=? AND status='active' "
+                + "ORDER BY updated_at DESC LIMIT 100";
+        List<UserMemory> memories = new ArrayList<>();
+        try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, userId);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    memories.add(new UserMemory(result.getString("id"), userId, result.getString("memory_type"),
+                            result.getString("memory_key"), result.getString("memory_value"), result.getString("source"),
+                            result.getDouble("confidence"), result.getString("status"),
+                            result.getTimestamp("created_at").toLocalDateTime(),
+                            result.getTimestamp("updated_at").toLocalDateTime(),
+                            toLocalDateTime(result.getTimestamp("last_used_at"))));
+                }
+            }
+        } catch (SQLException e) {
+            logFailure("读取个人记忆", e);
+        }
+        return memories;
+    }
+
+    public int forgetMemories(String userId, String keyword) {
+        if (!isAvailable()) return 0;
+        String sql = "UPDATE user_memories SET status='deleted', updated_at=CURRENT_TIMESTAMP "
+                + "WHERE bot_id=? AND user_id=? AND status='active' AND (memory_key LIKE ? OR memory_value LIKE ?)";
+        try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            String like = "%" + keyword + "%";
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, userId);
+            statement.setString(3, like);
+            statement.setString(4, like);
+            return statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("删除个人记忆", e);
+            return 0;
+        }
+    }
+
     /** 创建一个绑定到当前 bot 的自定义扫码二维码。 */
     private void initializeTables() throws SQLException {
         try (Connection connection = openConnection();
@@ -281,6 +621,89 @@ public final class MySqlStore {
                     + "INDEX idx_calendar_due (bot_id, status, next_reminder_at),"
                     + "INDEX idx_calendar_user_time (bot_id, user_id, start_at)"
                     + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS plans ("
+                    + "id VARCHAR(64) PRIMARY KEY,"
+                    + "bot_id VARCHAR(128) NOT NULL,"
+                    + "user_id VARCHAR(255) NOT NULL,"
+                    + "goal VARCHAR(1000) NOT NULL,"
+                    + "deadline DATE NOT NULL,"
+                    + "available_time VARCHAR(500) NOT NULL DEFAULT '',"
+                    + "created_date DATE NOT NULL,"
+                    + "status VARCHAR(16) NOT NULL DEFAULT 'active',"
+                    + "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+                    + "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+                    + "INDEX idx_plans_user_status (bot_id, user_id, status, updated_at)"
+                    + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS plan_tasks ("
+                    + "id VARCHAR(64) PRIMARY KEY,"
+                    + "plan_id VARCHAR(64) NOT NULL,"
+                    + "bot_id VARCHAR(128) NOT NULL,"
+                    + "user_id VARCHAR(255) NOT NULL,"
+                    + "title VARCHAR(500) NOT NULL,"
+                    + "description TEXT NULL,"
+                    + "estimated_minutes INT NOT NULL,"
+                    + "priority VARCHAR(16) NOT NULL,"
+                    + "scheduled_date DATE NULL,"
+                    + "status VARCHAR(16) NOT NULL DEFAULT 'pending',"
+                    + "sort_order INT NOT NULL DEFAULT 0,"
+                    + "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+                    + "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+                    + "INDEX idx_plan_tasks_plan (bot_id, plan_id, sort_order),"
+                    + "INDEX idx_plan_tasks_user_status (bot_id, user_id, status, scheduled_date)"
+                    + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS task_calendar_links ("
+                    + "task_id VARCHAR(64) PRIMARY KEY,"
+                    + "calendar_event_id VARCHAR(64) NOT NULL,"
+                    + "bot_id VARCHAR(128) NOT NULL,"
+                    + "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+                    + "UNIQUE KEY uk_task_calendar_event (bot_id, calendar_event_id)"
+                    + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS todos ("
+                    + "id VARCHAR(64) PRIMARY KEY,"
+                    + "bot_id VARCHAR(128) NOT NULL,"
+                    + "user_id VARCHAR(255) NOT NULL,"
+                    + "title VARCHAR(500) NOT NULL,"
+                    + "due_at DATETIME NULL,"
+                    + "status VARCHAR(16) NOT NULL DEFAULT 'pending',"
+                    + "calendar_event_id VARCHAR(64) NULL,"
+                    + "created_at DATETIME NOT NULL,"
+                    + "updated_at DATETIME NOT NULL,"
+                    + "INDEX idx_todos_user_status (bot_id, user_id, status, due_at)"
+                    + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS reminder_deliveries ("
+                    + "id VARCHAR(64) PRIMARY KEY,"
+                    + "bot_id VARCHAR(128) NOT NULL,"
+                    + "event_id VARCHAR(64) NOT NULL,"
+                    + "user_id VARCHAR(255) NOT NULL,"
+                    + "scheduled_at DATETIME NOT NULL,"
+                    + "status VARCHAR(16) NOT NULL,"
+                    + "retry_count INT NOT NULL DEFAULT 0,"
+                    + "next_retry_at DATETIME NULL,"
+                    + "sent_at DATETIME NULL,"
+                    + "error_message TEXT NULL,"
+                    + "dedup_key VARCHAR(255) NOT NULL,"
+                    + "locked_until DATETIME NULL,"
+                    + "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+                    + "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+                    + "UNIQUE KEY uk_reminder_dedup (bot_id, dedup_key),"
+                    + "INDEX idx_reminder_due (bot_id, status, scheduled_at, next_retry_at)"
+                    + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS user_memories ("
+                    + "id VARCHAR(64) PRIMARY KEY,"
+                    + "bot_id VARCHAR(128) NOT NULL,"
+                    + "user_id VARCHAR(255) NOT NULL,"
+                    + "memory_type VARCHAR(32) NOT NULL,"
+                    + "memory_key VARCHAR(128) NOT NULL,"
+                    + "memory_value TEXT NOT NULL,"
+                    + "source TEXT NULL,"
+                    + "confidence DOUBLE NOT NULL DEFAULT 1,"
+                    + "status VARCHAR(16) NOT NULL DEFAULT 'active',"
+                    + "created_at DATETIME NOT NULL,"
+                    + "updated_at DATETIME NOT NULL,"
+                    + "last_used_at DATETIME NULL,"
+                    + "UNIQUE KEY uk_user_memory_key (bot_id, user_id, memory_key),"
+                    + "INDEX idx_user_memories (bot_id, user_id, status, updated_at)"
+                    + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
         }
     }
 
@@ -293,7 +716,7 @@ public final class MySqlStore {
         return value == null ? null : value.toLocalDateTime();
     }
 
-    private Connection openConnection() throws SQLException {
+    Connection openConnection() throws SQLException {
         return DriverManager.getConnection(
                 Config.DATABASE_URL, Config.DATABASE_USERNAME, Config.DATABASE_PASSWORD);
     }
@@ -307,7 +730,7 @@ public final class MySqlStore {
         statement.addBatch();
     }
 
-    private void logFailure(String action, SQLException error) {
+    private void logFailure(String action, Exception error) {
         System.err.println("[Database] " + action + "失败，继续使用内存数据: " + error.getMessage());
     }
 
