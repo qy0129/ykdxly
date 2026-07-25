@@ -23,6 +23,7 @@ public final class UserSessionStore {
     private final Map<String, String> pendingDrawPrompts = new ConcurrentHashMap<>();
     private final Map<String, String> lastImagePaths = new ConcurrentHashMap<>();
     private final Map<String, String> pendingImagePaths = new ConcurrentHashMap<>();
+    private final Map<String, String> lastImageAnalyses = new ConcurrentHashMap<>();
     private final Map<String, List<WeatherLocation>> pendingWeatherLocations = new ConcurrentHashMap<>();
     private final Map<String, String> pendingWeatherDays = new ConcurrentHashMap<>();
     private final Map<String, String> currentLocations = new ConcurrentHashMap<>();
@@ -78,6 +79,7 @@ public final class UserSessionStore {
     /** 保存刚收到、等待用户说明处理方式的图片路径。 */
     public void setPendingImage(String userId, String path) {
         pendingImagePaths.put(userId, path);
+        lastImageAnalyses.remove(userId);
     }
 
     /** 查看待处理图片路径，但不清除它。 */
@@ -88,6 +90,20 @@ public final class UserSessionStore {
     /** 清除待处理图片状态。 */
     public void clearPendingImage(String userId) {
         pendingImagePaths.remove(userId);
+    }
+
+    /** 保存最近图片的完整识别结果，供后续生成文档时复用。 */
+    public void setLastImageAnalysis(String userId, String analysis) {
+        if (analysis == null || analysis.isBlank()) {
+            lastImageAnalyses.remove(userId);
+        } else {
+            lastImageAnalyses.put(userId, analysis);
+        }
+    }
+
+    /** 获取最近图片的完整识别结果。 */
+    public String getLastImageAnalysis(String userId) {
+        return lastImageAnalyses.get(userId);
     }
 
     /** 保存等待用户确认的同名天气地点。 */

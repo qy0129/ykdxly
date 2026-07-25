@@ -63,6 +63,7 @@ public final class ImageAnalysisTool implements Tool {
         if (reply == null || reply.isBlank()) {
             return ToolResult.failure("图片分析失败");
         }
+        sessions.setLastImageAnalysis(context.userId(), reply);
         sessions.clearPendingImage(context.userId());
         return ToolResult.success(reply, imagePath);
     }

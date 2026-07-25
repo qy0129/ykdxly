@@ -14,6 +14,10 @@ import com.example.ilink.feature.document.DocumentAiService;
 import com.example.ilink.feature.document.DocumentService;
 import com.example.ilink.feature.finance.ExpenseSplitService;
 import com.example.ilink.feature.image.ImageService;
+import com.example.ilink.feature.image.VisionService;
+import com.example.ilink.rag.EmbeddingService;
+import com.example.ilink.rag.Retriever;
+import com.example.ilink.rag.VectorStore;
 import com.example.ilink.feature.persona.Personas;
 import com.example.ilink.feature.planning.TaskPlanningService;
 import com.example.ilink.feature.calculator.CalculatorService;
@@ -101,9 +105,13 @@ public final class MessageDispatcher implements AutoCloseable {
     private final PlanSessionStore planSessions = new PlanSessionStore();
     private final IntentRecognizer intentRecognizer = new IntentRecognizer(httpClient);
     private final ChatService chatService = new ChatService(httpClient, chatHistory, sessions);
-    private final DocumentAiService documentAiService = new DocumentAiService(httpClient, chatHistory);
+    private final EmbeddingService embeddingService = new EmbeddingService(httpClient);
+    private final VectorStore vectorStore = new VectorStore();
+    private final Retriever retriever = new Retriever(embeddingService, vectorStore);
+    private final DocumentAiService documentAiService = new DocumentAiService(httpClient, chatHistory, retriever);
     private final AudioService audioService = new AudioService(httpClient);
-    private final DocumentService documentService = new DocumentService();
+    private final VisionService visionService = new VisionService(httpClient);
+    private final DocumentService documentService = new DocumentService(visionService);
     private final ImageService imageService = new ImageService(httpClient);
     private final WeatherService weatherService = new WeatherService(httpClient);
     private final TaskPlanningService planningService = new TaskPlanningService(httpClient);
@@ -116,7 +124,7 @@ public final class MessageDispatcher implements AutoCloseable {
             .register(new ImageAnalysisTool(imageService, sessions))
             .register(new ImageEditTool(imageService, sessions))
             .register(new DocumentQATool(documentAiService, documentSessions))
-            .register(new DocumentGenerateTool(documentAiService, documentService, documentSessions))
+                .register(new DocumentGenerateTool(documentAiService, documentService))
             .register(new DocumentEditTool(documentAiService, documentService, documentSessions))
             .register(new PlanDocumentTool(documentService))
             .register(new AudioTranscribeTool(audioService, audioHistory))
@@ -234,7 +242,27 @@ public final class MessageDispatcher implements AutoCloseable {
                 Path saved = mediaStore.save(userId, "image", image, "png");
                 sessions.setLastImage(userId, saved.toString());
                 sessions.setPendingImage(userId, saved.toString());
-                replySender.sendReply(client, userId, "我已经收到这张图片。你想让我做什么：分析内容、解答题目，还是修改图片？");
+
+                String base64 = Base64.getEncoder().encodeToString(image);
+                String description = null;
+                try {
+                    description = imageService.vision(
+                            "请完整识别图片中的文字、表格、行列、数字、单位和场景信息。"
+                                    + "第一行先写不超过50字的摘要，之后按原始顺序完整列出识别内容，不要省略。",
+                            base64);
+                } catch (Exception e) {
+                    System.err.println("[Image] 自动图片描述失败: " + e.getMessage());
+                }
+
+                if (description != null && !description.isBlank()) {
+                    sessions.setLastImageAnalysis(userId, description);
+                    chatHistory.addMedia(userId, "图片", saved.toString(), description);
+                    replySender.sendReply(client, userId, "收到图片。我看了一下："
+                            + imageAnalysisPreview(description)
+                            + "。你可以让我生成表格、整理成文档、分析内容或修改图片。");
+                } else {
+                    replySender.sendReply(client, userId, "我已经收到这张图片。你想让我做什么：分析内容、解答题目，还是修改图片？");
+                }
                 return;
             }
 
@@ -277,8 +305,8 @@ public final class MessageDispatcher implements AutoCloseable {
                 }
 
                 String extension = DocumentService.extension(fileName);
-                if (!Set.of("pdf", "doc", "docx", "txt", "md", "csv").contains(extension)) {
-                    replySender.sendReply(client, userId, "当前支持解析 PDF、DOC、DOCX、TXT、MD 和 CSV 文件");
+                if (!Set.of("pdf", "doc", "docx", "txt", "md", "csv", "xlsx", "xls", "pptx").contains(extension)) {
+                    replySender.sendReply(client, userId, "当前支持解析 PDF、DOC、DOCX、TXT、MD、CSV、XLSX、XLS 和 PPTX 文件");
                     return;
                 }
 
@@ -292,6 +320,7 @@ public final class MessageDispatcher implements AutoCloseable {
                             + "。你可以让我总结文件，或直接提问文件内容。");
                 } catch (Exception e) {
                     System.err.println("[Document] 解析失败: " + e.getMessage());
+                    e.printStackTrace();
                     replySender.sendReply(client, userId, "文件已收到，但暂时无法解析其中的文字内容");
                 }
                 return;
@@ -316,6 +345,11 @@ public final class MessageDispatcher implements AutoCloseable {
                 client.sendText(message.getFrom_user_id(), "网络波动了，请再发一次～");
             } catch (Exception ignored) {}
         }
+    }
+
+    private static String imageAnalysisPreview(String analysis) {
+        String firstLine = analysis.lines().findFirst().orElse(analysis).strip();
+        return firstLine.length() > 80 ? firstLine.substring(0, 80) + "..." : firstLine;
     }
 
     /** 关闭进度调度器，释放分发器持有的后台资源。 */

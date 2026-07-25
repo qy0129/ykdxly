@@ -62,25 +62,36 @@ public final class VisionService {
         messages.add(userMsg);
         body.add("messages", messages);
 
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(Config.API_BASE_URL))
-                .timeout(Config.REQ_TIMEOUT)
-                .header("Authorization", "Bearer " + Config.API_KEY)
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(body)))
-                .build();
-
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-        if (response.statusCode() != 200) {
-            return "图片分析失败 (HTTP " + response.statusCode() + ")";
+        Exception lastError = null;
+        int attempts = Math.max(1, Config.VISION_MAX_ATTEMPTS);
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            try {
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create(Config.API_BASE_URL))
+                        .timeout(Config.VISION_REQ_TIMEOUT)
+                        .header("Authorization", "Bearer " + Config.API_KEY)
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(body)))
+                        .build();
+                HttpResponse<String> response = httpClient.send(
+                        request, HttpResponse.BodyHandlers.ofString());
+                if (response.statusCode() != 200) {
+                    lastError = new IllegalStateException(
+                            "图片分析失败 (HTTP " + response.statusCode() + ")");
+                    continue;
+                }
+                JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
+                return json.getAsJsonArray("choices")
+                        .get(0).getAsJsonObject()
+                        .getAsJsonObject("message")
+                        .get("content").getAsString();
+            } catch (Exception e) {
+                lastError = e;
+                System.err.println("[Vision] 第 " + attempt + "/" + attempts
+                        + " 次请求失败: " + e.getMessage());
+            }
         }
-
-        JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
-        return json.getAsJsonArray("choices")
-                .get(0).getAsJsonObject()
-                .getAsJsonObject("message")
-                .get("content").getAsString();
+        throw lastError == null ? new IllegalStateException("图片分析失败") : lastError;
     }
 
 

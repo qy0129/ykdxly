@@ -40,12 +40,21 @@ public class Config {
     public static final Path MEDIA_DIR = Path.of(loadProperty("media.dir", "data/media"));
     public static final String FFMPEG_COMMAND = loadProperty("ffmpeg.command", "ffmpeg");
     public static final String SILK_DECODER_COMMAND = loadProperty("silk.decoder.command", "auto");
-    public static final String DOCUMENT_MODEL = loadProperty("document.model", "Qwen/Qwen3.5-9B");
+    public static final String DOCUMENT_MODEL = loadProperty("document.model", "deepseek-ai/DeepSeek-Coder-V2-Instruct");
     public static final int DOCUMENT_MAX_TEXT_CHARS = Integer.parseInt(loadProperty("document.max_text_chars", "40000"));
     public static final Duration REQ_TIMEOUT = Duration.ofSeconds(
             Long.parseLong(loadProperty("request.timeout.seconds", "120")));
     public static final Duration DOCUMENT_REQ_TIMEOUT = Duration.ofSeconds(
             Long.parseLong(loadProperty("document.request.timeout.seconds", "240")));
+    public static final Duration VISION_REQ_TIMEOUT = Duration.ofSeconds(
+            Long.parseLong(loadProperty("vision.request.timeout.seconds", "240")));
+    public static final int VISION_MAX_ATTEMPTS = Integer.parseInt(
+            loadProperty("vision.max_attempts", "2"));
+    /** AI 自由生成脚本存在主机执行风险，默认关闭，仅保留预置模板执行。 */
+    public static final boolean DOCUMENT_FREE_SCRIPT_ENABLED =
+            Boolean.parseBoolean(loadProperty("document.free_script.enabled", "false"));
+    public static final Duration DOCUMENT_SCRIPT_TIMEOUT = Duration.ofSeconds(
+            Long.parseLong(loadProperty("document.script.timeout.seconds", "45")));
     public static final boolean DATABASE_ENABLED =
             Boolean.parseBoolean(loadProperty("database.enabled", "false"));
     public static final String DATABASE_URL = loadProperty("database.url",
@@ -57,6 +66,10 @@ public class Config {
     public static final String DATABASE_BOT_ID = loadProperty("database.bot.id", "ilink-bot-1");
     /** 高德 Web 服务 Key；为空时保留文字出行建议，不生成地图图片。 */
     public static final String AMAP_API_KEY = loadProperty("amap.api.key", "");
+    public static final String EMBEDDING_API_URL = loadProperty("embedding.api.url",
+            "https://api.siliconflow.cn/v1/embeddings");
+    public static final String EMBEDDING_MODEL = loadProperty("embedding.model", "BAAI/bge-large-zh-v1.5");
+    public static final int EMBEDDING_DIMENSION = Integer.parseInt(loadProperty("embedding.dimension", "1024"));
 
     /** 读取 API Key；不存在或仍为模板值时终止启动。 */
     private static String loadApiKey() {

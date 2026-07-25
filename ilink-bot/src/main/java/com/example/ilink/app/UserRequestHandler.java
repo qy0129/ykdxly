@@ -8,6 +8,7 @@ import com.example.ilink.feature.chat.ChatService;
 import com.example.ilink.feature.calculator.CalculatorService;
 import com.example.ilink.feature.weather.WeatherLocation;
 import com.example.ilink.feature.weather.WeatherService;
+import com.example.ilink.feature.document.DocumentService;
 import com.example.ilink.model.DocumentRecord;
 import com.example.ilink.routing.IntentContext;
 import com.example.ilink.routing.IntentRecognizer;
@@ -406,11 +407,17 @@ public final class UserRequestHandler {
         }
     }
 
-    /** 处理文档问答、总结、生成和 DOCX 编辑请求。 */
+    /** 处理文档问答、总结、生成和编辑请求。 */
     private void handleDocumentAction(ILinkClient client, String userId, String userText,
                                       IntentResult route) throws Exception {
         DocumentRecord document = documentSessions.get(userId);
-        if (document == null && !"generate_file".equals(route.intent())) {
+        String pendingImage = sessions.peekPendingImage(userId);
+        String cachedImageAnalysis = usableImageAnalysis(sessions.getLastImageAnalysis(userId));
+        boolean hasImageSource = pendingImage != null
+                || (cachedImageAnalysis != null && explicitlyReferencesImage(userText));
+        boolean imageToNewDocument = isImageToNewDocumentRequest(
+                userText, route.intent(), hasImageSource);
+        if (document == null && !"generate_file".equals(route.intent()) && !imageToNewDocument) {
             replySender.sendReply(client, userId, "请先发送 PDF、DOC、DOCX 或 TXT 文件");
             return;
         }
@@ -427,13 +434,65 @@ public final class UserRequestHandler {
             return;
         }
 
-        String outputType = "pdf".equals(route.outputFileType()) ? "pdf"
-                : "docx".equals(route.outputFileType()) ? "docx" : defaultDocumentOutputType(document);
+        // ── 确定输出格式 ──
+        // 格式转换兜底：如果用户明确要求转格式，强制走编辑工具（不管意图识别结果）
+        String toolName;
+        String outputType;
+        boolean isFormatConversion = document != null
+                && userText.matches(".*(?:转[成为换]|改[成为]|变[成为]|导出[为成]?).*(?:Word|word|WORD|PDF|pdf|Excel|excel|PPT|ppt|DOCX|docx|xlsx|XLSX|pptx|PPTX|txt|TXT|md|csv).*");
+        if (!imageToNewDocument && (isFormatConversion || "document_edit".equals(route.intent()))) {
+            toolName = DocumentEditTool.NAME;
+            String specified = route.outputFileType();
+            // 从用户文本中推断输出格式
+            if (specified == null || specified.isBlank() || "none".equals(specified)) {
+                if (userText.matches(".*(?:Word|word|WORD|DOCX|docx).*")) specified = "docx";
+                else if (userText.matches(".*(?:PDF|pdf).*")) specified = "pdf";
+                else if (userText.matches(".*(?:Excel|excel|XLSX|xlsx).*")) specified = "xlsx";
+                else if (userText.matches(".*(?:PPT|ppt|PPTX|pptx).*")) specified = "pptx";
+                else if (userText.matches(".*(?:TXT|txt|文本).*")) specified = "txt";
+            }
+            outputType = (specified != null && !specified.isBlank() && !"none".equals(specified))
+                    ? specified
+                    : (document != null ? document.extension() : "docx");
+        } else {
+            toolName = DocumentGenerateTool.NAME;
+            outputType = imageToNewDocument && userText.matches(".*(?:表格|电子表格|Excel|excel|XLSX|xlsx).*") ? "xlsx"
+                    : "pdf".equals(route.outputFileType()) ? "pdf"
+                    : "xlsx".equals(route.outputFileType()) ? "xlsx"
+                    : "pptx".equals(route.outputFileType()) ? "pptx"
+                    : "docx";
+        }
+
         JsonObject arguments = new JsonObject();
         arguments.addProperty("request", userText);
         arguments.addProperty("output_type", outputType);
-        String toolName = "document_edit".equals(route.intent())
-                ? DocumentEditTool.NAME : DocumentGenerateTool.NAME;
+        if (imageToNewDocument) {
+            System.out.println("[文档路由] 数据源=本轮图片，动作=新建 " + outputType + " 文件");
+            String imageContent = cachedImageAnalysis;
+            if (imageContent == null) {
+                JsonObject imageArguments = new JsonObject();
+                imageArguments.addProperty("request",
+                        "完整识别图片中的所有文字、表格、行列、数字和单位。按原始顺序输出，不要省略，不要引用以前对话。");
+                imageArguments.addProperty("mode", "analyze");
+                ToolResult imageResult = toolManager.execute(
+                        ImageAnalysisTool.NAME, new ToolContext(userId), imageArguments);
+                imageContent = imageResult.success() ? usableImageAnalysis(imageResult.output()) : null;
+                if (imageContent == null) {
+                    replySender.sendReply(client, userId,
+                            "本轮图片识别请求超时或失败，且没有可复用的识别缓存。图片仍已保留，请稍后直接回复“重试生成表格”。");
+                    return;
+                }
+            } else {
+                System.out.println("[文档路由] 已复用图片首次识别缓存，不再重复调用视觉模型");
+            }
+            arguments.addProperty("source_content", imageContent);
+            arguments.addProperty("source_name", "用户刚发送的图片");
+        } else {
+            String lastImage = sessions.getLastImage(userId);
+            if (lastImage != null) {
+                arguments.addProperty("image_path", lastImage);
+            }
+        }
         ToolResult result = toolManager.execute(toolName, new ToolContext(userId), arguments);
         if (!result.success()) {
             replySender.sendReply(client, userId, result.output());
@@ -444,12 +503,48 @@ public final class UserRequestHandler {
         Path saved = mediaStore.save(userId, "file", output.bytes(), output.extension());
         chatHistory.addMedia(userId, "机器人生成文件", saved.toString(), output.caption());
         client.sendFile(userId, output.bytes(), output.fileName(), output.caption());
+
+        // 更新会话中的文档（下次编辑基于最新版本）
+        String newText = output.content();
+        if (newText == null || newText.isBlank()) {
+            newText = "[" + output.fileName() + " 已生成]";
+        }
+        documentSessions.set(userId, new DocumentRecord(
+                output.fileName(), output.extension(), saved.toString(), newText));
+        if (imageToNewDocument) {
+            sessions.clearPendingImage(userId);
+        }
     }
 
-    /** 根据原文档类型选择默认输出格式。 */
-    private String defaultDocumentOutputType(DocumentRecord document) {
-        if (document == null) return "docx";
-        return "pdf".equals(document.extension()) ? "pdf" : "docx";
+    static String usableImageAnalysis(String analysis) {
+        if (analysis == null || analysis.isBlank()) return null;
+        String normalized = analysis.strip();
+        return normalized.startsWith("图片分析失败") ? null : normalized;
+    }
+
+    static boolean explicitlyReferencesImage(String text) {
+        return text != null && text.matches(
+                ".*(?:图片|照片|截图|拍照|这张图|刚才的图|上一张图|图中内容|识别内容).*"
+        );
+    }
+
+    static boolean isImageToNewDocumentRequest(String text, String intent, boolean hasPendingImage) {
+        if (!hasPendingImage || text == null) return false;
+        boolean insertsIntoExisting = text.matches(
+                ".*(?:插入|添加到|放到|放入|放在).*(?:当前|原来|已有|文档|文件|第\\s*[0-9一二两三四五六七八九十百]+\\s*页).*"
+        );
+        if (insertsIntoExisting) return false;
+        boolean mentionsFile = text.matches(
+                ".*(?:表格|电子表格|Excel|excel|XLSX|xlsx|Word|word|DOCX|docx|PDF|pdf|文档|文件).*"
+        );
+        boolean asksToCreate = text.matches(
+                ".*(?:生成|制作|整理|做成|转成|转换成|写成|导出).*"
+        );
+        boolean referencesImage = text.matches(
+                ".*(?:图片|照片|截图|拍照|这张|上面|刚才|识别内容).*"
+        );
+        return mentionsFile && asksToCreate
+                && (referencesImage || "generate_file".equals(intent) || "document_edit".equals(intent));
     }
 
     /** 根据意图结果调用基础计算工具。 */
