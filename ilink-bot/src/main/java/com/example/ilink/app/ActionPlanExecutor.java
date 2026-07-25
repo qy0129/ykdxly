@@ -2,10 +2,10 @@ package com.example.ilink.app;
 
 import com.example.ilink.routing.IntentAction;
 import com.example.ilink.routing.IntentPlan;
+import com.example.ilink.conversation.ActionPlanSessionStore;
 
-import java.util.Queue;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * 统一执行一段话中的多个动作，并保存需要跨消息继续执行的剩余动作。
@@ -14,37 +14,67 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  */
 public final class ActionPlanExecutor {
 
-    private final ConcurrentHashMap<String, Queue<IntentAction>> pendingActions = new ConcurrentHashMap<>();
+    private final ActionPlanSessionStore sessions = new ActionPlanSessionStore();
 
     /** 使用新的动作计划替换该用户已完成的旧队列，并立即开始执行。 */
     public void start(String userId, IntentPlan plan, ActionRunner runner,
                       PendingChecker pendingChecker, ActionFailureHandler failureHandler) throws Exception {
-        pendingActions.put(userId, new ConcurrentLinkedQueue<>(plan.actions()));
+        sessions.save(userId, plan.actions(), null);
         drain(userId, runner, pendingChecker, failureHandler);
     }
 
     /** 用户完成地点、时间等补充后，从上次暂停的位置继续执行剩余动作。 */
     public void resume(String userId, ActionRunner runner,
                        PendingChecker pendingChecker, ActionFailureHandler failureHandler) throws Exception {
-        if (!pendingActions.containsKey(userId)) return;
+        if (sessions.get(userId) == null) return;
         drain(userId, runner, pendingChecker, failureHandler);
+    }
+
+    /** 用户明确要求重试时，只重放失败的那一个动作，避免重复已完成的动作。 */
+    public void retryFailed(String userId, ActionRunner runner, ActionFailureHandler failureHandler) throws Exception {
+        ActionPlanSessionStore.ActionPlanState state = sessions.get(userId);
+        if (state == null || state.failedAction() == null) return;
+        IntentAction failed = state.failedAction();
+        try {
+            runner.run(failed);
+            sessions.save(userId, state.remainingActions(), null);
+        } catch (Exception error) {
+            sessions.save(userId, state.remainingActions(), failed);
+            failureHandler.handle(failed, error);
+        }
+    }
+
+    public boolean hasFailedAction(String userId) {
+        return sessions.hasFailedAction(userId);
+    }
+
+    /** 新需求或用户取消时，放弃旧请求的剩余动作。 */
+    public void cancel(String userId) {
+        sessions.clear(userId);
     }
 
     /** 依次执行动作；发现任一工作流进入等待状态时，保留队列并立即暂停。 */
     private void drain(String userId, ActionRunner runner,
                        PendingChecker pendingChecker, ActionFailureHandler failureHandler) throws Exception {
-        Queue<IntentAction> actions = pendingActions.get(userId);
-        if (actions == null) return;
-        IntentAction action;
-        while ((action = actions.poll()) != null) {
+        ActionPlanSessionStore.ActionPlanState state = sessions.get(userId);
+        if (state == null) return;
+        List<IntentAction> actions = new ArrayList<>(state.remainingActions());
+        IntentAction failedAction = state.failedAction();
+        while (!actions.isEmpty()) {
+            IntentAction action = actions.getFirst();
             try {
                 runner.run(action);
+                actions.removeFirst();
+                sessions.save(userId, actions, failedAction);
             } catch (Exception error) {
+                actions.removeFirst();
+                failedAction = action;
+                sessions.save(userId, actions, failedAction);
                 failureHandler.handle(action, error);
             }
             if (pendingChecker.hasPending()) return;
         }
-        pendingActions.remove(userId, actions);
+        sessions.save(userId, actions, failedAction);
     }
 
     /** 执行单个业务动作的回调。 */

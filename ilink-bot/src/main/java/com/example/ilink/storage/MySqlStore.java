@@ -190,9 +190,10 @@ public final class MySqlStore {
     public void saveCalendarEvent(CalendarEvent event) {
         if (!isAvailable()) return;
         String sql = "INSERT INTO calendar_events (id, bot_id, user_id, title, type, start_at, next_reminder_at, "
-                + "recurrence, reminder_minutes, status, notes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                + "recurrence, recurrence_anchor, reminder_minutes, status, group_id, source, notes, created_at) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 + "ON DUPLICATE KEY UPDATE title=?, type=?, start_at=?, next_reminder_at=?, recurrence=?, "
-                + "reminder_minutes=?, status=?, notes=?";
+                + "recurrence_anchor=?, reminder_minutes=?, status=?, group_id=?, source=?, notes=?";
         try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, event.id());
             statement.setString(2, Config.DATABASE_BOT_ID);
@@ -202,18 +203,24 @@ public final class MySqlStore {
             statement.setTimestamp(6, Timestamp.valueOf(event.startAt()));
             setTimestamp(statement, 7, event.nextReminderAt());
             statement.setString(8, event.recurrence());
-            statement.setInt(9, event.reminderMinutes());
-            statement.setString(10, event.status());
-            statement.setString(11, event.notes());
-            statement.setTimestamp(12, Timestamp.valueOf(event.createdAt()));
-            statement.setString(13, event.title());
-            statement.setString(14, event.type());
-            statement.setTimestamp(15, Timestamp.valueOf(event.startAt()));
-            setTimestamp(statement, 16, event.nextReminderAt());
-            statement.setString(17, event.recurrence());
-            statement.setInt(18, event.reminderMinutes());
-            statement.setString(19, event.status());
-            statement.setString(20, event.notes());
+            statement.setString(9, event.recurrenceAnchor());
+            statement.setInt(10, event.reminderMinutes());
+            statement.setString(11, event.status());
+            statement.setString(12, event.groupId());
+            statement.setString(13, event.source());
+            statement.setString(14, event.notes());
+            statement.setTimestamp(15, Timestamp.valueOf(event.createdAt()));
+            statement.setString(16, event.title());
+            statement.setString(17, event.type());
+            statement.setTimestamp(18, Timestamp.valueOf(event.startAt()));
+            setTimestamp(statement, 19, event.nextReminderAt());
+            statement.setString(20, event.recurrence());
+            statement.setString(21, event.recurrenceAnchor());
+            statement.setInt(22, event.reminderMinutes());
+            statement.setString(23, event.status());
+            statement.setString(24, event.groupId());
+            statement.setString(25, event.source());
+            statement.setString(26, event.notes());
             statement.executeUpdate();
         } catch (SQLException e) {
             logFailure("保存日历事件", e);
@@ -223,8 +230,8 @@ public final class MySqlStore {
     /** 启动时恢复当前机器人保存的日历事件，确保重启不会丢失提醒。 */
     public List<CalendarEvent> loadCalendarEvents() {
         if (!isAvailable()) return List.of();
-        String sql = "SELECT id, user_id, title, type, start_at, next_reminder_at, recurrence, reminder_minutes, "
-                + "status, notes, created_at FROM calendar_events WHERE bot_id = ?";
+        String sql = "SELECT id, user_id, title, type, start_at, next_reminder_at, recurrence, recurrence_anchor, "
+                + "reminder_minutes, status, group_id, source, notes, created_at FROM calendar_events WHERE bot_id = ?";
         List<CalendarEvent> events = new ArrayList<>();
         try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, Config.DATABASE_BOT_ID);
@@ -234,8 +241,9 @@ public final class MySqlStore {
                             result.getString("title"), result.getString("type"),
                             result.getTimestamp("start_at").toLocalDateTime(),
                             toLocalDateTime(result.getTimestamp("next_reminder_at")),
-                            result.getString("recurrence"), result.getInt("reminder_minutes"),
-                            result.getString("status"), result.getString("notes"),
+                            result.getString("recurrence"), result.getString("recurrence_anchor"),
+                            result.getInt("reminder_minutes"), result.getString("status"),
+                            result.getString("group_id"), result.getString("source"), result.getString("notes"),
                             result.getTimestamp("created_at").toLocalDateTime()));
                 }
             }
@@ -296,6 +304,22 @@ public final class MySqlStore {
         } catch (SQLException e) {
             logFailure("读取用户状态", e);
             return "";
+        }
+    }
+
+    /** 删除已经完成或取消的轻量用户状态。 */
+    public void deleteUserState(String userId, String key) {
+        if (!isAvailable() || userId == null || userId.isBlank()
+                || key == null || key.isBlank()) return;
+        String sql = "DELETE FROM user_states WHERE bot_id=? AND user_id=? AND state_key=?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, userId);
+            statement.setString(3, key);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("删除用户状态", e);
         }
     }
 
@@ -417,6 +441,33 @@ public final class MySqlStore {
             statement.executeUpdate();
         } catch (SQLException e) {
             logFailure("保存计划日历关联", e);
+        }
+    }
+
+    public String loadCalendarEventIdForTask(String taskId) {
+        if (!isAvailable()) return "";
+        String sql = "SELECT calendar_event_id FROM task_calendar_links WHERE bot_id=? AND task_id=?";
+        try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, taskId);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? result.getString("calendar_event_id") : "";
+            }
+        } catch (SQLException e) {
+            logFailure("读取计划日历关联", e);
+            return "";
+        }
+    }
+
+    public void deletePlanTaskCalendarLink(String taskId) {
+        if (!isAvailable()) return;
+        String sql = "DELETE FROM task_calendar_links WHERE bot_id=? AND task_id=?";
+        try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, taskId);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("删除计划日历关联", e);
         }
     }
 
@@ -676,13 +727,26 @@ public final class MySqlStore {
                     + "start_at DATETIME NOT NULL,"
                     + "next_reminder_at DATETIME NULL,"
                     + "recurrence VARCHAR(16) NOT NULL,"
+                    + "recurrence_anchor VARCHAR(16) NOT NULL DEFAULT '',"
                     + "reminder_minutes INT NOT NULL DEFAULT 0,"
                     + "status VARCHAR(16) NOT NULL,"
+                    + "group_id VARCHAR(64) NOT NULL DEFAULT '',"
+                    + "source VARCHAR(32) NOT NULL DEFAULT '',"
                     + "notes TEXT NULL,"
                     + "created_at DATETIME NOT NULL,"
                     + "INDEX idx_calendar_due (bot_id, status, next_reminder_at),"
                     + "INDEX idx_calendar_user_time (bot_id, user_id, start_at)"
                     + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            ensureColumn(connection, statement, "calendar_events", "recurrence_anchor",
+                    "VARCHAR(16) NOT NULL DEFAULT '' AFTER recurrence");
+            ensureColumn(connection, statement, "calendar_events", "group_id",
+                    "VARCHAR(64) NOT NULL DEFAULT '' AFTER status");
+            ensureColumn(connection, statement, "calendar_events", "source",
+                    "VARCHAR(32) NOT NULL DEFAULT '' AFTER group_id");
+            statement.executeUpdate("UPDATE calendar_events SET recurrence_anchor=DAY(start_at) "
+                    + "WHERE recurrence='monthly' AND recurrence_anchor=''");
+            statement.executeUpdate("UPDATE calendar_events SET recurrence_anchor=CONCAT(MONTH(start_at), '-', DAY(start_at)) "
+                    + "WHERE recurrence='yearly' AND recurrence_anchor=''");
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS plans ("
                     + "id VARCHAR(64) PRIMARY KEY,"
                     + "bot_id VARCHAR(128) NOT NULL,"
@@ -766,6 +830,13 @@ public final class MySqlStore {
                     + "UNIQUE KEY uk_user_memory_key (bot_id, user_id, memory_key),"
                     + "INDEX idx_user_memories (bot_id, user_id, status, updated_at)"
                     + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        }
+    }
+
+    private void ensureColumn(Connection connection, Statement statement, String table,
+                              String column, String definition) throws SQLException {
+        try (ResultSet columns = connection.getMetaData().getColumns(connection.getCatalog(), null, table, column)) {
+            if (!columns.next()) statement.executeUpdate("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
         }
     }
 

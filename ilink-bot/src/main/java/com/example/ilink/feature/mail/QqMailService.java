@@ -4,6 +4,7 @@ import com.example.ilink.config.Config;
 import jakarta.mail.Address;
 import jakarta.mail.BodyPart;
 import jakarta.mail.Flags;
+import jakarta.mail.FetchProfile;
 import jakarta.mail.Folder;
 import jakarta.mail.Message;
 import jakarta.mail.Multipart;
@@ -29,6 +30,7 @@ public final class QqMailService {
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("M月d日 HH:mm");
     private static final int FETCH_LIMIT = 50;
     private static final int DISPLAY_LIMIT = 5;
+    private static final int BRIEFING_DISPLAY_LIMIT = 3;
 
     public boolean isConfigured() {
         return Config.QQ_MAIL_ENABLED
@@ -60,27 +62,44 @@ public final class QqMailService {
     public String briefing(String userId) {
         if (!canAccess(userId)) return "";
         try {
-            List<MailMessageView> unread = load("unread", "");
+            List<MailMessageView> unread = loadUnreadHeaders();
             if (unread.isEmpty()) return "邮箱里暂时没有未读邮件。";
-            long importantCount = unread.stream().filter(MailMessageView::important).count();
-            StringBuilder text = new StringBuilder("邮箱里有").append(unread.size()).append("封近期未读邮件");
-            if (importantCount > 0) text.append("，其中").append(importantCount).append("封可能比较重要");
-            text.append("：\n");
-            unread.stream().limit(3).forEach(mail -> text.append("- ")
-                    .append(mail.subject()).append("（").append(mail.from()).append("）\n"));
-            return text.toString().trim();
+            return formatBriefing(unread);
         } catch (Exception e) {
             System.err.println("[QQ邮箱简报] 查询失败: " + e.getMessage());
             return "邮箱暂时没有连接成功，稍后可以再查询。";
         }
     }
 
+    /** 登录简报只预取邮件头，避免为最多 50 封邮件下载完整正文。 */
+    private List<MailMessageView> loadUnreadHeaders() throws Exception {
+        Properties properties = mailProperties();
+        Session session = Session.getInstance(properties);
+        try (Store store = session.getStore("imaps")) {
+            store.connect(Config.QQ_MAIL_IMAP_HOST, Config.QQ_MAIL_IMAP_PORT,
+                    Config.QQ_MAIL_ADDRESS, Config.QQ_MAIL_AUTH_CODE);
+            try (Folder inbox = store.getFolder("INBOX")) {
+                inbox.open(Folder.READ_ONLY);
+                Message[] unread = inbox.search(new FlagTerm(new Flags(Flags.Flag.SEEN), false));
+                if (unread.length == 0) return List.of();
+
+                Message[] recent = Arrays.copyOfRange(unread, Math.max(0, unread.length - FETCH_LIMIT), unread.length);
+                FetchProfile profile = new FetchProfile();
+                profile.add(FetchProfile.Item.ENVELOPE);
+                profile.add(FetchProfile.Item.FLAGS);
+                inbox.fetch(recent, profile);
+
+                List<MailMessageView> messages = new ArrayList<>();
+                for (int index = recent.length - 1; index >= 0; index--) {
+                    messages.add(toHeaderView(recent[index]));
+                }
+                return List.copyOf(messages);
+            }
+        }
+    }
+
     private List<MailMessageView> load(String action, String keyword) throws Exception {
-        Properties properties = new Properties();
-        properties.setProperty("mail.store.protocol", "imaps");
-        properties.setProperty("mail.imaps.ssl.enable", "true");
-        properties.setProperty("mail.imaps.connectiontimeout", "10000");
-        properties.setProperty("mail.imaps.timeout", "15000");
+        Properties properties = mailProperties();
         Session session = Session.getInstance(properties);
         try (Store store = session.getStore("imaps")) {
             store.connect(Config.QQ_MAIL_IMAP_HOST, Config.QQ_MAIL_IMAP_PORT,
@@ -110,14 +129,38 @@ public final class QqMailService {
     }
 
     private MailMessageView toView(Message message) throws Exception {
+        MailMessageView header = toHeaderView(message);
+        return new MailMessageView(header.from(), header.subject(), header.sentAt(), header.unread(),
+                header.important(), shorten(extractText(message), 700));
+    }
+
+    private MailMessageView toHeaderView(Message message) throws Exception {
         String subject = message.getSubject() == null ? "（无主题）" : message.getSubject().trim();
         String from = formatAddresses(message.getFrom());
         LocalDateTime sentAt = message.getSentDate() == null ? LocalDateTime.now()
                 : LocalDateTime.ofInstant(message.getSentDate().toInstant(), ZoneId.systemDefault());
         boolean unread = !message.isSet(Flags.Flag.SEEN);
         boolean important = message.isSet(Flags.Flag.FLAGGED) || isImportant(subject);
-        return new MailMessageView(from, subject, sentAt, unread, important,
-                shorten(extractText(message), 700));
+        return new MailMessageView(from, subject, sentAt, unread, important, "");
+    }
+
+    static String formatBriefing(List<MailMessageView> unread) {
+        long importantCount = unread.stream().filter(MailMessageView::important).count();
+        StringBuilder text = new StringBuilder("邮箱里有").append(unread.size()).append("封近期未读邮件");
+        if (importantCount > 0) text.append("，其中").append(importantCount).append("封可能比较重要");
+        text.append("：\n");
+        unread.stream().limit(BRIEFING_DISPLAY_LIMIT).forEach(mail -> text.append("- ")
+                .append(mail.subject()).append("（").append(mail.from()).append("）\n"));
+        return text.toString().trim();
+    }
+
+    private Properties mailProperties() {
+        Properties properties = new Properties();
+        properties.setProperty("mail.store.protocol", "imaps");
+        properties.setProperty("mail.imaps.ssl.enable", "true");
+        properties.setProperty("mail.imaps.connectiontimeout", "10000");
+        properties.setProperty("mail.imaps.timeout", "15000");
+        return properties;
     }
 
     private String extractText(Part part) throws Exception {

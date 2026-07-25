@@ -54,8 +54,6 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Locale;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 用户文本请求处理器。
@@ -82,6 +80,7 @@ public final class UserRequestHandler {
     private final TravelWorkflow travelWorkflow;
     private final NearbyFoodWorkflow nearbyFoodWorkflow;
     private final FoodOrderWorkflow foodOrderWorkflow;
+    private final TaxiWorkflow taxiWorkflow;
     private final MemoryService memoryService;
     private final TodoService todoService;
     private final WebSearchService webSearchService;
@@ -91,7 +90,6 @@ public final class UserRequestHandler {
     private final QqMailService qqMailService;
     private final VisualCardWorkflow visualCardWorkflow;
     private final ActionPlanExecutor actionPlanExecutor = new ActionPlanExecutor();
-    private final Map<String, PendingFileExport> pendingFileExports = new ConcurrentHashMap<>();
 
     /** 注入所有业务服务，保持本类只负责请求编排。 */
     public UserRequestHandler(ChatHistoryStore chatHistory, UserSessionStore sessions,
@@ -103,6 +101,7 @@ public final class UserRequestHandler {
                                CalendarWorkflow calendarWorkflow, HealthDietWorkflow healthDietWorkflow,
                                TravelWorkflow travelWorkflow, NearbyFoodWorkflow nearbyFoodWorkflow,
                                FoodOrderWorkflow foodOrderWorkflow,
+                              TaxiWorkflow taxiWorkflow,
                               MemoryService memoryService, TodoService todoService,
                               WebSearchService webSearchService, NewsSearchService newsSearchService,
                               BilibiliSearchService bilibiliSearchService,
@@ -124,6 +123,7 @@ public final class UserRequestHandler {
         this.travelWorkflow = travelWorkflow;
         this.nearbyFoodWorkflow = nearbyFoodWorkflow;
         this.foodOrderWorkflow = foodOrderWorkflow;
+        this.taxiWorkflow = taxiWorkflow;
         this.memoryService = memoryService;
         this.todoService = todoService;
         this.webSearchService = webSearchService;
@@ -135,27 +135,40 @@ public final class UserRequestHandler {
     }
     /** 识别用户意图并调用对应功能处理器。 */
     public void handle(ILinkClient client, String userId, String text) throws Exception {
+        if (handleFailedActionRetry(client, userId, text)) return;
+
+        UserSessionStore.PendingFileExport pendingFileExport = sessions.getPendingFileExport(userId);
+        if (pendingFileExport != null) {
+            if (IntentPolicy.isFileTypeAnswer(text)) {
+                sessions.clearPendingFileExport(userId);
+                handleDocumentAction(client, userId, pendingFileExport.userText(),
+                        pendingFileExport.route(), IntentPolicy.explicitOutputFileType(text));
+                resumeActionPlan(client, userId);
+                return;
+            }
+            if ("取消".equals(text.trim())) {
+                sessions.clearPendingFileExport(userId);
+                actionPlanExecutor.cancel(userId);
+                replySender.sendReply(client, userId, "已取消生成文件。");
+                return;
+            }
+        }
+
+        if (hasBlockingPending(userId) && !acceptsBlockingReply(userId, text)) {
+            clearBlockingPending(userId);
+            actionPlanExecutor.cancel(userId);
+        }
+
         if (handleMemoryCommand(client, userId, text)) return;
         if (handleRepeatCommand(client, userId, text)) return;
         if (visualCardWorkflow.hasPending(userId) && visualCardWorkflow.handle(client, userId, text)) return;
         if (visualCardWorkflow.handle(client, userId, text)) return;
+        if (handlePendingExpress(client, userId, text)) return;
         if (handleDirectCommand(client, userId, text)) return;
 
-        PendingFileExport pendingFileExport = pendingFileExports.get(userId);
         if (pendingFileExport != null) {
-            if (IntentPolicy.isFileTypeAnswer(text)) {
-                pendingFileExports.remove(userId, pendingFileExport);
-                handleDocumentAction(client, userId, pendingFileExport.userText(),
-                        pendingFileExport.route(), IntentPolicy.explicitOutputFileType(text));
-                return;
-            }
-            if ("取消".equals(text.trim())) {
-                pendingFileExports.remove(userId, pendingFileExport);
-                replySender.sendReply(client, userId, "已取消生成文件。");
-                return;
-            }
-            // 用户提出了新要求，放弃旧的格式确认，避免状态劫持后续对话。
-            pendingFileExports.remove(userId, pendingFileExport);
+            // 用户提出了新要求，已在入口统一清除旧状态。
+            sessions.clearPendingFileExport(userId);
         }
 
         // 只对未完成会话使用本地状态机；所有新请求都必须先经过大模型语义路由。
@@ -216,6 +229,11 @@ public final class UserRequestHandler {
             resumeActionPlan(client, userId);
             return;
         }
+        if (taxiWorkflow.hasPending(userId)) {
+            taxiWorkflow.handlePending(client, userId, text);
+            resumeActionPlan(client, userId);
+            return;
+        }
 
         // 根据当前用户的临时状态构造上下文，让意图识别知道用户正在处理什么。
         IntentContext context = new IntentContext(
@@ -232,6 +250,7 @@ public final class UserRequestHandler {
 
         System.out.println("[意图识别] 共识别 " + plan.actions().size() + " 个动作："
                 + plan.actions().stream().map(action -> intentName(action.route().intent())).toList());
+        plan = coalesceDependentActions(plan);
         if (plan.actions().size() > 1) {
             String actionNames = String.join("、", plan.actions().stream()
                     .map(action -> intentName(action.route().intent())).toList());
@@ -325,8 +344,9 @@ public final class UserRequestHandler {
     }
 
     private boolean isExpressCommand(String text) {
+        if (text.matches(".*(打车|叫车|出租车|司机|行程).*")) return false;
         String trackingNo = ExpressService.extractTrackingNo(text);
-        boolean hasKeyword = text.matches(".*(快递|物流|包裹|运单|到哪了|到哪里了|是否签收).*" );
+        boolean hasKeyword = text.matches(".*(快递|物流|包裹|运单|订单|订单号|到哪了|到哪里了|是否签收).*" );
         if (hasKeyword) return true;
         if (trackingNo.isBlank()) return false;
         return text.replaceAll("[\\s，,。？?]", "").equalsIgnoreCase(trackingNo);
@@ -334,17 +354,108 @@ public final class UserRequestHandler {
 
     private void queryExpress(ILinkClient client, String userId, String text) throws Exception {
         String trackingNo = ExpressService.extractTrackingNo(text);
+        String orderNo = ExpressService.extractOrderNo(text);
         String phone = extractExpressPhone(text);
-        if (trackingNo.isBlank() && phone.isBlank()) {
-            replySender.sendReply(client, userId, "请把快递单号或手机号发给我。");
+        if (sessions.peekPendingImage(userId) != null
+                && trackingNo.isBlank() && orderNo.isBlank() && phone.isBlank()) {
+            sessions.setPendingExpress(userId, "reading_image", "");
+            handleExpressImage(client, userId);
             return;
         }
+
+        UserSessionStore.PendingExpressState pending = sessions.getPendingExpress(userId);
+        if (trackingNo.isBlank() && !phone.isBlank() && pending != null
+                && "awaiting_retry".equals(pending.stage())) {
+            trackingNo = pending.referenceNo();
+        }
+        if (trackingNo.isBlank() && pending != null && "awaiting_retry".equals(pending.stage())
+                && text.trim().matches("重试|再查一次|继续查询")) {
+            trackingNo = pending.referenceNo();
+        }
+        if (trackingNo.isBlank() && phone.isBlank()) {
+            sessions.setPendingExpress(userId, "awaiting_input", "");
+            replySender.sendReply(client, userId,
+                    "我记住你正在查询快递。请发送快递单号、运单号，或者直接发包含单号的图片。 ");
+            return;
+        }
+        executeExpressQuery(client, userId, text, trackingNo, phone);
+    }
+
+    private void executeExpressQuery(ILinkClient client, String userId, String sourceText,
+                                     String trackingNo, String phone) throws Exception {
         JsonObject arguments = new JsonObject();
         if (!trackingNo.isBlank()) arguments.addProperty("tracking_no", trackingNo);
         if (!phone.isBlank()) arguments.addProperty("phone", phone);
         ToolResult result = toolManager.execute(ExpressTool.NAME, new ToolContext(userId), arguments);
-        chatHistory.add(userId, text, result.output());
+        if (result.success()) sessions.clearPendingExpress(userId);
+        else if (!trackingNo.isBlank()) sessions.setPendingExpress(userId, "awaiting_retry", trackingNo);
+        chatHistory.add(userId, sourceText, result.output());
         visualCardWorkflow.sendTextResult(client, userId, "物流进度", trackingNo, result.output());
+        if (result.success()) {
+            ExpressTool.ExpressOutput output = result.dataAs(ExpressTool.ExpressOutput.class);
+            if (output != null && output.qrBytes() != null && output.qrBytes().length > 0) {
+                replySender.sendImage(client, userId, output.qrBytes(),
+                        "express_qr.png", "扫码查看物流追踪页面");
+            }
+        }
+    }
+
+    private boolean handlePendingExpress(ILinkClient client, String userId, String text) throws Exception {
+        if (!sessions.hasPendingExpress(userId)) return false;
+        String normalized = text == null ? "" : text.trim();
+        if ("取消".equals(normalized) || normalized.matches("(取消|结束)(快递|物流)?查询")) {
+            sessions.clearPendingExpress(userId);
+            replySender.sendReply(client, userId, "已取消这次快递查询。 ");
+            return true;
+        }
+        boolean related = isExpressCommand(normalized)
+                || !ExpressService.extractTrackingNo(normalized).isBlank()
+                || !ExpressService.extractOrderNo(normalized).isBlank()
+                || !extractExpressPhone(normalized).isBlank()
+                || normalized.matches("重试|再查一次|继续查询");
+        if (!related) {
+            sessions.clearPendingExpress(userId);
+            return false;
+        }
+        queryExpress(client, userId, normalized);
+        return true;
+    }
+
+    /** 用户处于快递查询状态时，图片到达后自动识别并继续查询。 */
+    public void handleExpressImage(ILinkClient client, String userId) throws Exception {
+        sessions.setPendingExpress(userId, "reading_image", "");
+        JsonObject arguments = new JsonObject();
+        arguments.addProperty("request", "只识别图片中的快递信息。请严格按以下格式输出，不要解释：\n"
+                + "快递单号：\n订单号：\n快递公司：\n没有的字段保持为空。");
+        arguments.addProperty("mode", "analyze");
+        ToolResult analysis = toolManager.execute(
+                ImageAnalysisTool.NAME, new ToolContext(userId), arguments);
+        if (!analysis.success()) {
+            sessions.setPendingExpress(userId, "awaiting_input", "");
+            replySender.sendReply(client, userId, "这张图片暂时没有识别成功，请发一张更清晰、包含完整单号的图片。 ");
+            return;
+        }
+
+        String recognized = analysis.output();
+        String imagePath = analysis.dataAs(String.class);
+        if (imagePath != null && !imagePath.isBlank()) {
+            chatHistory.addMedia(userId, "快递图片", imagePath, recognized);
+        }
+        String trackingNo = ExpressService.extractLabeledTrackingNo(recognized);
+        String orderNo = ExpressService.extractOrderNo(recognized);
+        if (!trackingNo.isBlank()) {
+            executeExpressQuery(client, userId, "图片识别到快递单号：" + trackingNo, trackingNo, "");
+            return;
+        }
+        if (!orderNo.isBlank()) {
+            sessions.setPendingExpress(userId, "awaiting_tracking_no", orderNo);
+            replySender.sendReply(client, userId, "我从图片里识别到了订单号“" + orderNo
+                    + "”，并已经记住。但查询物流需要快递单号或运单号，请继续发给我。 ");
+            return;
+        }
+        sessions.setPendingExpress(userId, "awaiting_input", "");
+        replySender.sendReply(client, userId,
+                "图片里只识别到“订单号”等文字，没有识别到实际号码。请发完整清晰的截图，或者直接输入快递单号。 ");
     }
 
     private String extractExpressPhone(String text) {
@@ -498,6 +609,7 @@ public final class UserRequestHandler {
             case "weather" -> handleWeather(client, userId, actionText, route);
             case "task_plan" -> planWorkflow.createPlan(client, userId, actionText, route);
             case "travel_plan" -> travelWorkflow.handle(client, userId, route);
+            case "taxi_trip" -> taxiWorkflow.handle(client, userId, route, actionText);
             case "diet_plan" -> healthDietWorkflow.handle(client, userId, route);
             case "nearby_food" -> nearbyFoodWorkflow.handle(client, userId, route);
             case "calendar_event" -> calendarWorkflow.handle(client, userId, actionText, route);
@@ -543,13 +655,85 @@ public final class UserRequestHandler {
 
     /** 判断是否有必须先由用户补充地点、时间或偏好的工作流。 */
     private boolean hasBlockingPending(String userId) {
-        return sessions.hasPendingWeatherLocations(userId)
+        return sessions.hasPendingExpress(userId)
+                || sessions.hasPendingWeatherLocations(userId)
                 || planWorkflow.hasPendingPlan(userId)
+                || planWorkflow.hasPendingCalendarSync(userId)
                 || calendarWorkflow.hasPending(userId)
                 || healthDietWorkflow.hasPending(userId)
                 || travelWorkflow.hasPendingLocation(userId)
                 || nearbyFoodWorkflow.hasPendingLocation(userId)
-                || foodOrderWorkflow.hasPending(userId);
+                || foodOrderWorkflow.hasPending(userId)
+                || taxiWorkflow.hasPending(userId)
+                || sessions.hasPendingFileExport(userId);
+    }
+
+    private boolean handleFailedActionRetry(ILinkClient client, String userId, String text) throws Exception {
+        if (!actionPlanExecutor.hasFailedAction(userId)
+                || !text.trim().matches("(重试|再试一次|重试刚才失败的.*)")) return false;
+        actionPlanExecutor.retryFailed(userId,
+                action -> executeAction(client, userId, action),
+                (action, error) -> handleActionFailure(client, userId, action, error));
+        replySender.sendReply(client, userId, "已重试刚才失败的" + "操作。" );
+        return true;
+    }
+
+    /** 仅把真正属于当前补充流程的输入交给工作流，其他输入视为新需求。 */
+    private boolean acceptsBlockingReply(String userId, String text) {
+        String value = text == null ? "" : text.trim();
+        if ("取消".equals(value)) return true;
+        if (sessions.hasPendingExpress(userId)) {
+            return isExpressCommand(value) || !ExpressService.extractTrackingNo(value).isBlank()
+                    || !ExpressService.extractOrderNo(value).isBlank() || !extractExpressPhone(value).isBlank()
+                    || value.matches("重试|再查一次|继续查询");
+        }
+        if (sessions.hasPendingWeatherLocations(userId)) return value.matches("\\d+") || !looksLikeNewRequest(value);
+        if (planWorkflow.hasPendingPlan(userId)) return DateTimeParser.parse(value) != null;
+        if (planWorkflow.hasPendingCalendarSync(userId)) {
+            return value.contains("同步") || value.contains("确认") || value.contains("记录") || value.contains("是")
+                    || value.contains("否");
+        }
+        if (calendarWorkflow.hasPending(userId)) return value.matches("\\d+") || DateTimeParser.parse(value) != null;
+        if (healthDietWorkflow.hasPending(userId)) return !looksLikeNewRequest(value);
+        if (travelWorkflow.hasPendingLocation(userId)) return travelWorkflow.acceptsPendingReply(value);
+        if (nearbyFoodWorkflow.hasPendingLocation(userId)) return nearbyFoodWorkflow.acceptsPendingReply(userId, value);
+        if (foodOrderWorkflow.hasPending(userId)) return foodOrderWorkflow.acceptsPendingReply(value);
+        if (taxiWorkflow.hasPending(userId)) return taxiWorkflow.acceptsPendingReply(userId, value);
+        return sessions.hasPendingFileExport(userId) && IntentPolicy.isFileTypeAnswer(value);
+    }
+
+    private boolean looksLikeNewRequest(String text) {
+        return text.matches(".*(天气|快递|物流|待办|新闻|路线|导航|日历|提醒|查一下|查询|搜索|帮我规划|点外卖).*" );
+    }
+
+    private void clearBlockingPending(String userId) {
+        sessions.clearPendingExpress(userId);
+        sessions.clearPendingWeatherLocations(userId);
+        planWorkflow.clearPending(userId);
+        calendarWorkflow.clearPending(userId);
+        healthDietWorkflow.clearPending(userId);
+        travelWorkflow.clearPending(userId);
+        nearbyFoodWorkflow.clearPending(userId);
+        foodOrderWorkflow.clearPending(userId);
+        taxiWorkflow.clearPending(userId);
+        sessions.clearPendingFileExport(userId);
+    }
+
+    /** 路线动作已负责创建带导航链接的日历，去掉同一行程的重复日历动作。 */
+    private IntentPlan coalesceDependentActions(IntentPlan plan) {
+        IntentAction travel = plan.actions().stream()
+                .filter(action -> "travel_plan".equals(action.route().intent()))
+                .filter(action -> !action.route().travelDepartureTime().isBlank())
+                .findFirst().orElse(null);
+        if (travel == null) return plan;
+        List<IntentAction> actions = plan.actions().stream().filter(action -> {
+            if (!"calendar_event".equals(action.route().intent())
+                    || !"create".equals(action.route().calendarAction())) return true;
+            String title = action.route().calendarTitle();
+            return title == null || (!title.contains(travel.route().travelOrigin())
+                    && !title.contains(travel.route().travelDestination()));
+        }).toList();
+        return actions.size() == plan.actions().size() ? plan : new IntentPlan(actions);
     }
 
     /** 搜索哔哩哔哩内容；具体视频不可用时服务会返回官方搜索入口。 */
@@ -875,7 +1059,7 @@ public final class UserRequestHandler {
         String outputType = "pdf".equals(forcedOutputType) ? "pdf"
                 : "docx".equals(forcedOutputType) ? "docx" : "none";
         if ("generate_file".equals(route.intent()) && "none".equals(outputType)) {
-            pendingFileExports.put(userId, new PendingFileExport(userText, route));
+            sessions.setPendingFileExport(userId, userText, route);
             replySender.sendReply(client, userId, "你想生成 PDF 还是 Word 文件？回复格式即可，回复“取消”可结束。");
             return;
         }
@@ -905,8 +1089,6 @@ public final class UserRequestHandler {
         return "pdf".equals(document.extension()) ? "pdf" : "docx";
     }
 
-    private record PendingFileExport(String userText, IntentResult route) {
-    }
 
     /** 根据意图结果调用基础计算工具。 */
     private void handleCalculator(ILinkClient client, String userId,
@@ -955,6 +1137,7 @@ public final class UserRequestHandler {
             case "document_edit" -> "编辑文档";
             case "weather" -> "天气";
             case "travel_plan" -> "出行规划";
+            case "taxi_trip" -> "滴滴叫车";
             case "diet_plan" -> "饮食规划";
             case "nearby_food" -> "附近美食";
             case "calendar_event" -> "日历事件";

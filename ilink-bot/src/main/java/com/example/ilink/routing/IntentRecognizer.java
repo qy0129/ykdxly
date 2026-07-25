@@ -7,9 +7,13 @@ import com.example.ilink.feature.memory.MemoryService;
 import com.example.ilink.feature.persona.Personas;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.Strictness;
+import com.google.gson.stream.JsonReader;
 
+import java.io.StringReader;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -30,7 +34,7 @@ public final class IntentRecognizer {
             "chat", "draw", "persona_switch", "audio_transcribe", "image_action", "draw_size",
             "document_summary", "document_question", "generate_file", "document_edit", "weather",
             "task_plan", "plan_adjust", "plan_progress", "calculator", "expense_split",
-            "deadline_countdown", "travel_plan", "diet_plan", "nearby_food", "calendar_event",
+            "deadline_countdown", "travel_plan", "taxi_trip", "diet_plan", "nearby_food", "calendar_event",
             "planning_capabilities", "bilibili_search", "media_lookup", "email_query", "food_order");
 
     private final HttpClient httpClient;
@@ -54,44 +58,21 @@ public final class IntentRecognizer {
 
     /** 调用路由模型，把一段自然语言转换为一个或多个有序动作。 */
     public IntentPlan recognize(String userId, String userMessage, IntentContext context) {
+        IntentPlan localCalendarPlan = localCalendarCreatePlan(userMessage);
+        if (localCalendarPlan != null) return localCalendarPlan;
+
         // 路由模型只输出结构化意图，业务执行由 UserRequestHandler 负责。
         try {
-            JsonObject body = new JsonObject();
-            body.addProperty("model", Config.ROUTER_MODEL);
-            body.addProperty("temperature", 0.1);
-            body.addProperty("enable_thinking", false);
-
-            JsonArray messages = new JsonArray();
-            JsonObject system = new JsonObject();
-            system.addProperty("role", "system");
-            system.addProperty("content", buildSystemPrompt(userId, context));
-            messages.add(system);
-            if (history != null) history.addHistoryMessages(messages, userId, userMessage);
-            JsonObject user = new JsonObject();
-            user.addProperty("role", "user");
-            user.addProperty("content", userMessage);
-            messages.add(user);
-            body.add("messages", messages);
-
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(Config.API_BASE_URL))
-                    .timeout(Config.REQ_TIMEOUT)
-                    .header("Authorization", "Bearer " + Config.API_KEY)
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(body)))
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() != 200) {
-                System.err.println("[意图识别] 请求失败，HTTP "
-                        + response.statusCode() + "：" + response.body());
-                return null;
+            String content = requestRoute(buildRequestBody(userId, userMessage, context, true, false));
+            JsonObject result;
+            try {
+                result = parseJsonObject(content);
+            } catch (IllegalArgumentException firstError) {
+                System.err.println("[意图识别] 首次返回格式异常，自动重试："
+                        + summarizeModelOutput(content));
+                content = requestRoute(buildRequestBody(userId, userMessage, context, false, true));
+                result = parseJsonObject(content);
             }
-
-            JsonObject responseJson = JsonParser.parseString(response.body()).getAsJsonObject();
-            String content = responseJson.getAsJsonArray("choices").get(0).getAsJsonObject()
-                    .getAsJsonObject("message").get("content").getAsString();
-            JsonObject result = parseJsonObject(content);
             List<IntentAction> actions = new ArrayList<>();
             if (result.has("actions") && result.get("actions").isJsonArray()) {
                 JsonArray actionArray = result.getAsJsonArray("actions");
@@ -126,8 +107,102 @@ public final class IntentRecognizer {
             return new IntentPlan(actions);
         } catch (Exception e) {
             System.err.println("[意图识别] 识别失败：" + e.getMessage());
-            return null;
+            return fallbackChatPlan(userMessage);
         }
+    }
+
+    private JsonObject buildRequestBody(String userId, String userMessage, IntentContext context,
+                                        boolean includeHistory, boolean retry) {
+        JsonObject body = new JsonObject();
+        body.addProperty("model", Config.ROUTER_MODEL);
+        body.addProperty("temperature", 0.1);
+        body.addProperty("enable_thinking", false);
+        JsonObject responseFormat = new JsonObject();
+        responseFormat.addProperty("type", "json_object");
+        body.add("response_format", responseFormat);
+
+        JsonArray messages = new JsonArray();
+        JsonObject system = new JsonObject();
+        system.addProperty("role", "system");
+        system.addProperty("content", buildSystemPrompt(userId, context));
+        messages.add(system);
+        if (includeHistory && history != null) {
+            history.addHistoryMessages(messages, userId, userMessage);
+        }
+        JsonObject user = new JsonObject();
+        user.addProperty("role", "user");
+        user.addProperty("content", retry
+                ? "重新识别以下请求。只输出一个JSON对象，不要输出解释、Markdown或思考过程：\n" + userMessage
+                : userMessage);
+        messages.add(user);
+        body.add("messages", messages);
+        return body;
+    }
+
+    private String requestRoute(JsonObject body) throws Exception {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(Config.API_BASE_URL))
+                .timeout(Config.REQ_TIMEOUT)
+                .header("Authorization", "Bearer " + Config.API_KEY)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(body)))
+                .build();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("请求失败，HTTP " + response.statusCode() + "：" + response.body());
+        }
+        JsonObject responseJson = JsonParser.parseString(response.body()).getAsJsonObject();
+        JsonElement content = responseJson.getAsJsonArray("choices").get(0).getAsJsonObject()
+                .getAsJsonObject("message").get("content");
+        return content == null || content.isJsonNull() ? "" : content.getAsString();
+    }
+
+    private String summarizeModelOutput(String content) {
+        String summary = content == null ? "<null>" : content.replace('\n', ' ').replace('\r', ' ').trim();
+        return summary.length() <= 300 ? summary : summary.substring(0, 300) + "...";
+    }
+
+    private IntentPlan fallbackChatPlan(String userMessage) {
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "chat");
+        return new IntentPlan(List.of(new IntentAction(userMessage, toIntentResult(action))));
+    }
+
+    /** 明确的提醒创建由本地规则直达日历，避免模型偶发的非 JSON 输出中断提醒。 */
+    private IntentPlan localCalendarCreatePlan(String message) {
+        if (!isExplicitCalendarCreateRequest(message)) return null;
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "calendar_event");
+        action.addProperty("calendar_action", "create");
+        action.addProperty("calendar_title", calendarTitle(message));
+        action.addProperty("calendar_time", message.trim());
+        action.addProperty("calendar_recurrence", calendarRecurrence(message));
+        action.addProperty("calendar_time_type", "auto");
+        return new IntentPlan(List.of(new IntentAction(message, toIntentResult(action))));
+    }
+
+    private static boolean isExplicitCalendarCreateRequest(String message) {
+        if (message == null || message.isBlank() || !message.contains("提醒")) return false;
+        return !message.matches(".*(取消|删除|完成|延后|稍后|查询|查看|列表|有什么|哪些).*" );
+    }
+
+    private static String calendarTitle(String message) {
+        String title = message.trim();
+        int reminder = title.lastIndexOf("提醒");
+        if (reminder >= 0) title = title.substring(reminder + "提醒".length());
+        title = title.replaceFirst("^(我(?:该|要|记得)?|一下(?:我)?)", "")
+                .replaceFirst("^(今天|明天|后天|每天|每日|每周|每月|每年)?\\s*(上午|中午|下午|晚上|今晚|早上)?\\s*\\d{1,2}(?::\\d{2})?\\s*(点|时)?(?:半|\\d{1,2}分?)?\\s*", "")
+                .replaceAll("[了吧呀啊。！!？?]+$", "")
+                .trim();
+        return title.isBlank() ? "日历提醒" : title;
+    }
+
+    private static String calendarRecurrence(String message) {
+        if (message.contains("每天") || message.contains("每日") || message.contains("天天")) return "daily";
+        if (message.contains("每周") || message.contains("每星期") || message.contains("每礼拜")) return "weekly";
+        if (message.contains("每月")) return "monthly";
+        if (message.contains("每年")) return "yearly";
+        return "none";
     }
 
     /** 记录被规则层纠正的模型意图，方便复盘误判而不输出完整用户上下文。 */
@@ -589,6 +664,9 @@ public final class IntentRecognizer {
                 + "没有途经点时travel_stops必须为空数组；‘一个小时’等可用时长填入time_budget_minutes。"
                 + "中途想吃面、咖啡等填入meal_keyword；明确出发时间填travel_departure_time。"
                 + "即使用户说‘帮我规划’，只要核心是从A到B出行，必须是travel_plan，绝不能是task_plan。\n");
+        prompt.append("17a. taxi_trip：用户明确要求打车、叫车、查询打车订单、取消打车订单或询问司机位置时使用。"
+                + "新叫车填写travel_origin、travel_destination、origin_city、destination_city；城市从明确地标可确定时填写。"
+                + "用户要求叫车时只负责进入报价和确认流程，绝不能自动确认下单。\n");
         prompt.append("18. diet_plan：用户要求饮食规划、外卖推荐、减脂餐、增肌餐或控糖餐时使用。"
                 + "diet_goal 填减脂、增肌、控糖、维持体重或空字符串；不要把附近餐厅搜索判为diet_plan。\n");
         prompt.append("19. nearby_food：用户说自己在某位置、询问附近有什么好吃的、附近餐厅或附近外卖时使用。"
@@ -637,7 +715,7 @@ public final class IntentRecognizer {
                 + "没有明确生成图片要求时intent绝不能为draw。");
         prompt.append("\n输出必须是以下结构，且每个动作包含全部字段："
                 + "{\"actions\":[{\"action_text\":\"当前动作对应的用户原始要求\","
-                + "\"intent\":\"chat|draw|persona_switch|audio_transcribe|image_action|draw_size|document_summary|document_question|generate_file|document_edit|weather|task_plan|plan_adjust|plan_progress|calculator|expense_split|deadline_countdown|travel_plan|diet_plan|nearby_food|calendar_event|planning_capabilities|bilibili_search|media_lookup|email_query|food_order\","
+                + "\"intent\":\"chat|draw|persona_switch|audio_transcribe|image_action|draw_size|document_summary|document_question|generate_file|document_edit|weather|task_plan|plan_adjust|plan_progress|calculator|expense_split|deadline_countdown|travel_plan|taxi_trip|diet_plan|nearby_food|calendar_event|planning_capabilities|bilibili_search|media_lookup|email_query|food_order\","
                 + "\"en_prompt\":\"\",\"cn_description\":\"\","
                 + "\"image_size\":\"none|1024x1024|768x1024|1024x576\","
                 + "\"reply_mode\":\"keep|text|voice|both\","
@@ -677,7 +755,20 @@ public final class IntentRecognizer {
                 json = json.substring(firstLineEnd + 1, closingFence).trim();
             }
         }
-        return JsonParser.parseString(json).getAsJsonObject();
+        int firstObject = json.indexOf('{');
+        int lastObject = json.lastIndexOf('}');
+        if (firstObject < 0 || lastObject < firstObject) {
+            throw new IllegalArgumentException("路由模型未返回 JSON 对象");
+        }
+        json = json.substring(firstObject, lastObject + 1);
+        try (JsonReader reader = new JsonReader(new StringReader(json))) {
+            reader.setStrictness(Strictness.LENIENT);
+            JsonElement parsed = JsonParser.parseReader(reader);
+            if (!parsed.isJsonObject()) throw new IllegalArgumentException("路由模型返回的不是 JSON 对象");
+            return parsed.getAsJsonObject();
+        } catch (java.io.IOException error) {
+            throw new IllegalArgumentException("路由模型 JSON 读取失败", error);
+        }
     }
 
     /** 读取可选字符串字段，模型省略时返回空字符串。 */

@@ -22,6 +22,8 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -95,6 +97,11 @@ public final class PlanWorkflow {
         return planSessions.hasPendingCalendarSync(userId);
     }
 
+    public void clearPending(String userId) {
+        planSessions.clearPending(userId);
+        planSessions.clearPendingCalendarSync(userId);
+    }
+
     /** 使用用户新回复的截止时间继续完成上一次规划请求。 */
     public void completePendingPlan(ILinkClient client, String userId,
                                     String deadlineText) throws Exception {
@@ -164,11 +171,14 @@ public final class PlanWorkflow {
     /** 调用计划调整工具，并返回调整后的完整计划。 */
     public void adjustPlan(ILinkClient client, String userId, String userText,
                            IntentResult route) throws Exception {
+        TaskPlan previous = planSessions.get(userId);
         JsonObject arguments = new JsonObject();
         arguments.addProperty("change_request", userText);
         ToolResult result = toolManager.execute(
                 PlanAdjustTool.NAME, new ToolContext(userId), arguments);
         if (result.success()) {
+            TaskPlan adjusted = result.dataAs(TaskPlan.class);
+            if (previous != null && adjusted != null) syncAdjustedCalendar(userId, previous, adjusted);
             chatHistory.add(userId, userText, result.output());
         }
         sendPlanResult(client, userId, result.output(),
@@ -202,11 +212,18 @@ public final class PlanWorkflow {
             return;
         }
         int count = 0;
+        int skipped = 0;
+        LocalDateTime now = LocalDateTime.now();
         for (PlanTask task : plan.tasks()) {
             try {
                 LocalDate date = LocalDate.parse(task.scheduledDate());
+                LocalDateTime eventTime = LocalDateTime.of(date, LocalTime.of(20, 0));
+                if (!eventTime.isAfter(now)) {
+                    skipped++;
+                    continue;
+                }
                 var event = calendarService.create(userId, task.title(), "学习",
-                        LocalDateTime.of(date, LocalTime.of(20, 0)), "none", 0);
+                        eventTime, "none", 0, "", plan.id(), "plan");
                 planSessions.linkTaskToCalendar(task.id(), event.id());
                 count++;
             } catch (Exception ignored) {
@@ -214,7 +231,49 @@ public final class PlanWorkflow {
             }
         }
         planSessions.clearPendingCalendarSync(userId);
-        replySender.sendReply(client, userId, "已将 " + count + " 项任务同步到日历，每天晚上 20:00 会提醒当天任务。");
+        String skippedText = skipped == 0 ? "" : "，另有 " + skipped + " 项任务时间已过，未创建提醒";
+        replySender.sendReply(client, userId, "已将 " + count + " 项任务同步到日历" + skippedText
+                + "。有效任务会在当天晚上 20:00 提醒。");
+    }
+
+    private void syncAdjustedCalendar(String userId, TaskPlan previous, TaskPlan adjusted) {
+        Map<String, PlanTask> adjustedById = new HashMap<>();
+        adjusted.tasks().forEach(task -> adjustedById.put(task.id(), task));
+        boolean wasSynced = previous.tasks().stream()
+                .anyMatch(task -> !planSessions.calendarEventIdForTask(task.id()).isBlank());
+        if (!wasSynced) return;
+
+        for (PlanTask oldTask : previous.tasks()) {
+            String eventId = planSessions.calendarEventIdForTask(oldTask.id());
+            if (eventId.isBlank()) continue;
+            PlanTask task = adjustedById.get(oldTask.id());
+            LocalDateTime eventTime = planEventTime(task);
+            if (task == null || "completed".equals(task.status()) || eventTime == null
+                    || !eventTime.isAfter(LocalDateTime.now())) {
+                calendarService.cancel(eventId);
+                planSessions.unlinkTaskFromCalendar(oldTask.id());
+            } else {
+                calendarService.reschedule(eventId, task.title(), eventTime);
+            }
+        }
+
+        for (PlanTask task : adjusted.tasks()) {
+            if (!planSessions.calendarEventIdForTask(task.id()).isBlank() || "completed".equals(task.status())) continue;
+            LocalDateTime eventTime = planEventTime(task);
+            if (eventTime == null || !eventTime.isAfter(LocalDateTime.now())) continue;
+            var event = calendarService.create(userId, task.title(), "学习", eventTime,
+                    "none", 0, "", adjusted.id(), "plan");
+            planSessions.linkTaskToCalendar(task.id(), event.id());
+        }
+    }
+
+    private LocalDateTime planEventTime(PlanTask task) {
+        if (task == null || task.scheduledDate().isBlank()) return null;
+        try {
+            return LocalDateTime.of(LocalDate.parse(task.scheduledDate()), LocalTime.of(20, 0));
+        } catch (RuntimeException error) {
+            return null;
+        }
     }
 
     /** 根据用户要求发送计划文本、文件和语音。 */

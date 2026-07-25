@@ -35,6 +35,10 @@ public final class ExpressService {
     private static final URI ENTERPRISE_QUERY_URL = URI.create("https://poll.kuaidi100.com/poll/query.do");
     private static final Pattern TRACKING_PATTERN = Pattern.compile(
             "(?i)(?<![A-Z0-9])([A-Z]{2,6}[A-Z0-9-]{6,34}|\\d{12,30})(?![A-Z0-9])");
+    private static final Pattern LABELED_TRACKING_PATTERN = Pattern.compile(
+            "(?i)(?:快递单号|运单号|物流单号|tracking(?:\\s*no)?)\\s*[：:]?\\s*([A-Z0-9-]{8,40})");
+    private static final Pattern ORDER_PATTERN = Pattern.compile(
+            "(?i)(?:订单号|订单编号|order(?:\\s*no)?)\\s*[：:]?\\s*([A-Z0-9-]{6,40})");
 
     private final HttpClient httpClient;
     private final String customer;
@@ -239,7 +243,9 @@ public final class ExpressService {
             if (data != null) {
                 for (JsonElement element : data) {
                     JsonObject item = element.getAsJsonObject();
-                    items.add(new TrackingItem(firstString(item, "ftime", "time"), string(item, "context"),
+                    String time = string(item, "time");
+                    String ftime = firstString(item, "ftime", "time");
+                    items.add(new TrackingItem(time, ftime, string(item, "context"),
                             firstString(item, "areaName", "location"), string(item, "areaCode")));
                 }
             }
@@ -267,6 +273,26 @@ public final class ExpressService {
         if (text == null || text.isBlank()) return "";
         Matcher matcher = TRACKING_PATTERN.matcher(text.replace(" ", ""));
         return matcher.find() ? normalizeTrackingNo(matcher.group(1)) : "";
+    }
+
+    public static String extractLabeledTrackingNo(String text) {
+        if (text == null || text.isBlank()) return "";
+        Matcher matcher = LABELED_TRACKING_PATTERN.matcher(text.replace("**", ""));
+        if (!matcher.find()) return "";
+        String value = normalizeTrackingNo(matcher.group(1));
+        return value.matches(".*\\d.*") && isTrackingNo(value) ? value : "";
+    }
+
+    public static String extractOrderNo(String text) {
+        if (text == null || text.isBlank()) return "";
+        String normalized = text.replace("**", "").trim();
+        Matcher matcher = ORDER_PATTERN.matcher(normalized);
+        if (matcher.find()) {
+            String value = normalizeTrackingNo(matcher.group(1));
+            return value.matches(".*\\d.*") ? value : "";
+        }
+        String compact = normalized.replaceAll("[\\s，,。？?]", "");
+        return compact.matches("(?i)(?=.*\\d)[A-Z0-9-]{6,40}") ? normalizeTrackingNo(compact) : "";
     }
 
     static List<CourierInfo> guessCouriers(String trackingNo) {
@@ -386,9 +412,13 @@ public final class ExpressService {
     public record CourierInfo(String code, String name) {
     }
 
-    public record TrackingItem(String time, String context, String areaName, String areaCode) {
+    public record TrackingItem(String time, String ftime, String context, String areaName, String areaCode) {
+        public TrackingItem(String time, String context, String areaName, String areaCode) {
+            this(time, time, context, areaName, areaCode);
+        }
+
         public TrackingItem(String time, String context) {
-            this(time, context, "", "");
+            this(time, time, context, "", "");
         }
     }
 

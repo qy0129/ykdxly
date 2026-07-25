@@ -4,13 +4,17 @@ import com.example.ilink.feature.calendar.CalendarService;
 import com.example.ilink.feature.travel.AmapService;
 import com.example.ilink.feature.travel.RouteMealPlanner;
 import com.example.ilink.routing.IntentResult;
+import com.example.ilink.storage.MySqlStore;
 import com.example.ilink.tools.planning.DateTimeParser;
 import com.github.wechat.ilink.sdk.ILinkClient;
+import com.google.gson.Gson;
+import com.google.gson.JsonSyntaxException;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /** 负责多段出行路线、地图输出、顺路餐饮和出发提醒的衔接。 */
@@ -21,6 +25,11 @@ public final class TravelWorkflow {
     private final CalendarService calendarService;
     private final ReplySender replySender;
     private final Map<String, PendingTravel> pendingTravels = new ConcurrentHashMap<>();
+    private final Set<String> loadedPendingUsers = ConcurrentHashMap.newKeySet();
+    private final MySqlStore database = MySqlStore.getInstance();
+    private final Gson gson = new Gson();
+    private static final String PENDING_TRAVEL_KEY = "pending_travel";
+    private static final long PENDING_TTL_MILLIS = 24L * 60 * 60 * 1000;
 
     /** 注入路线、日历和回复服务。 */
     public TravelWorkflow(AmapService amapService, CalendarService calendarService, ReplySender replySender) {
@@ -32,7 +41,7 @@ public final class TravelWorkflow {
 
     /** 判断用户是否正在确认起点、途经点或终点。 */
     public boolean hasPendingLocation(String userId) {
-        return pendingTravels.containsKey(userId);
+        return pendingTravel(userId) != null;
     }
 
     /** 把模型提取的起点、途经点和终点组成有序地点链并开始逐个确认。 */
@@ -65,7 +74,7 @@ public final class TravelWorkflow {
                     route.mealKeyword().trim(), route.originCity(), route.destinationCity(), List.of());
             askForCurrentLocation(client, userId, travel);
         } catch (Exception error) {
-            pendingTravels.remove(userId);
+            clearPendingTravel(userId);
             replySender.sendReply(client, userId,
                     "地点服务暂时不可用。请稍后再试，或补充更完整的城市、园区或车站名称。");
             System.err.println("[出行规划] 地点解析失败: " + error.getMessage());
@@ -74,10 +83,10 @@ public final class TravelWorkflow {
 
     /** 处理用户对当前地点候选项的序号选择。 */
     public void handleLocationSelection(ILinkClient client, String userId, String text) throws Exception {
-        PendingTravel pending = pendingTravels.get(userId);
+        PendingTravel pending = pendingTravel(userId);
         if (pending == null) return;
         if ("取消".equals(text.trim())) {
-            pendingTravels.remove(userId);
+            clearPendingTravel(userId);
             replySender.sendReply(client, userId, "已取消本次出行规划。");
             return;
         }
@@ -88,10 +97,19 @@ public final class TravelWorkflow {
         } catch (NumberFormatException error) {
             replySender.sendReply(client, userId, "请回复地点序号，或回复“取消”。");
         } catch (Exception error) {
-            pendingTravels.remove(userId);
+            clearPendingTravel(userId);
             replySender.sendReply(client, userId, "地点确认失败，请重新发送完整的出行需求。");
             System.err.println("[出行规划] 地点确认失败: " + error.getMessage());
         }
+    }
+
+    public boolean acceptsPendingReply(String text) {
+        String value = text == null ? "" : text.trim();
+        return "取消".equals(value) || value.matches("\\d+");
+    }
+
+    public void clearPending(String userId) {
+        clearPendingTravel(userId);
     }
 
     /** 搜索当前待确认地点；唯一结果自动确认，多条结果必须让用户选择。 */
@@ -99,7 +117,7 @@ public final class TravelWorkflow {
         String locationName = travel.currentLocationName();
         List<AmapService.Place> candidates = locationCandidates(locationName, travel.cityForCurrentLocation());
         if (candidates.isEmpty()) {
-            pendingTravels.remove(userId);
+            clearPendingTravel(userId);
             replySender.sendReply(client, userId,
                     "没有找到“" + locationName + "”，请补充城市或更完整的地点名称后重新发送。");
             return;
@@ -110,7 +128,7 @@ public final class TravelWorkflow {
         }
 
         PendingTravel waiting = travel.withCandidates(candidates);
-        pendingTravels.put(userId, waiting);
+        savePendingTravel(userId, waiting);
         StringBuilder prompt = new StringBuilder("找到多个可能的").append(travel.currentLocationRole())
                 .append("“").append(locationName).append("”，请回复序号确认：");
         for (int index = 0; index < candidates.size(); index++) {
@@ -134,7 +152,7 @@ public final class TravelWorkflow {
             askForCurrentLocation(client, userId, next);
             return;
         }
-        pendingTravels.remove(userId);
+        clearPendingTravel(userId);
         createTravelReply(client, userId, next.confirmedLocations(), next);
     }
 
@@ -190,12 +208,13 @@ public final class TravelWorkflow {
                         .append("，约 ").append(formatDistance(totalDistanceMeters))
                         .append("，不包含途经点停留时间。");
             }
+            String navigationUrl = amapService.navigationUrl(itinerary);
             reply.append("\n\n全程导航（高德地图）：\n")
-                    .append(amapService.navigationUrl(itinerary));
+                    .append(navigationUrl);
 
             appendMealRecommendations(reply, itinerary, legRoutes, pending.mealKeyword());
             appendTimeBudget(reply, totalDurationSeconds, pending.timeBudgetMinutes(), pending.mealKeyword());
-            appendCalendar(client, userId, reply, itinerary, pending.departureText());
+            appendCalendar(client, userId, reply, itinerary, pending.departureText(), navigationUrl);
             sendRouteMap(client, userId, itinerary);
             replySender.sendReply(client, userId, reply.toString());
         } catch (Exception error) {
@@ -226,7 +245,7 @@ public final class TravelWorkflow {
                         .append("\n   所在路段：").append(itinerary.get(legIndex).name())
                         .append(" → ").append(itinerary.get(legIndex + 1).name())
                         .append("\n   地址：")
-                        .append(restaurant.address().isBlank() ? "高德未提供具体门牌" : restaurant.address())
+                        .append(restaurant.address().isBlank() ? "地图服务未提供具体门牌" : restaurant.address())
                         .append("\n   顺路导航：")
                         .append(amapService.restaurantDetourUrl(itinerary, restaurant, legIndex));
             }
@@ -251,15 +270,21 @@ public final class TravelWorkflow {
 
     /** 用户提供出发时间时，把完整地点链写入日历并设置提前提醒。 */
     private void appendCalendar(ILinkClient client, String userId, StringBuilder reply,
-                                List<AmapService.Place> itinerary, String departureText) throws Exception {
+                                List<AmapService.Place> itinerary, String departureText,
+                                String navigationUrl) throws Exception {
         if (departureText.isBlank()) {
             reply.append("\n告诉我出发时间，我可以顺便帮你加入日历并提前提醒。");
             return;
         }
         LocalDateTime departure = DateTimeParser.parse(departureText);
+        if (departure == null) {
+            reply.append("\n出发时间未识别，路线已生成，暂未加入日历。请补充例如“今天20:00”。");
+            return;
+        }
         String title = itinerary.stream().map(AmapService.Place::name)
                 .reduce((left, right) -> left + "→" + right).orElse("出行");
-        calendarService.create(userId, title, "出行", departure, "none", 15);
+        calendarService.create(userId, title, "出行", departure, "none", 15,
+                "导航链接：" + navigationUrl);
         reply.append("\n我已把完整行程记入日历，并会在出发前 15 分钟提醒你。");
     }
 
@@ -283,6 +308,38 @@ public final class TravelWorkflow {
     /** 把米转换成米或公里。 */
     private String formatDistance(int meters) {
         return meters >= 1000 ? String.format("%.1f 公里", meters / 1000.0) : meters + "米";
+    }
+
+    private void savePendingTravel(String userId, PendingTravel travel) {
+        loadedPendingUsers.add(userId);
+        pendingTravels.put(userId, travel);
+        database.saveUserState(userId, PENDING_TRAVEL_KEY,
+                gson.toJson(new PendingTravelState(travel, System.currentTimeMillis() + PENDING_TTL_MILLIS)));
+    }
+
+    private PendingTravel pendingTravel(String userId) {
+        if (userId == null || userId.isBlank()) return null;
+        if (loadedPendingUsers.add(userId)) {
+            String value = database.loadUserState(userId, PENDING_TRAVEL_KEY);
+            if (!value.isBlank()) {
+                try {
+                    PendingTravelState state = gson.fromJson(value, PendingTravelState.class);
+                    if (state != null && state.expiresAtMillis() > System.currentTimeMillis()) {
+                        pendingTravels.put(userId, state.travel());
+                    } else {
+                        database.deleteUserState(userId, PENDING_TRAVEL_KEY);
+                    }
+                } catch (JsonSyntaxException error) {
+                    database.deleteUserState(userId, PENDING_TRAVEL_KEY);
+                }
+            }
+        }
+        return pendingTravels.get(userId);
+    }
+
+    private void clearPendingTravel(String userId) {
+        pendingTravels.remove(userId);
+        database.deleteUserState(userId, PENDING_TRAVEL_KEY);
     }
 
     /** 一次多段出行在逐个地点确认期间保留的必要上下文。 */
@@ -342,4 +399,6 @@ public final class TravelWorkflow {
             return currentLocationIndex >= locationNames.size();
         }
     }
+
+    private record PendingTravelState(PendingTravel travel, long expiresAtMillis) { }
 }

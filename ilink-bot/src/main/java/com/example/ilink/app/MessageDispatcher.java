@@ -14,8 +14,10 @@ import com.example.ilink.feature.document.DocumentAiService;
 import com.example.ilink.feature.document.DocumentService;
 import com.example.ilink.feature.express.ExpressService;
 import com.example.ilink.feature.express.ExpressPageService;
+import com.example.ilink.feature.express.ExpressHttpServer;
 import com.example.ilink.feature.finance.ExpenseSplitService;
 import com.example.ilink.feature.food.FoodOrderService;
+import com.example.ilink.feature.food.FoodPreferenceMapper;
 import com.example.ilink.feature.image.ImageService;
 import com.example.ilink.feature.image.GeneratedImage;
 import com.example.ilink.feature.persona.Personas;
@@ -34,8 +36,10 @@ import com.example.ilink.feature.web.BilibiliSearchService;
 import com.example.ilink.feature.web.ShortLinkService;
 import com.example.ilink.feature.web.WebSearchService;
 import com.example.ilink.feature.calendar.CalendarService;
+import com.example.ilink.feature.calendar.ReminderTextFormatter;
 import com.example.ilink.feature.calendar.HolidayService;
 import com.example.ilink.feature.travel.AmapService;
+import com.example.ilink.feature.travel.DidiMcpClient;
 import com.example.ilink.feature.visual.QrCodeService;
 import com.example.ilink.feature.visual.VisualCardFactory;
 import com.example.ilink.feature.visual.VisualCardRenderer;
@@ -149,7 +153,8 @@ public final class MessageDispatcher implements AutoCloseable {
     private final FoodOrderService foodOrderService = new FoodOrderService(httpClient);
     private final MediaStore mediaStore = new MediaStore();
     private final AmapService amapService = new AmapService(httpClient);
-    private final ExpressPageService expressPageService = new ExpressPageService(amapService);
+    private final ExpressPageService expressPageService = new ExpressPageService();
+    private final ExpressHttpServer expressHttpServer = new ExpressHttpServer(expressPageService);
     private final ToolManager toolManager = new ToolManager()
             .register(new WeatherTool(weatherService))
             .register(new DrawTool(imageService))
@@ -172,7 +177,7 @@ public final class MessageDispatcher implements AutoCloseable {
             .register(new ExpenseSplitTool(expenseSplitService))
             .register(new FoodOrderTool(foodOrderService))
             .register(new FoodDeliveryTool())
-            .register(new NearbyFoodTool(amapService))
+            .register(new NearbyFoodTool(amapService, new FoodPreferenceMapper(httpClient)))
             .register(new LengthTool())
             .register(new WeightTool())
             .register(new TemperatureTool())
@@ -209,6 +214,7 @@ public final class MessageDispatcher implements AutoCloseable {
             sessions, amapService, foodOrderService, replySender);
     private final TravelWorkflow travelWorkflow = new TravelWorkflow(
             amapService, calendarService, replySender);
+    private final TaxiWorkflow taxiWorkflow = new TaxiWorkflow(new DidiMcpClient(), replySender);
     private final PlanWorkflow planWorkflow = new PlanWorkflow(
             toolManager, planSessions, chatHistory, replySender, documentService, calendarService);
     private final VisualCardWorkflow visualCardWorkflow = new VisualCardWorkflow(
@@ -220,26 +226,47 @@ public final class MessageDispatcher implements AutoCloseable {
             intentRecognizer, chatService, weatherService,
             mediaStore, replySender, toolManager, planWorkflow, calculatorService, calendarWorkflow,
             healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, foodOrderWorkflow,
+            taxiWorkflow,
             memoryService, todoService,
             webSearchService, newsSearchService, bilibiliSearchService, mediaKnowledgeService,
             qqMailService, visualCardWorkflow);
     private final ScheduledExecutorService progressScheduler = Executors.newScheduledThreadPool(1);
     private final ScheduledExecutorService reminderScheduler = Executors.newScheduledThreadPool(1);
+    private final ScheduledExecutorService briefingScheduler = Executors.newSingleThreadScheduledExecutor();
     private final Set<String> knownUsers = ConcurrentHashMap.newKeySet();
     private final Set<String> briefedUsers = ConcurrentHashMap.newKeySet();
+    private final Set<String> briefingUsersInProgress = ConcurrentHashMap.newKeySet();
     private final LoginBriefingService loginBriefingService = new LoginBriefingService(
             weatherService, calendarService, todoService, planSessions, sessions,
             new HolidayService(), memoryService, qqMailService, newsSearchService, webSearchService);
     private final DailyDashboardServer dailyDashboardServer;
+    private CloudflareTunnel expressTunnel;
     private volatile ILinkClient activeClient;
 
     /** 创建分发器时就准备提醒扫描；真正发消息前必须等待登录客户端就绪。 */
     public MessageDispatcher() {
         DailyDashboardService dashboardService = new DailyDashboardService(
                 todoService, calendarService, planSessions, weatherService, sessions, memoryService);
-        dailyDashboardServer = new DailyDashboardServer(dashboardService, expressPageService);
+        dailyDashboardServer = new DailyDashboardServer(dashboardService);
         dailyDashboardServer.start();
+        expressHttpServer.start();
+        startExpressTunnel();
         reminderScheduler.scheduleAtFixedRate(this::sendDueReminders, 1, 1, TimeUnit.SECONDS);
+    }
+
+    private void startExpressTunnel() {
+        if (!Config.EXPRESS_BASE_URL.isBlank() || !Config.EXPRESS_TUNNEL_ENABLED) return;
+        expressTunnel = new CloudflareTunnel(Config.EXPRESS_TUNNEL_COMMAND,
+                expressPageService.actualPort, Config.EXPRESS_TUNNEL_TIMEOUT);
+        String publicUrl = expressTunnel.start();
+        if (publicUrl.isBlank()) {
+            expressTunnel.close();
+            expressTunnel = null;
+            System.err.println("[快递H5] 公网隧道启动失败，暂时使用本机地址");
+            return;
+        }
+        expressPageService.useBaseUrl(publicUrl);
+        System.out.println("[快递H5] 公网地址：" + publicUrl);
     }
 
     /** 登录成功后注入长连接，供没有新入站消息时的主动提醒使用。 */
@@ -247,7 +274,8 @@ public final class MessageDispatcher implements AutoCloseable {
         this.activeClient = client;
         briefedUsers.clear();
         if (Config.LOGIN_BRIEFING_ENABLED) {
-            reminderScheduler.execute(() -> sendLoginBriefings(client));
+            System.out.println("[登录简报] 登录触发，等待会话上下文就绪");
+            briefingScheduler.schedule(() -> sendLoginBriefings(client), 1, TimeUnit.SECONDS);
         }
     }
 
@@ -258,7 +286,7 @@ public final class MessageDispatcher implements AutoCloseable {
         dailyDashboardServer.useUser(userId);
         knownUsers.add(userId);
         if (Config.LOGIN_BRIEFING_ENABLED) {
-            reminderScheduler.execute(() -> sendLoginBriefingForUser(client, userId));
+            briefingScheduler.execute(() -> sendLoginBriefingForUser(client, userId));
         }
         long startedAtMillis = System.currentTimeMillis();
         boolean voiceOnly = voiceReplyUsers.contains(userId)
@@ -314,7 +342,10 @@ public final class MessageDispatcher implements AutoCloseable {
                 if (caption != null && !caption.isBlank()) {
                     System.out.println("[" + userId + "] [图片] " + caption);
                     chatHistory.addUserMessage(userId, caption);
+                    memoryService.observe(userId, caption);
                     requestHandler.handle(client, userId, caption);
+                } else if (sessions.hasPendingExpress(userId)) {
+                    requestHandler.handleExpressImage(client, userId);
                 } else {
                     replySender.sendReply(client, userId,
                             "我已经收到这张图片。你想让我做什么：分析内容、解答题目，还是修改图片？");
@@ -326,6 +357,7 @@ public final class MessageDispatcher implements AutoCloseable {
                 String text = textMessage.getText_item().getText();
                 System.out.println("[" + userId + "] " + text);
                 chatHistory.addUserMessage(userId, text);
+                memoryService.observe(userId, text);
                 if (calculatorTextRouter.isCalculatorCommand(text)) {
                     replySender.sendReply(client, userId, calculatorTextRouter.handle(userId, text));
                     return;
@@ -361,6 +393,7 @@ public final class MessageDispatcher implements AutoCloseable {
                 chatHistory.addMedia(userId, "语音", saved.toString(), text);
                 System.out.println("[" + userId + "] [语音] " + text);
                 chatHistory.addUserMessage(userId, text);
+                memoryService.observe(userId, text);
                 requestHandler.handle(client, userId, text);
                 return;
             }
@@ -422,7 +455,10 @@ public final class MessageDispatcher implements AutoCloseable {
     public void close() {
         progressScheduler.shutdownNow();
         reminderScheduler.shutdownNow();
+        briefingScheduler.shutdownNow();
         dailyDashboardServer.close();
+        expressHttpServer.stop();
+        if (expressTunnel != null) expressTunnel.close();
     }
 
     /** 扫描并发送到期提醒，单条发送失败不会影响后续用户的提醒。 */
@@ -438,11 +474,7 @@ public final class MessageDispatcher implements AutoCloseable {
                 continue;
             }
             try {
-                String repeat = "none".equals(event.recurrence()) ? ""
-                        : "\n这是你设置的" + recurrenceName(event.recurrence()) + "提醒，我会继续替你记着。";
-                replySender.sendReply(client, event.userId(),
-                        "时间到了，来轻轻提醒你一下：" + event.title() + "。"
-                                + repeat + "\n愿你接下来的安排顺顺利利。" );
+                replySender.sendReply(client, event.userId(), ReminderTextFormatter.format(event));
                 calendarService.markReminderSent(delivery, LocalDateTime.now());
             } catch (Exception e) {
                 System.err.println("[日历提醒] 发送失败: " + e.getMessage());
@@ -453,9 +485,13 @@ public final class MessageDispatcher implements AutoCloseable {
 
     /** 每次机器人登录后，为所有已知用户发送简报并补发逾期提醒。 */
     private void sendLoginBriefings(ILinkClient client) {
-        if (client == null || !client.isLoggedIn()) return;
+        if (client == null || !client.isLoggedIn()) {
+            System.err.println("[登录简报] 跳过：客户端尚未登录");
+            return;
+        }
         Set<String> users = new HashSet<>(MySqlStore.getInstance().loadKnownUserIds());
         users.addAll(knownUsers);
+        System.out.println("[登录简报] 候选用户数=" + users.size());
         for (String userId : users) {
             sendLoginBriefingForUser(client, userId);
         }
@@ -463,26 +499,45 @@ public final class MessageDispatcher implements AutoCloseable {
 
     /** 用户具备上下文时发送一次简报；失败则允许后续消息再次触发。 */
     private void sendLoginBriefingForUser(ILinkClient client, String userId) {
-        if (client == null || !client.isLoggedIn() || !hasSendContext(client, userId)
-                || !briefedUsers.add(userId)) return;
-        List<ReminderDelivery> deliveries = calendarService.claimOverdueRemindersForUser(
-                userId, LocalDateTime.now());
+        if (client == null || !client.isLoggedIn()) return;
+        if (!hasSendContext(client, userId)) {
+            System.out.println("[登录简报] 跳过：用户缺少可发送会话上下文 user=" + userId);
+            return;
+        }
+        if (briefedUsers.contains(userId) || !briefingUsersInProgress.add(userId)) return;
+
         try {
-            String draft = loginBriefingService.build(userId, deliveries);
-            String dashboardUrl = dailyDashboardServer.urlFor(userId);
-            String message = chatService.polishBriefing(userId, draft);
-            String textFallback = dashboardUrl.isBlank() ? message
-                    : message + "\n\n你的七日计划页：\n" + dashboardUrl;
-            visualDeckSender.sendText(client, userId, textFallback);
-            for (ReminderDelivery delivery : deliveries) {
-                calendarService.markReminderSent(delivery, LocalDateTime.now());
+            List<ReminderDelivery> deliveries = calendarService.claimOverdueRemindersForUser(
+                    userId, LocalDateTime.now());
+            try {
+                System.out.println("[登录简报] 开始构建 user=" + userId);
+                String draft = loginBriefingService.build(userId, List.of());
+                String dashboardUrl = dailyDashboardServer.urlFor(userId);
+                String message = chatService.polishBriefing(userId, draft);
+                String textFallback = dashboardUrl.isBlank() ? message
+                        : message + "\n\n你的七日计划页：\n" + dashboardUrl;
+                visualDeckSender.sendText(client, userId, textFallback);
+                briefedUsers.add(userId);
+                System.out.println("[登录简报] 发送成功 user=" + userId);
+            } catch (Exception e) {
+                System.err.println("[登录简报] 发送失败 user=" + userId + ": " + e.getMessage());
             }
-        } catch (Exception e) {
-            briefedUsers.remove(userId);
-            System.err.println("[登录简报] 发送失败 user=" + userId + ": " + e.getMessage());
             for (ReminderDelivery delivery : deliveries) {
-                calendarService.markReminderFailed(delivery, LocalDateTime.now(), e.getMessage());
+                CalendarEvent event = calendarService.getEvent(delivery.eventId());
+                if (event == null) {
+                    calendarService.markReminderFailed(delivery, LocalDateTime.now(), "日历事件不存在");
+                    continue;
+                }
+                try {
+                    replySender.sendReply(client, userId, ReminderTextFormatter.format(event));
+                    calendarService.markReminderSent(delivery, LocalDateTime.now());
+                } catch (Exception e) {
+                    System.err.println("[离线提醒] 补发失败 user=" + userId + ": " + e.getMessage());
+                    calendarService.markReminderFailed(delivery, LocalDateTime.now(), e.getMessage());
+                }
             }
+        } finally {
+            briefingUsersInProgress.remove(userId);
         }
     }
 

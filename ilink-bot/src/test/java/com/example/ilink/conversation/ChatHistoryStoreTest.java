@@ -1,11 +1,15 @@
 package com.example.ilink.conversation;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.net.http.HttpClient;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ChatHistoryStoreTest {
 
@@ -34,5 +38,41 @@ class ChatHistoryStoreTest {
         history.addHistoryMessages(messages, "user", "我现在在杭州市阿里高桥园区");
 
         assertEquals(0, messages.size());
+    }
+
+    @Test
+    void summaryIsMergedIntoTheLeadingSystemMessage() throws Exception {
+        ChatHistoryStore history = new ChatHistoryStore(HttpClient.newHttpClient(), null);
+        setSummary(history, "用户偏好清淡食物");
+        history.addUserMessage("user", "附近有什么好吃的");
+
+        JsonArray messages = new JsonArray();
+        JsonObject systemMessage = new JsonObject();
+        systemMessage.addProperty("role", "system");
+        systemMessage.addProperty("content", "识别用户意图");
+        messages.add(systemMessage);
+
+        history.addHistoryMessages(messages, "user");
+
+        assertEquals("system", messages.get(0).getAsJsonObject().get("role").getAsString());
+        assertTrue(messages.get(0).getAsJsonObject().get("content").getAsString()
+                .contains("用户偏好清淡食物"));
+        assertEquals(1, countRole(messages, "system"));
+        assertEquals("user", messages.get(1).getAsJsonObject().get("role").getAsString());
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void setSummary(ChatHistoryStore history, String summary) throws Exception {
+        Field field = ChatHistoryStore.class.getDeclaredField("conversationSummary");
+        field.setAccessible(true);
+        ((Map<String, String>) field.get(history)).put("user", summary);
+    }
+
+    private static int countRole(JsonArray messages, String role) {
+        int count = 0;
+        for (var message : messages) {
+            if (role.equals(message.getAsJsonObject().get("role").getAsString())) count++;
+        }
+        return count;
     }
 }

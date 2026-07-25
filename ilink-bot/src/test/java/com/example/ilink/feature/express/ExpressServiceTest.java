@@ -9,7 +9,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ExpressServiceTest {
 
     @Test
+    void separatesOrderNumbersFromLabeledTrackingNumbers() {
+        assertEquals("SF123456789012", ExpressService.extractLabeledTrackingNo(
+                "快递单号：SF123456789012\n订单号：202607240001"));
+        assertEquals("202607240001", ExpressService.extractOrderNo(
+                "**订单号**：202607240001"));
+        assertEquals("", ExpressService.extractLabeledTrackingNo("订单号：202607240001"));
+        assertEquals("12345678", ExpressService.extractOrderNo("12345678"));
+        assertEquals("", ExpressService.extractLabeledTrackingNo("快递单号：NOTFOUND"));
+        assertEquals("", ExpressService.extractOrderNo("订单号：UNKNOWN"));
+    }
+
+    @Test
     void extractsCommonTrackingNumbersWithoutTreatingPhoneAsTracking() {
+        assertEquals("611699506676973", ExpressService.extractTrackingNo("\u67e5\u8be2\u8ba2\u5355 611699506676973"));
         assertEquals("SF1234567890", ExpressService.extractTrackingNo("帮我查 SF1234567890 到哪了"));
         assertEquals("773123456789", ExpressService.extractTrackingNo("物流单号：773123456789"));
         assertEquals("", ExpressService.extractTrackingNo("手机号 13800138000"));

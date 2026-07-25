@@ -2,46 +2,40 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-  <meta name="color-scheme" content="dark">
-  <title>{{company}}物流详情</title>
-  <link rel="stylesheet" href="/static/css/express.css">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <title>{{company}}物流追踪</title>
+  <link rel="stylesheet" href="/express/static/css/express.css?v=3">
 </head>
-<body class="status-{{statusClass}}" style="--progress:{{progress}}%">
-  <main>
-    <header>
-      <div class="brand">物流追踪</div>
-      <div class="number">{{company}} · {{expressNo}}</div>
-    </header>
+<body>
+  <main class="app">
+    <header class="header">{{company}} · {{expressNo}}</header>
 
-    <section class="summary">
-      <div class="status-row">
-        <span class="pulse" aria-hidden="true"></span>
-        <div>
-          <span class="eyebrow">当前状态</span>
-          <h1>{{status}}</h1>
-        </div>
+    <section class="map-section" id="mapWrap" hidden>
+      <div id="mapContainer" aria-label="物流路线示意图"></div>
+      <div class="map-overlay">
+        <div class="status-badge"><span class="status-dot"></span><span>{{status}}</span></div>
+        <button class="fullscreen-button" id="fullscreenBtn" type="button" aria-label="全屏查看路线">⛶</button>
       </div>
-      {{estimate}}
-      <div class="progress" aria-label="物流进度">
-        <div class="rail"><div class="fill"></div><span class="marker" aria-hidden="true"></span></div>
-        <div class="labels"><span>揽收</span><span>运输</span><span>派送</span><span>签收</span></div>
+      <div class="progress-track">
+        <div class="progress-rail"><div class="progress-fill" id="progressFill"></div><span class="progress-truck" id="progressTruck">🚚</span></div>
+        <div class="progress-labels"><span id="startLabel"></span><span id="endLabel"></span></div>
       </div>
-    </section>
-
-    <section class="map-section" id="mapSection" hidden>
-      <div class="section-heading"><span>真实物流节点</span><small>仅展示接口返回并成功解析的地点</small></div>
-      <img id="routeMap" alt="真实物流地点地图">
+      <div class="address-panel">
+        <div class="address-row"><span id="startAddressTitle">发货地址</span><p id="startAddress"></p></div>
+        <div class="address-row"><span id="endAddressTitle">在途地址</span><p id="endAddress"></p></div>
+      </div>
     </section>
 
     <section class="timeline-section">
-      <div class="section-heading"><span>物流时间线</span><small>最新记录优先</small></div>
-      <div class="timeline">{{timeline}}</div>
+      <h1>物流详情</h1>
+      <div class="glass-card timeline">{{timeline}}</div>
     </section>
-
-    <footer>页面有效期至 {{expiresAt}}</footer>
   </main>
-  <script>window.__EXPRESS__={token:"{{token}}",mapEligible:{{mapEligible}}};</script>
-  <script src="/static/js/express.js"></script>
+
+  <script>
+    window.__EXPRESS__ = { baiduAk: '{{baiduAk}}' };
+    window.__MAP_DATA__ = {{mapData}};
+  </script>
+  <script src="/express/static/js/express.js?v=3"></script>
 </body>
 </html>

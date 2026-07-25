@@ -13,6 +13,7 @@ import com.google.gson.JsonObject;
 
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.util.UUID;
 
 /** 生成可执行的饮食建议，并在用户确认后把三餐提醒写入日历。 */
 public final class HealthDietWorkflow {
@@ -31,6 +32,8 @@ public final class HealthDietWorkflow {
     }
 
     public boolean hasPending(String userId) { return sessions.has(userId); }
+
+    public void clearPending(String userId) { sessions.clear(userId); }
 
     /** 新饮食请求使用路由模型给出的目标进入偏好收集流程。 */
     public void handle(ILinkClient client, String userId, IntentResult route) throws Exception {
@@ -70,10 +73,13 @@ public final class HealthDietWorkflow {
             return;
         }
         LocalDateTime tomorrow = LocalDateTime.now().plusDays(1).with(LocalTime.of(8, 0));
-        calendarService.create(userId, dietTitle("早餐", draft.goal()), "健康", tomorrow, "daily", 0);
-        calendarService.create(userId, dietTitle("午餐", draft.goal()), "健康", tomorrow.with(LocalTime.of(12, 30)), "daily", 0);
+        String groupId = UUID.randomUUID().toString();
+        calendarService.create(userId, dietTitle("早餐", draft.goal()), "健康", tomorrow,
+                "daily", 0, "", groupId, "diet");
+        calendarService.create(userId, dietTitle("午餐", draft.goal()), "健康", tomorrow.with(LocalTime.of(12, 30)),
+                "daily", 0, "", groupId, "diet");
         CalendarEvent dinner = calendarService.create(userId, dietTitle("晚餐", draft.goal()), "健康",
-                tomorrow.with(LocalTime.of(18, 30)), "daily", 0);
+                tomorrow.with(LocalTime.of(18, 30)), "daily", 0, "", groupId, "diet");
         sessions.clear(userId);
         replySender.sendReply(client, userId, "已把三餐安排写入日历：每天 08:00、12:30、18:30 提醒。"
                 + "晚餐提醒将在 " + dinner.nextReminderAt().toLocalDate() + " 开始生效。");

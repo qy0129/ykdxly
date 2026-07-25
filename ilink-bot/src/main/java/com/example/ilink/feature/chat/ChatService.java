@@ -120,11 +120,35 @@ public final class ChatService {
             body.add("messages", messages);
 
             String polished = complete(body, Config.BRIEFING_POLISH_TIMEOUT);
-            return polished == null || polished.isBlank() ? draft : polished.trim();
+            if (polished == null || polished.isBlank()) return draft;
+            String result = polished.trim();
+            if (!preservesWeatherFacts(draft, result)) {
+                System.err.println("[登录简报] 润色结果遗漏或改动天气事实，使用原始简报");
+                return draft;
+            }
+            return result;
         } catch (Exception e) {
             System.err.println("[登录简报] 大模型润色失败，使用原始简报: " + e.getMessage());
             return draft;
         }
+    }
+
+    static boolean preservesWeatherFacts(String draft, String polished) {
+        if (draft == null || polished == null) return false;
+        return draft.lines()
+                .map(String::trim)
+                .filter(ChatService::isWeatherFact)
+                .allMatch(polished::contains);
+    }
+
+    private static boolean isWeatherFact(String line) {
+        return line.contains("天气：")
+                || line.startsWith("当前温度：")
+                || line.startsWith("温度：")
+                || line.startsWith("降水概率：")
+                || line.startsWith("湿度：")
+                || line.startsWith("数据更新时间：")
+                || line.equals("来源：Open-Meteo");
     }
 
     private String complete(JsonObject body, Duration timeout) throws Exception {

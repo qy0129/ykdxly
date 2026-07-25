@@ -29,10 +29,13 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.concurrent.CompletableFuture;
 
 /** 聚合待办、日历、计划和天气，生成日报页面需要的结构化数据。 */
 public final class DailyDashboardService {
+
+    private static final Pattern URL_PATTERN = Pattern.compile("https?://\\S+");
 
     private static final DateTimeFormatter DATE = DateTimeFormatter.ISO_LOCAL_DATE;
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm");
@@ -159,21 +162,21 @@ public final class DailyDashboardService {
                 if (date.equals(itemDate)) {
                     items.add(new DashboardItem(todo.id(), todo.title(), "todo", "待办",
                             todo.dueAt() == null ? null : todo.dueAt().toLocalTime(), todo.status(),
-                            "medium", 45, "pending".equals(todo.status())));
+                            "medium", 45, "pending".equals(todo.status()), ""));
                 }
             }
             for (CalendarEvent event : events) {
                 if (date.equals(event.startAt().toLocalDate()) && !todoCalendarIds.contains(event.id())) {
                     items.add(new DashboardItem(event.id(), event.title(), "calendar", event.type(),
                             event.startAt().toLocalTime(), event.status(), priorityForType(event.type()),
-                            60, false));
+                            60, false, actionUrl(event.notes())));
                 }
             }
             if (plan != null) {
                 for (PlanTask task : plan.tasks()) {
                     if (date.toString().equals(task.scheduledDate())) {
                         items.add(new DashboardItem(task.id(), task.title(), "plan", "计划",
-                                null, task.status(), task.priority(), task.estimatedMinutes(), false));
+                                null, task.status(), task.priority(), task.estimatedMinutes(), false, ""));
                     }
                 }
             }
@@ -204,7 +207,14 @@ public final class DailyDashboardService {
         value.addProperty("priority", item.priority());
         value.addProperty("durationMinutes", item.durationMinutes());
         value.addProperty("interactive", item.interactive());
+        value.addProperty("actionUrl", item.actionUrl());
         return value;
+    }
+
+    private String actionUrl(String notes) {
+        if (notes == null) return "";
+        var matcher = URL_PATTERN.matcher(notes);
+        return matcher.find() ? matcher.group() : "";
     }
 
     private JsonObject weather(String userId) {
@@ -254,6 +264,7 @@ public final class DailyDashboardService {
             }
             cachedWeather = new CachedWeather(locationName, LocalDateTime.now(), value);
         } catch (Exception error) {
+            System.err.println("[日报页面] 天气查询失败: " + error.getMessage());
             cachedWeather = new CachedWeather(locationName, LocalDateTime.now(),
                     unavailableWeather("天气服务暂时未响应"));
         } finally {
@@ -416,8 +427,8 @@ public final class DailyDashboardService {
     }
 
     private record DashboardItem(String id, String title, String kind, String label,
-                                 LocalTime time, String status, String priority,
-                                 int durationMinutes, boolean interactive) { }
+                                   LocalTime time, String status, String priority,
+                                   int durationMinutes, boolean interactive, String actionUrl) { }
 
     private record CachedWeather(String location, LocalDateTime loadedAt, JsonObject value) { }
 }

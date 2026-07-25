@@ -14,8 +14,11 @@ public record CalendarEvent(
         LocalDateTime startAt,
         LocalDateTime nextReminderAt,
         String recurrence,
+        String recurrenceAnchor,
         int reminderMinutes,
         String status,
+        String groupId,
+        String source,
         String notes,
         LocalDateTime createdAt) {
 
@@ -26,26 +29,34 @@ public record CalendarEvent(
         type = type == null || type.isBlank() ? "其他" : type;
         Objects.requireNonNull(startAt, "startAt");
         recurrence = recurrence == null || recurrence.isBlank() ? "none" : recurrence;
+        recurrenceAnchor = recurrenceAnchor == null ? "" : recurrenceAnchor;
         status = status == null || status.isBlank() ? "active" : status;
+        groupId = groupId == null ? "" : groupId;
+        source = source == null ? "" : source;
         notes = notes == null ? "" : notes;
         createdAt = createdAt == null ? LocalDateTime.now() : createdAt;
     }
 
     /** 返回更新下一次提醒时间后的事件副本。 */
     public CalendarEvent withNextReminderAt(LocalDateTime value) {
-        return new CalendarEvent(id, userId, title, type, startAt, value, recurrence,
-                reminderMinutes, status, notes, createdAt);
+        return new CalendarEvent(id, userId, title, type, startAt, value, recurrence, recurrenceAnchor,
+                reminderMinutes, status, groupId, source, notes, createdAt);
     }
 
     /** 返回更新状态后的事件副本。 */
     public CalendarEvent withStatus(String value) {
-        return new CalendarEvent(id, userId, title, type, startAt, nextReminderAt, recurrence,
-                reminderMinutes, value, notes, createdAt);
+        return new CalendarEvent(id, userId, title, type, startAt, nextReminderAt, recurrence, recurrenceAnchor,
+                reminderMinutes, value, groupId, source, notes, createdAt);
     }
 
     /** 周期提醒发送后，同时推进事件时间和提醒时间。 */
     public CalendarEvent withSchedule(LocalDateTime newStartAt, LocalDateTime newReminderAt) {
-        return new CalendarEvent(id, userId, title, type, newStartAt, newReminderAt, recurrence,
-                reminderMinutes, status, notes, createdAt);
+        return new CalendarEvent(id, userId, title, type, newStartAt, newReminderAt, recurrence, recurrenceAnchor,
+                reminderMinutes, status, groupId, source, notes, createdAt);
+    }
+
+    public CalendarEvent withDetails(String newTitle, LocalDateTime newStartAt, LocalDateTime newReminderAt) {
+        return new CalendarEvent(id, userId, newTitle, type, newStartAt, newReminderAt, recurrence,
+                recurrenceAnchor, reminderMinutes, status, groupId, source, notes, createdAt);
     }
 }

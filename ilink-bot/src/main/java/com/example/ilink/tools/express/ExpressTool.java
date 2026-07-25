@@ -53,7 +53,9 @@ public final class ExpressTool implements Tool {
         if (!result.success()) return ToolResult.failure(output);
         String pageUrl = pageService == null ? "" : pageService.createPage(result);
         if (!pageUrl.isBlank()) output += "\n\n物流详情：\n" + pageUrl;
-        return ToolResult.success(output, new ExpressOutput(result, pageUrl));
+        byte[] qrBytes = pageUrl.isBlank() || pageService == null
+                ? new byte[0] : pageService.generateQrCode(pageUrl, 300);
+        return ToolResult.success(output, new ExpressOutput(result, pageUrl, qrBytes));
     }
 
     private ToolResult queryByPhone(String phone) throws Exception {
@@ -80,7 +82,7 @@ public final class ExpressTool implements Tool {
         return ToolResult.success(output.toString().trim(), new PhoneOutput(cleanPhone, orders, results));
     }
 
-    public record ExpressOutput(ExpressService.ExpressResult result, String pageUrl) { }
+    public record ExpressOutput(ExpressService.ExpressResult result, String pageUrl, byte[] qrBytes) { }
 
     public record PhoneOutput(String phone, List<ExpressService.PhoneOrder> orders,
                               List<ExpressService.ExpressResult> results) { }

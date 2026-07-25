@@ -18,7 +18,7 @@ import java.util.List;
 import java.util.Set;
 
 /** 高德地点、驾车路线和静态地图接口的轻量封装。 */
-public final class AmapService {
+public class AmapService {
 
     private static final long DRIVING_REQUEST_INTERVAL_MILLIS = 600;
     private static final long DRIVING_RETRY_DELAY_MILLIS = 1200;

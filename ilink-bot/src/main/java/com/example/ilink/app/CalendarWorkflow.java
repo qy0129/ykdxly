@@ -13,6 +13,7 @@ import com.github.wechat.ilink.sdk.ILinkClient;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 
 /** 统一处理日历动作、时间补充和事件持久化。 */
 public final class CalendarWorkflow {
@@ -35,6 +36,11 @@ public final class CalendarWorkflow {
         return sessions.hasPending(userId);
     }
 
+    public void clearPending(String userId) {
+        sessions.clearPending(userId);
+        sessions.clearPendingOperation(userId);
+    }
+
     /** 执行模型已经识别出的日历动作。 */
     public void handle(ILinkClient client, String userId, String text, IntentResult route) throws Exception {
         switch (route.calendarAction()) {
@@ -43,21 +49,18 @@ public final class CalendarWorkflow {
                 replySender.sendReply(client, userId, calendarService.listForDay(userId,
                         time == null ? LocalDate.now() : time.toLocalDate()), route.replyMode(), route.voiceStyle());
             }
-            case "complete" -> replySender.sendReply(client, userId, calendarService.completeLatest(userId),
-                    route.replyMode(), route.voiceStyle());
-            case "cancel" -> replySender.sendReply(client, userId, calendarService.cancelLatest(userId),
-                    route.replyMode(), route.voiceStyle());
-            case "snooze" -> {
-                int minutes = route.calendarReminderMinutes() > 0 ? route.calendarReminderMinutes() : 30;
-                replySender.sendReply(client, userId, calendarService.postponeLatest(userId, minutes),
-                        route.replyMode(), route.voiceStyle());
-            }
+            case "complete", "cancel", "snooze" -> handleOperation(client, userId, text, route);
             default -> createEvent(client, userId, text, route);
         }
     }
 
     /** 合并模型补充字段与用户原话；模型不可用时仍由本地统一解析器兜底。 */
     public void completePending(ILinkClient client, String userId, String text, IntentResult route) throws Exception {
+        CalendarSessionStore.PendingOperation operation = sessions.getPendingOperation(userId);
+        if (operation != null) {
+            completePendingOperation(client, userId, text, operation, route);
+            return;
+        }
         if ("取消".equals(text.trim())) {
             sessions.clearPending(userId);
             replySender.sendReply(client, userId, "好的，这次日历记录已取消。");
@@ -76,6 +79,100 @@ public final class CalendarWorkflow {
 
         sessions.clearPending(userId);
         saveAndReply(client, userId, merged, resolved, route);
+    }
+
+    private void handleOperation(ILinkClient client, String userId, String requestText,
+                                 IntentResult route) throws Exception {
+        String action = route.calendarAction();
+        int minutes = snoozeMinutes(route);
+        String title = route.calendarTitle() == null ? "" : route.calendarTitle().trim();
+        if ("cancel".equals(action) && (title.contains("饮食")
+                || requestText.contains("饮食") || requestText.contains("三餐"))) {
+            int count = calendarService.cancelLatestGroupBySource(userId, "diet");
+            String reply = count == 0 ? "当前没有有效的饮食提醒。" : "已取消本组 " + count + " 条三餐提醒。";
+            replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
+            return;
+        }
+        LocalDateTime parsed = DateTimeParser.parse(route.calendarTime());
+        LocalDate day = parsed == null ? null : parsed.toLocalDate();
+        if (title.isBlank() && day == null) {
+            String reply = switch (action) {
+                case "complete" -> calendarService.completeLatest(userId);
+                case "cancel" -> calendarService.cancelLatest(userId);
+                default -> calendarService.postponeLatest(userId, minutes);
+            };
+            replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
+            return;
+        }
+
+        List<CalendarEvent> matches = calendarService.findActive(userId, title, day);
+        if (matches.isEmpty()) {
+            replySender.sendReply(client, userId, "没有找到符合名称和日期的有效日程。",
+                    route.replyMode(), route.voiceStyle());
+            return;
+        }
+        if (matches.size() == 1) {
+            replySender.sendReply(client, userId, executeOperation(action, matches.getFirst().id(), minutes),
+                    route.replyMode(), route.voiceStyle());
+            return;
+        }
+        sessions.setPendingOperation(userId, new CalendarSessionStore.PendingOperation(
+                action, matches.stream().map(CalendarEvent::id).toList(), minutes));
+        StringBuilder prompt = new StringBuilder("找到多条符合条件的日程，请回复序号：");
+        for (int index = 0; index < matches.size(); index++) {
+            CalendarEvent event = matches.get(index);
+            prompt.append('\n').append(index + 1).append(". ")
+                    .append(event.startAt().format(MINUTE_FORMAT)).append(' ').append(event.title());
+        }
+        prompt.append("\n回复“取消”可结束操作。");
+        replySender.sendReply(client, userId, prompt.toString(), route.replyMode(), route.voiceStyle());
+    }
+
+    private void completePendingOperation(ILinkClient client, String userId, String text,
+                                          CalendarSessionStore.PendingOperation operation,
+                                          IntentResult route) throws Exception {
+        if ("取消".equals(text.trim())) {
+            sessions.clearPendingOperation(userId);
+            replySender.sendReply(client, userId, "已取消本次日历操作。");
+            return;
+        }
+        int choice;
+        try {
+            choice = Integer.parseInt(text.trim());
+        } catch (NumberFormatException error) {
+            replySender.sendReply(client, userId, "请回复日程序号，或回复“取消”。");
+            return;
+        }
+        if (choice < 1 || choice > operation.eventIds().size()) {
+            replySender.sendReply(client, userId, "序号不在候选范围内，请重新选择。");
+            return;
+        }
+        sessions.clearPendingOperation(userId);
+        String reply = executeOperation(operation.action(), operation.eventIds().get(choice - 1),
+                operation.postponeMinutes());
+        if (route == null) replySender.sendReply(client, userId, reply);
+        else replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
+    }
+
+    private String executeOperation(String action, String eventId, int minutes) {
+        return switch (action) {
+            case "complete" -> calendarService.completeById(eventId);
+            case "cancel" -> calendarService.cancelById(eventId);
+            default -> calendarService.postponeById(eventId, minutes);
+        };
+    }
+
+    private int snoozeMinutes(IntentResult route) {
+        if (route.calendarReminderMinutes() > 0) return route.calendarReminderMinutes();
+        long amount = route.calendarTimeAmount();
+        if (amount <= 0) return 30;
+        long minutes = switch (route.calendarTimeUnit()) {
+            case "second" -> Math.max(1, (amount + 59) / 60);
+            case "hour" -> amount * 60;
+            case "day" -> amount * 24 * 60;
+            default -> amount;
+        };
+        return (int) Math.min(Integer.MAX_VALUE, minutes);
     }
 
     private void createEvent(ILinkClient client, String userId, String text, IntentResult route) throws Exception {

@@ -351,16 +351,19 @@
             label.textContent = `${String(hour).padStart(2, "0")}:00`;
             axis.appendChild(label);
         }
-        schedule.appendChild(axis);
+        const timelines = document.createElement("div");
+        timelines.className = "timeline-columns";
 
         days.forEach((day, dayIndex) => {
-            const column = document.createElement("div");
-            column.className = `day-column${day.today ? " today" : ""}`;
-            column.innerHTML = `<header class="day-header"><span>周${day.weekday}</span><strong>${day.dayNumber}</strong></header>`;
+            const header = document.createElement("header");
+            header.className = `day-header${day.today ? " today" : ""}`;
+            header.style.gridColumn = String(dayIndex + 2);
+            header.innerHTML = `<span>周${day.weekday}</span><strong>${day.dayNumber}</strong>`;
             const allDay = document.createElement("div");
             allDay.className = "all-day-lane";
+            allDay.style.gridColumn = String(dayIndex + 2);
             const track = document.createElement("div");
-            track.className = "day-track";
+            track.className = `day-track${day.today ? " today" : ""}`;
             let timedIndex = 0;
             day.items.forEach((item) => {
                 if (!item.time) {
@@ -379,13 +382,19 @@
                 block.style.height = `${height}px`;
                 block.style.animationDelay = `${(dayIndex * 4 + timedIndex) * 45}ms`;
                 block.innerHTML = `<time>${escapeHtml(item.time)}</time><b>${escapeHtml(item.title)}</b>`;
+                if (item.actionUrl) {
+                    block.classList.add("linked");
+                    block.title = "打开导航";
+                    block.addEventListener("click", () => window.open(item.actionUrl, "_blank", "noopener"));
+                }
                 track.appendChild(block);
                 timedIndex++;
             });
             if (day.today) addCurrentLine(track);
-            column.append(allDay, track);
-            schedule.appendChild(column);
+            schedule.append(header, allDay);
+            timelines.appendChild(track);
         });
+        schedule.append(axis, timelines);
     }
 
     function addCurrentLine(track) {
@@ -414,6 +423,11 @@
                     const row = document.createElement("div");
                     row.className = `agenda-item ${item.kind}${item.status === "completed" ? " completed" : ""}`;
                     row.innerHTML = `<time>${escapeHtml(item.time || "全天")}</time><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.label)}</small>`;
+                    if (item.actionUrl) {
+                        row.classList.add("linked");
+                        row.title = "打开导航";
+                        row.addEventListener("click", () => window.open(item.actionUrl, "_blank", "noopener"));
+                    }
                     items.appendChild(row);
                 });
                 section.appendChild(items);

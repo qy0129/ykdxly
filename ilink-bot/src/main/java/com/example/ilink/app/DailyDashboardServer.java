@@ -1,8 +1,6 @@
 package com.example.ilink.app;
 
 import com.example.ilink.config.Config;
-import com.example.ilink.feature.express.ExpressPageRenderer;
-import com.example.ilink.feature.express.ExpressPageService;
 import com.google.gson.JsonObject;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
@@ -29,14 +27,9 @@ public final class DailyDashboardServer implements AutoCloseable {
     private static final String PAGE_RESOURCE = "/templates/daily-dashboard.html";
     private static final String CSS_RESOURCE = "/static/css/daily-dashboard.css";
     private static final String JS_RESOURCE = "/static/js/daily-dashboard.js";
-    private static final String EXPRESS_PAGE_RESOURCE = "/templates/express/detail.html";
-    private static final String EXPRESS_CSS_RESOURCE = "/static/css/express.css";
-    private static final String EXPRESS_JS_RESOURCE = "/static/js/express.js";
     private static final Path PUBLIC_URL_FILE = Path.of("data", "dashboard-public-url.txt");
 
     private final DailyDashboardService dashboardService;
-    private final ExpressPageService expressPageService;
-    private final ExpressPageRenderer expressPageRenderer = new ExpressPageRenderer();
     private final String accessToken = UUID.randomUUID().toString().replace("-", "");
     private final ExecutorService executor = Executors.newFixedThreadPool(3);
     private volatile String ownerUserId = "";
@@ -45,13 +38,7 @@ public final class DailyDashboardServer implements AutoCloseable {
     private CloudflareTunnel tunnel;
 
     public DailyDashboardServer(DailyDashboardService dashboardService) {
-        this(dashboardService, null);
-    }
-
-    public DailyDashboardServer(DailyDashboardService dashboardService,
-                                ExpressPageService expressPageService) {
         this.dashboardService = dashboardService;
-        this.expressPageService = expressPageService;
     }
 
     /** 启动本地网页服务；端口占用时仅关闭页面能力，不影响 Bot 其他功能。 */
@@ -65,7 +52,6 @@ public final class DailyDashboardServer implements AutoCloseable {
             server.start();
             runtimeBaseUrl = resolveBaseUrl();
             saveDashboardUrl();
-            if (expressPageService != null) expressPageService.activate(baseUrl());
             System.out.println("[日报页面] 已启动：" + url());
         } catch (Exception error) {
             System.err.println("[日报页面] 启动失败，继续使用文字简报: " + error.getMessage());
@@ -123,17 +109,6 @@ public final class DailyDashboardServer implements AutoCloseable {
     private void handle(HttpExchange exchange) throws IOException {
         try {
             String path = exchange.getRequestURI().getPath();
-            if (path.startsWith("/express/") && "GET".equals(exchange.getRequestMethod())) {
-                if (handleExpress(exchange, path)) return;
-            }
-            if (path.equals("/static/css/express.css") && "GET".equals(exchange.getRequestMethod())) {
-                sendResource(exchange, 200, "text/css; charset=utf-8", EXPRESS_CSS_RESOURCE);
-                return;
-            }
-            if (path.equals("/static/js/express.js") && "GET".equals(exchange.getRequestMethod())) {
-                sendResource(exchange, 200, "text/javascript; charset=utf-8", EXPRESS_JS_RESOURCE);
-                return;
-            }
             if (path.equals("/daily/" + accessToken) && "GET".equals(exchange.getRequestMethod())) {
                 sendResource(exchange, 200, "text/html; charset=utf-8", PAGE_RESOURCE);
                 return;
@@ -172,34 +147,6 @@ public final class DailyDashboardServer implements AutoCloseable {
         } finally {
             exchange.close();
         }
-    }
-
-    private boolean handleExpress(HttpExchange exchange, String path) throws IOException {
-        if (expressPageService == null) return false;
-        String mapPrefix = "/express/map/";
-        if (path.startsWith(mapPrefix)) {
-            String token = path.substring(mapPrefix.length());
-            ExpressPageService.PageSnapshot page = expressPageService.get(token);
-            if (page == null || !page.mapEligible() || (page.mapResolved() && !page.mapAvailable())) {
-                send(exchange, 404, "text/plain; charset=utf-8", "地图不可用".getBytes(StandardCharsets.UTF_8));
-                return true;
-            }
-            if (!page.mapResolved()) {
-                send(exchange, 202, "text/plain; charset=utf-8", "地图生成中".getBytes(StandardCharsets.UTF_8));
-                return true;
-            }
-            byte[] map = expressPageService.mapImage(token);
-            send(exchange, 200, "image/png", map);
-            return true;
-        }
-        String token = path.substring("/express/".length());
-        if (token.contains("/")) return false;
-        ExpressPageService.PageSnapshot page = expressPageService.get(token);
-        String html = page == null ? expressPageRenderer.errorPage("页面不存在或已经过期")
-                : expressPageRenderer.render(token, page);
-        send(exchange, page == null ? 404 : 200, "text/html; charset=utf-8",
-                html.getBytes(StandardCharsets.UTF_8));
-        return true;
     }
 
     private void sendResource(HttpExchange exchange, int status, String contentType, String resource)
@@ -260,7 +207,6 @@ public final class DailyDashboardServer implements AutoCloseable {
     @Override
     public void close() {
         if (server != null) server.stop(0);
-        if (expressPageService != null) expressPageService.deactivate();
         if (tunnel != null) tunnel.close();
         executor.shutdownNow();
     }

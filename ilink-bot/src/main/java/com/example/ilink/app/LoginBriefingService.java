@@ -82,6 +82,7 @@ public final class LoginBriefingService {
                 if (event != null) {
                     text.append("- ").append(event.title()).append("（原提醒时间：")
                             .append(delivery.scheduledAt().format(TIME_FORMAT)).append("）\n");
+                    if (!event.notes().isBlank()) text.append("  ").append(event.notes()).append('\n');
                 }
             }
         }
@@ -92,6 +93,7 @@ public final class LoginBriefingService {
             for (CalendarEvent event : events) {
                 text.append("- ").append(event.startAt().toLocalTime().withSecond(0).withNano(0))
                         .append(' ').append(event.title()).append('\n');
+                if (!event.notes().isBlank()) text.append("  ").append(event.notes()).append('\n');
             }
         }
 
@@ -115,28 +117,28 @@ public final class LoginBriefingService {
             return cache.text();
         }
         List<SearchResult> results = searchNews(
-                newsSearchService == null ? null : newsSearchService::search,
-                webSearchService == null ? null : webSearchService::search);
+                webSearchService == null ? null : webSearchService::search,
+                newsSearchService == null ? null : newsSearchService::search);
         String text = formatNews(results);
         cachedNews = new CachedNews(LocalDateTime.now(), text);
         return text;
     }
 
-    static List<SearchResult> searchNews(NewsProvider primary, NewsProvider fallback) {
-        if (primary != null) {
+    static List<SearchResult> searchNews(NewsProvider publicSearch, NewsProvider googleNews) {
+        if (publicSearch != null) {
             try {
-                List<SearchResult> results = primary.search("最新热点 when:1d", 3);
+                List<SearchResult> results = publicSearch.search("今日热点新闻", 3);
                 if (results != null && !results.isEmpty()) return results;
             } catch (Exception e) {
-                System.err.println("[登录简报] Google News 查询失败，尝试公共搜索: " + e.getMessage());
+                System.err.println("[登录简报] 公共新闻查询失败，尝试 Google News: " + e.getMessage());
             }
         }
-        if (fallback != null) {
+        if (googleNews != null) {
             try {
-                List<SearchResult> results = fallback.search("今日热点新闻", 3);
+                List<SearchResult> results = googleNews.search("最新热点 when:1d", 3);
                 return results == null ? List.of() : results;
             } catch (Exception e) {
-                System.err.println("[登录简报] 热点新闻查询失败: " + e.getMessage());
+                System.err.println("[登录简报] Google News 查询失败: " + e.getMessage());
             }
         }
         return List.of();
@@ -147,10 +149,11 @@ public final class LoginBriefingService {
         StringBuilder text = new StringBuilder("近期热点：\n");
         for (int index = 0; index < Math.min(3, results.size()); index++) {
             SearchResult result = results.get(index);
-            text.append(index + 1).append(". ").append(result.title()).append('\n')
-                    .append("来源：").append(result.source().isBlank() ? "新闻网页" : result.source());
+            text.append(index + 1).append(". ").append(result.title()).append('\n');
+            if (!result.summary().isBlank()) text.append("内容：").append(result.summary()).append('\n');
+            text.append("来源：").append(result.source().isBlank() ? "新闻网页" : result.source());
             if (!result.publishedAt().isBlank()) text.append("｜").append(result.publishedAt());
-            if (!result.url().isBlank()) text.append('\n').append(result.url());
+            if (!result.url().isBlank()) text.append('\n').append("网址：").append(result.url());
             if (index < Math.min(3, results.size()) - 1) text.append("\n\n");
         }
         return text.toString();
@@ -173,6 +176,7 @@ public final class LoginBriefingService {
             if (locations.isEmpty()) return "暂时没能查到你所在位置的天气。";
             return weatherService.queryWeather(locations.getFirst(), 0);
         } catch (Exception e) {
+            System.err.println("[登录简报] 天气查询失败: " + e.getMessage());
             return "天气服务暂时没有响应，出门前可以再留意一下实时天气。";
         }
     }

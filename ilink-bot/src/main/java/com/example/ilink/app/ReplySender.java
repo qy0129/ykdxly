@@ -139,6 +139,13 @@ public final class ReplySender {
         return requestedVoiceStyle;
     }
 
+    /** 发送图片，用于快递物流页面二维码。 */
+    public void sendImage(ILinkClient client, String userId, byte[] imageBytes,
+                          String fileName, String caption) throws Exception {
+        client.sendImage(userId, imageBytes, fileName, caption);
+        markReplySent(userId);
+    }
+
     /** 发送实际格式的音频，并在发送成功后保存历史记录。 */
     private void sendAudio(ILinkClient client, String userId, String text,
                            SynthesizedAudio audio) throws Exception {

@@ -29,7 +29,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class ChatHistoryStore {
 
-    private static final int MAX_HISTORY = 20;
+    /** 60 轮对话，每轮包含一条用户消息和一条助手回复。 */
+    private static final int MAX_HISTORY = 120;
     private static final int COMPRESS_BATCH = 6;
     private static final DateTimeFormatter TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
@@ -99,10 +100,22 @@ public final class ChatHistoryStore {
         ensureLoaded(userId);
         String summary = conversationSummary.get(userId);
         if (summary != null && !summary.isEmpty()) {
-            JsonObject summaryMsg = new JsonObject();
-            summaryMsg.addProperty("role", "system");
-            summaryMsg.addProperty("content", "以下是更早对话的摘要：\n" + summary);
-            target.add(summaryMsg);
+            String summaryContext = "以下是更早对话的摘要：\n" + summary;
+            if (!target.isEmpty()
+                    && "system".equals(target.get(0).getAsJsonObject().get("role").getAsString())) {
+                JsonObject systemMessage = target.get(0).getAsJsonObject();
+                String systemContent = systemMessage.get("content").getAsString();
+                systemMessage.addProperty("content", systemContent + "\n\n" + summaryContext);
+            } else {
+                JsonArray existingMessages = target.deepCopy();
+                while (!target.isEmpty()) target.remove(target.size() - 1);
+
+                JsonObject summaryMessage = new JsonObject();
+                summaryMessage.addProperty("role", "system");
+                summaryMessage.addProperty("content", summaryContext);
+                target.add(summaryMessage);
+                target.addAll(existingMessages);
+            }
         }
         List<JsonObject> history = chatHistory.get(userId);
         if (history != null) {

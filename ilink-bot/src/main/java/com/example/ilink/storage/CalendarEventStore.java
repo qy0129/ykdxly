@@ -3,6 +3,7 @@ package com.example.ilink.storage;
 import com.example.ilink.model.CalendarEvent;
 
 import java.time.LocalDateTime;
+import java.time.LocalDate;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -43,6 +44,23 @@ public final class CalendarEventStore {
 
     public synchronized CalendarEvent get(String eventId) {
         return events.get(eventId);
+    }
+
+    public synchronized List<CalendarEvent> findActive(String userId, String titleKeyword, LocalDate day) {
+        String keyword = titleKeyword == null ? "" : titleKeyword.trim();
+        return events.values().stream()
+                .filter(event -> event.userId().equals(userId) && "active".equals(event.status()))
+                .filter(event -> keyword.isBlank() || event.title().contains(keyword))
+                .filter(event -> day == null || event.startAt().toLocalDate().equals(day))
+                .sorted(Comparator.comparing(CalendarEvent::startAt))
+                .toList();
+    }
+
+    public synchronized List<CalendarEvent> findActiveGroup(String userId, String source, String groupId) {
+        return events.values().stream()
+                .filter(event -> event.userId().equals(userId) && "active".equals(event.status()))
+                .filter(event -> source.equals(event.source()) && groupId.equals(event.groupId()))
+                .toList();
     }
 
     public synchronized List<CalendarEvent> all() {

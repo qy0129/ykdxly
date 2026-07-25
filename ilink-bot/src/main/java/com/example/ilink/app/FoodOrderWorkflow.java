@@ -4,21 +4,31 @@ import com.example.ilink.conversation.UserSessionStore;
 import com.example.ilink.feature.food.FoodOrderService;
 import com.example.ilink.feature.travel.AmapService;
 import com.example.ilink.routing.IntentResult;
+import com.example.ilink.storage.MySqlStore;
 import com.github.wechat.ilink.sdk.ILinkClient;
+import com.google.gson.Gson;
+import com.google.gson.JsonSyntaxException;
 
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /** 处理点餐所需的位置补充、同名地点确认和具体分店选择。 */
 public final class FoodOrderWorkflow {
+
+    private static final String PENDING_KEY = "pending_food_order";
+    private static final long TTL_MILLIS = 24L * 60 * 60 * 1000;
 
     private final UserSessionStore sessions;
     private final AmapService amapService;
     private final FoodOrderService foodOrderService;
     private final ReplySender replySender;
     private final Map<String, PendingOrder> pendingOrders = new ConcurrentHashMap<>();
+    private final Set<String> loadedUsers = ConcurrentHashMap.newKeySet();
+    private final MySqlStore database = MySqlStore.getInstance();
+    private final Gson gson = new Gson();
 
     public FoodOrderWorkflow(UserSessionStore sessions, AmapService amapService,
                              FoodOrderService foodOrderService, ReplySender replySender) {
@@ -29,7 +39,18 @@ public final class FoodOrderWorkflow {
     }
 
     public boolean hasPending(String userId) {
+        ensureLoaded(userId);
         return pendingOrders.containsKey(userId);
+    }
+
+    public boolean acceptsPendingReply(String text) {
+        String value = text == null ? "" : text.trim();
+        if ("取消".equals(value) || value.matches("\\d+")) return true;
+        return !value.matches(".*(天气|快递|物流|待办|新闻|路线|导航|日历|提醒|查一下|搜索).*" );
+    }
+
+    public void clearPending(String userId) {
+        clearPendingOrder(userId);
     }
 
     public void handle(ILinkClient client, String userId, IntentResult route) throws Exception {
@@ -43,7 +64,7 @@ public final class FoodOrderWorkflow {
         if (!routeLocation.isBlank()) sessions.setCurrentLocation(userId, routeLocation);
         String location = sessions.getCurrentLocation(userId);
         if (location == null || location.isBlank()) {
-            pendingOrders.put(userId, PendingOrder.waitingLocation(query));
+            savePendingOrder(userId, PendingOrder.waitingLocation(query));
             replySender.sendReply(client, userId, "请告诉我你现在的位置或收货地址，我才能确定具体分店。");
             return;
         }
@@ -51,11 +72,11 @@ public final class FoodOrderWorkflow {
     }
 
     public void handlePending(ILinkClient client, String userId, String text) throws Exception {
-        PendingOrder pending = pendingOrders.get(userId);
+        PendingOrder pending = pendingOrder(userId);
         if (pending == null) return;
         String answer = text.trim();
         if ("取消".equals(answer)) {
-            pendingOrders.remove(userId);
+            clearPendingOrder(userId);
             replySender.sendReply(client, userId, "已取消本次点餐查询。");
             return;
         }
@@ -77,19 +98,19 @@ public final class FoodOrderWorkflow {
 
     private void findLocation(ILinkClient client, String userId, String query, String location) throws Exception {
         if (!amapService.isConfigured()) {
-            pendingOrders.remove(userId);
+            clearPendingOrder(userId);
             replySender.sendReply(client, userId,
                     "当前没有配置高德 Key，暂时不能判断具体分店。\n\n" + foodOrderService.generateLinks(query));
             return;
         }
         List<AmapService.Place> locations = amapService.searchPlaceCandidates(location);
         if (locations.isEmpty()) {
-            pendingOrders.put(userId, PendingOrder.waitingLocation(query));
+            savePendingOrder(userId, PendingOrder.waitingLocation(query));
             replySender.sendReply(client, userId, "没有找到这个位置，请补充城市和更完整的地址。");
             return;
         }
         if (locations.size() > 1) {
-            pendingOrders.put(userId, PendingOrder.locations(query, locations));
+            savePendingOrder(userId, PendingOrder.locations(query, locations));
             replySender.sendReply(client, userId, locationChoices(locations));
             return;
         }
@@ -112,7 +133,7 @@ public final class FoodOrderWorkflow {
                             AmapService.Place center) throws Exception {
         List<AmapService.Restaurant> stores = amapService.nearbyRestaurants(center, query);
         if (stores.isEmpty()) {
-            pendingOrders.remove(userId);
+            clearPendingOrder(userId);
             replySender.sendReply(client, userId,
                     "附近没有找到“" + query + "”的具体分店，先给你平台搜索入口：\n\n"
                             + foodOrderService.generateLinks(query));
@@ -122,7 +143,7 @@ public final class FoodOrderWorkflow {
             sendStoreLinks(client, userId, stores.getFirst());
             return;
         }
-        pendingOrders.put(userId, PendingOrder.stores(query, stores));
+        savePendingOrder(userId, PendingOrder.stores(query, stores));
         replySender.sendReply(client, userId, storeChoices(query, stores));
     }
 
@@ -138,7 +159,7 @@ public final class FoodOrderWorkflow {
 
     private void sendStoreLinks(ILinkClient client, String userId,
                                 AmapService.Restaurant store) throws Exception {
-        pendingOrders.remove(userId);
+        clearPendingOrder(userId);
         FoodOrderService.ResolvedStoreLinks links = foodOrderService.resolveStore(store);
         replySender.sendReply(client, userId, foodOrderService.formatStoreLinks(links));
     }
@@ -185,6 +206,40 @@ public final class FoodOrderWorkflow {
 
     private enum Stage { LOCATION_TEXT, LOCATION_SELECTION, STORE_SELECTION }
 
+    private void savePendingOrder(String userId, PendingOrder order) {
+        loadedUsers.add(userId);
+        pendingOrders.put(userId, order);
+        database.saveUserState(userId, PENDING_KEY,
+                gson.toJson(new PendingOrderState(order, System.currentTimeMillis() + TTL_MILLIS)));
+    }
+
+    private PendingOrder pendingOrder(String userId) {
+        ensureLoaded(userId);
+        return pendingOrders.get(userId);
+    }
+
+    private void clearPendingOrder(String userId) {
+        loadedUsers.add(userId);
+        pendingOrders.remove(userId);
+        database.deleteUserState(userId, PENDING_KEY);
+    }
+
+    private void ensureLoaded(String userId) {
+        if (userId == null || userId.isBlank() || !loadedUsers.add(userId)) return;
+        String value = database.loadUserState(userId, PENDING_KEY);
+        if (value.isBlank()) return;
+        try {
+            PendingOrderState state = gson.fromJson(value, PendingOrderState.class);
+            if (state != null && state.expiresAtMillis() > System.currentTimeMillis()) {
+                pendingOrders.put(userId, state.order());
+            } else {
+                database.deleteUserState(userId, PENDING_KEY);
+            }
+        } catch (JsonSyntaxException error) {
+            database.deleteUserState(userId, PENDING_KEY);
+        }
+    }
+
     private record PendingOrder(String query, Stage stage,
                                 List<AmapService.Place> locations,
                                 List<AmapService.Restaurant> stores) {
@@ -200,4 +255,6 @@ public final class FoodOrderWorkflow {
             return new PendingOrder(query, Stage.STORE_SELECTION, List.of(), List.copyOf(stores));
         }
     }
+
+    private record PendingOrderState(PendingOrder order, long expiresAtMillis) { }
 }

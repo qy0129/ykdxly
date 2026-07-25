@@ -15,6 +15,9 @@
     --dim: #4f5a64;
     --danger: #c67b77;
     --track-hour: 34px;
+    --date-header-height: 50px;
+    --daily-task-height: 76px;
+    --time-label-width: 48px;
 }
 
 * { box-sizing: border-box; }
@@ -339,24 +342,35 @@ button, input { font: inherit; }
 .legend-dot.todo, .trend-legend i.completed { background: #c7d0d8; }
 
 .schedule-scroll { margin-top: 16px; overflow-x: auto; scrollbar-color: var(--graphite-2) transparent; }
-.week-schedule { min-width: 820px; display: grid; grid-template-columns: 48px repeat(7, minmax(104px, 1fr)); }
+.week-schedule {
+    min-width: 820px;
+    display: grid;
+    grid-template-columns: var(--time-label-width) repeat(7, minmax(104px, 1fr));
+    grid-template-rows: var(--date-header-height) var(--daily-task-height) calc(var(--track-hour) * 17);
+    min-height: 0;
+}
 
-.time-axis { padding-top: 50px; color: var(--dim); font-size: 0.58rem; }
+.time-axis { grid-column: 1; grid-row: 3; color: var(--dim); font-size: 0.58rem; min-width: 0; min-height: 0; }
 .time-axis span { display: block; height: var(--track-hour); transform: translateY(-4px); }
 
-.day-column { min-width: 0; border-left: 1px solid var(--line-soft); }
-.day-header { height: 50px; padding: 5px 8px; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; justify-content: space-between; }
+.day-header { grid-row: 1; height: var(--date-header-height); min-width: 0; padding: 5px 8px; border-left: 1px solid var(--line-soft); border-bottom: 1px solid var(--line); display: flex; align-items: baseline; justify-content: space-between; }
 .day-header span { color: var(--muted); font-size: 0.63rem; }
 .day-header strong { color: #aab5bf; font-size: 1rem; font-weight: 400; }
-.day-column.today .day-header strong { color: var(--white); }
-.day-column.today .day-header { box-shadow: inset 0 -1px 0 var(--cobalt-bright); }
+.day-header.today strong { color: var(--white); }
+.day-header.today { box-shadow: inset 0 -1px 0 var(--cobalt-bright); }
 
-.all-day-lane { min-height: 36px; padding: 4px; border-bottom: 1px solid var(--line-soft); }
-.all-day-item { margin-bottom: 3px; padding: 4px 5px; border-left: 2px solid var(--steel-soft); background: rgba(16, 25, 35, 0.28); color: #aeb9c2; font-size: 0.58rem; line-height: 1.3; border-radius: 2px; overflow-wrap: anywhere; }
+.all-day-lane { grid-row: 2; height: var(--daily-task-height); min-width: 0; min-height: 0; padding: 4px; border-left: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); overflow-x: hidden; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--graphite-2) transparent; }
+.all-day-item { margin-bottom: 3px; padding: 4px 5px; border-left: 2px solid var(--steel-soft); background: rgba(16, 25, 35, 0.28); color: #aeb9c2; font-size: 0.58rem; line-height: 1.3; border-radius: 2px; overflow: hidden; overflow-wrap: anywhere; }
+
+.timeline-columns { grid-column: 2 / -1; grid-row: 3; display: grid; grid-template-columns: repeat(7, minmax(104px, 1fr)); min-width: 0; min-height: 0; overflow: hidden; }
 
 .day-track {
     position: relative;
     height: calc(var(--track-hour) * 17);
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    border-left: 1px solid var(--line-soft);
     background-image: repeating-linear-gradient(to bottom, transparent 0, transparent calc(var(--track-hour) - 1px), var(--line-soft) calc(var(--track-hour) - 1px), var(--line-soft) var(--track-hour));
 }
 
@@ -385,6 +399,7 @@ button, input { font: inherit; }
 .schedule-item time { display: block; color: #93abc0; font-size: 0.53rem; }
 .schedule-item b { font-weight: 500; }
 .schedule-item.completed b::before { content: "✓ "; color: #9fb4c6; }
+.schedule-item.linked { cursor: pointer; }
 
 .current-line { position: absolute; left: 0; right: 0; height: 1px; background: rgba(89, 144, 194, 0.75); box-shadow: 0 0 8px rgba(62, 116, 164, 0.28); z-index: 5; }
 .current-line::before { content: ""; position: absolute; left: -2px; top: -2px; width: 5px; height: 5px; border-radius: 50%; background: #7ba5c9; }
@@ -489,6 +504,7 @@ button, input { font: inherit; }
     .agenda-item time { color: var(--steel); font-size: 0.6rem; }
     .agenda-item strong { color: #bcc6ce; font-size: 0.7rem; font-weight: 500; line-height: 1.4; overflow-wrap: anywhere; }
     .agenda-item small { color: var(--dim); font-size: 0.55rem; }
+    .schedule-item.linked, .agenda-item.linked { cursor: pointer; }
     .agenda-empty { margin: 10px 0 0 50px; color: var(--dim); font-size: 0.66rem; }
     .todo-panel { min-height: auto; }
     .weather-panel { margin-top: 10px; padding-bottom: 20px; }

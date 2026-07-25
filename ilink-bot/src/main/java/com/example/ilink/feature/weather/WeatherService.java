@@ -23,7 +23,7 @@ import java.util.List;
 /**
  * 独立天气查询服务。
  *
- * <p>使用 Open-Meteo 的地理编码和天气预报接口，不依赖机器人、模型或 API Key。</p>
+ * <p>国内地点优先使用高德；国外地点和较长期预报使用 Open-Meteo，两个接口互相回退。</p>
  */
 public final class WeatherService {
 
@@ -31,6 +31,7 @@ public final class WeatherService {
     private static final String FORECAST_API_URL = "https://api.open-meteo.com/v1/forecast";
 
     private final HttpClient httpClient;
+    private final AmapWeatherService amapWeatherService;
 
     /** 创建可独立使用的天气服务。 */
     public WeatherService() {
@@ -39,17 +40,37 @@ public final class WeatherService {
 
     /** 使用调用方提供的 HTTP 客户端创建天气服务。 */
     public WeatherService(HttpClient httpClient) {
+        this(httpClient, new AmapWeatherService(httpClient));
+    }
+
+    WeatherService(HttpClient httpClient, AmapWeatherService amapWeatherService) {
         this.httpClient = httpClient;
+        this.amapWeatherService = amapWeatherService;
     }
 
     /**
-     * 根据 Open-Meteo 可识别的地点名查询候选地点，用于处理同名乡镇或城市。
+     * 查询候选地点，用于处理同名乡镇或城市。
      */
     public List<WeatherLocation> searchLocations(String locationName) throws IOException, InterruptedException {
         if (locationName == null || locationName.isBlank()) {
             return List.of();
         }
 
+        if (amapWeatherService.isConfigured()) {
+            try {
+                List<WeatherLocation> locations = amapWeatherService.searchLocations(locationName);
+                if (!locations.isEmpty()) return locations;
+            } catch (InterruptedException error) {
+                throw error;
+            } catch (IOException | RuntimeException error) {
+                System.err.println("[天气] 高德地点查询失败，尝试 Open-Meteo: " + error.getMessage());
+            }
+        }
+        return searchOpenMeteoLocations(locationName);
+    }
+
+    private List<WeatherLocation> searchOpenMeteoLocations(String locationName)
+            throws IOException, InterruptedException {
         String encodedName = URLEncoder.encode(locationName.trim(), StandardCharsets.UTF_8);
         URI uri = URI.create(GEOCODING_API_URL + "?name=" + encodedName
                 + "&count=5&language=zh&format=json");
@@ -170,6 +191,33 @@ public final class WeatherService {
         int dayOffset = Math.toIntExact(ChronoUnit.DAYS.between(LocalDate.now(), targetDate));
         if (dayOffset < 0 || dayOffset > 6) throw new IllegalArgumentException("仅支持查询未来七天内的天气");
 
+        boolean amapPreferred = preferAmap(location, dayOffset);
+        if (amapPreferred) {
+            try {
+                return amapWeatherService.queryWeather(location, targetDate, period);
+            } catch (InterruptedException error) {
+                throw error;
+            } catch (IOException | RuntimeException error) {
+                System.err.println("[天气] 高德天气查询失败，尝试 Open-Meteo: " + error.getMessage());
+            }
+        }
+        try {
+            return queryOpenMeteoWeather(location, targetDate, period, dayOffset);
+        } catch (InterruptedException error) {
+            throw error;
+        } catch (IOException | RuntimeException error) {
+            if (!amapWeatherService.isConfigured() || dayOffset >= 4 || amapPreferred) {
+                if (error instanceof IOException ioError) throw ioError;
+                throw error;
+            }
+            System.err.println("[天气] Open-Meteo 天气查询失败，尝试高德: " + error.getMessage());
+            return amapWeatherService.queryWeather(location, targetDate, period);
+        }
+    }
+
+    private String queryOpenMeteoWeather(WeatherLocation location, LocalDate targetDate,
+                                         String period, int dayOffset)
+            throws IOException, InterruptedException {
         JsonObject response = getJson(forecastUri(location));
         if (!"day".equals(period)) {
             return appendMetadata(buildPeriodWeather(location, response, dayOffset, targetDate, period), response);
@@ -177,22 +225,27 @@ public final class WeatherService {
         JsonObject daily = response.getAsJsonObject("daily");
 
         String dayName = dayName(targetDate, dayOffset);
-        int weatherCode = daily.getAsJsonArray("weather_code").get(dayOffset).getAsInt();
+        JsonObject current = response.getAsJsonObject("current");
+        int dailyWeatherCode = daily.getAsJsonArray("weather_code").get(dayOffset).getAsInt();
+        int weatherCode = dayOffset == 0 ? optInt(current, "weather_code", dailyWeatherCode) : dailyWeatherCode;
         double maxTemperature = daily.getAsJsonArray("temperature_2m_max").get(dayOffset).getAsDouble();
         double minTemperature = daily.getAsJsonArray("temperature_2m_min").get(dayOffset).getAsDouble();
         int rainProbability = daily.getAsJsonArray("precipitation_probability_max").get(dayOffset).getAsInt();
 
         StringBuilder reply = new StringBuilder(location.displayName())
-                .append(dayName).append("天气：").append(weatherDescription(weatherCode))
-                .append("\n温度：").append(formatNumber(minTemperature)).append("℃ 至 ")
-                .append(formatNumber(maxTemperature)).append("℃")
-                .append("\n降水概率：").append(rainProbability).append('%');
+                .append(dayOffset == 0 ? "当前天气：" : dayName + "天气：")
+                .append(weatherDescription(weatherCode));
 
         if (dayOffset == 0) {
-            JsonObject current = response.getAsJsonObject("current");
             reply.append("\n当前温度：").append(formatNumber(current.get("temperature_2m").getAsDouble())).append("℃")
-                    .append("，体感 ").append(formatNumber(current.get("apparent_temperature").getAsDouble())).append("℃")
-                    .append("\n湿度：").append(current.get("relative_humidity_2m").getAsInt()).append('%')
+                    .append("，体感温度：")
+                    .append(formatNumber(current.get("apparent_temperature").getAsDouble())).append("℃");
+        }
+        reply.append("\n温度：").append(formatNumber(minTemperature)).append("℃ 至 ")
+                .append(formatNumber(maxTemperature)).append("℃")
+                .append("\n降水概率：").append(rainProbability).append('%');
+        if (dayOffset == 0) {
+            reply.append("\n湿度：").append(current.get("relative_humidity_2m").getAsInt()).append('%')
                     .append("，风速：")
                     .append(formatNumber(current.get("wind_speed_10m").getAsDouble())).append(" km/h");
         }
@@ -202,6 +255,38 @@ public final class WeatherService {
     /** 获取日报文字和天气背景使用的结构化状态，两个结果来自同一次接口请求。 */
     public WeatherSnapshot queryWeatherSnapshot(WeatherLocation location)
             throws IOException, InterruptedException {
+        boolean amapPreferred = preferAmap(location, 0);
+        if (amapPreferred) {
+            try {
+                return amapWeatherService.queryWeatherSnapshot(location);
+            } catch (InterruptedException error) {
+                throw error;
+            } catch (IOException | RuntimeException error) {
+                System.err.println("[天气] 高德天气背景查询失败，尝试 Open-Meteo: " + error.getMessage());
+            }
+        }
+        try {
+            return queryOpenMeteoSnapshot(location);
+        } catch (InterruptedException error) {
+            throw error;
+        } catch (IOException | RuntimeException error) {
+            if (!amapWeatherService.isConfigured() || amapPreferred) {
+                if (error instanceof IOException ioError) throw ioError;
+                throw error;
+            }
+            System.err.println("[天气] Open-Meteo 天气背景查询失败，尝试高德: " + error.getMessage());
+            return amapWeatherService.queryWeatherSnapshot(location);
+        }
+    }
+
+    private boolean preferAmap(WeatherLocation location, int dayOffset) {
+        if (!amapWeatherService.isConfigured() || dayOffset >= 4 || location == null) return false;
+        String country = location.country();
+        return country != null && (country.contains("中国") || "China".equalsIgnoreCase(country));
+    }
+
+    private WeatherSnapshot queryOpenMeteoSnapshot(WeatherLocation location)
+            throws IOException, InterruptedException {
         JsonObject response = getJson(forecastUri(location));
         JsonObject daily = response.getAsJsonObject("daily");
         JsonObject current = response.getAsJsonObject("current");
@@ -209,13 +294,14 @@ public final class WeatherService {
         double maxTemperature = optDouble(daily, "temperature_2m_max", 0, 0);
         double minTemperature = optDouble(daily, "temperature_2m_min", 0, 0);
         int rainProbability = optInt(daily, "precipitation_probability_max", 0, 0);
-        String text = new StringBuilder(location.displayName()).append("今天天气：")
+        String text = new StringBuilder(location.displayName()).append("当前天气：")
                 .append(weatherDescription(weatherCode))
+                .append("\n当前温度：").append(formatNumber(optDouble(current, "temperature_2m", 0)))
+                .append("℃，体感温度：")
+                .append(formatNumber(optDouble(current, "apparent_temperature", 0))).append("℃")
                 .append("\n温度：").append(formatNumber(minTemperature)).append("℃ 至 ")
                 .append(formatNumber(maxTemperature)).append("℃")
                 .append("\n降水概率：").append(rainProbability).append('%')
-                .append("\n当前温度：").append(formatNumber(optDouble(current, "temperature_2m", 0)))
-                .append("℃，体感 ").append(formatNumber(optDouble(current, "apparent_temperature", 0))).append("℃")
                 .append("\n湿度：").append(optInt(current, "relative_humidity_2m", 0)).append('%')
                 .append("，风速：").append(formatNumber(optDouble(current, "wind_speed_10m", 0))).append(" km/h")
                 .toString();

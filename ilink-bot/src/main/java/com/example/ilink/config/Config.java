@@ -57,6 +57,23 @@ public class Config {
     public static final String DATABASE_BOT_ID = loadProperty("database.bot.id", "ilink-bot-1");
     /** 高德 Web 服务 Key；为空时保留文字出行建议，不生成地图图片。 */
     public static final String AMAP_API_KEY = loadProperty("amap.api.key", "");
+    /** 百度地图 AK，用于快递 H5 和服务端出行规划。 */
+    public static final String BAIDU_MAP_AK = loadProperty("baidu.map.ak", "");
+    /** 滴滴 MCP Key；优先从环境变量 DIDI_MCP_KEY 读取，避免把密钥写入配置文件。 */
+    public static final String DIDI_MCP_KEY = loadSecretProperty("DIDI_MCP_KEY", "didi.mcp.key");
+    /** 是否使用滴滴 MCP 调试环境；生产环境默认关闭。 */
+    public static final boolean DIDI_MCP_SANDBOX =
+            Boolean.parseBoolean(loadProperty("didi.mcp.sandbox", "false"));
+    /** 快递 H5 页面服务端口。 */
+    public static final int EXPRESS_PORT = Integer.parseInt(loadProperty("express.port", "8089"));
+    /** 快递 H5 页面公网地址；为空时使用本机地址。 */
+    public static final String EXPRESS_BASE_URL = loadProperty("express.base-url", "");
+    public static final boolean EXPRESS_TUNNEL_ENABLED =
+            Boolean.parseBoolean(loadProperty("express.tunnel.enabled", "false"));
+    public static final String EXPRESS_TUNNEL_COMMAND =
+            loadProperty("express.tunnel.command", "data/tools/cloudflared.exe");
+    public static final Duration EXPRESS_TUNNEL_TIMEOUT = Duration.ofSeconds(
+            Long.parseLong(loadProperty("express.tunnel.timeout.seconds", "25")));
     public static final boolean LOGIN_BRIEFING_ENABLED =
             Boolean.parseBoolean(loadProperty("briefing.login.enabled", "true"));
     public static final boolean BRIEFING_POLISH_ENABLED =
@@ -143,5 +160,12 @@ public class Config {
         } catch (Exception e) {
             return defaultValue;
         }
+    }
+
+    private static String loadSecretProperty(String environmentName, String propertyName) {
+        String environmentValue = System.getenv(environmentName);
+        if (environmentValue != null && !environmentValue.isBlank()) return environmentValue.trim();
+        String propertyValue = loadProperty(propertyName, "");
+        return propertyValue.isBlank() ? loadProperty(environmentName, "") : propertyValue;
     }
 }

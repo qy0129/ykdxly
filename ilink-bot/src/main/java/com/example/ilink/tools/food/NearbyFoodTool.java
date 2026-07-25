@@ -1,5 +1,7 @@
 package com.example.ilink.tools.food;
 
+import com.example.ilink.feature.food.LinkShortener;
+import com.example.ilink.feature.food.FoodPreferenceMapper;
 import com.example.ilink.feature.travel.AmapService;
 import com.example.ilink.tools.core.Tool;
 import com.example.ilink.tools.core.ToolArguments;
@@ -8,17 +10,26 @@ import com.example.ilink.tools.core.ToolDefinition;
 import com.example.ilink.tools.core.ToolResult;
 import com.google.gson.JsonObject;
 
+import java.net.http.HttpClient;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /** 从高德 POI 数据检索用户当前位置附近的餐饮，并返回手机端店铺位置链接。 */
 public final class NearbyFoodTool implements Tool {
 
     public static final String NAME = "nearby_food_search";
     private final AmapService amapService;
+    private final FoodPreferenceMapper preferenceMapper;
     private final ToolDefinition definition;
 
     public NearbyFoodTool(AmapService amapService) {
+        this(amapService, new FoodPreferenceMapper(HttpClient.newHttpClient()));
+    }
+
+    public NearbyFoodTool(AmapService amapService, FoodPreferenceMapper preferenceMapper) {
         this.amapService = amapService;
+        this.preferenceMapper = preferenceMapper;
         JsonObject properties = new JsonObject();
         properties.add("location", ToolDefinition.stringProperty("用户当前所在位置，例如杭州市阿里高桥园区"));
         properties.add("longitude", ToolDefinition.stringProperty("用户确认地点的经度；首次搜索时传空字符串"));
@@ -37,8 +48,9 @@ public final class NearbyFoodTool implements Tool {
         String location = ToolArguments.requireString(arguments, "location");
         String longitude = ToolArguments.string(arguments, "longitude", "");
         String latitude = ToolArguments.string(arguments, "latitude", "");
-        String keyword = ToolArguments.string(arguments, "keyword", "").trim();
-        if (keyword.isBlank()) keyword = "美食";
+        String requestedKeyword = ToolArguments.string(arguments, "keyword", "").trim();
+        if (requestedKeyword.isBlank()) requestedKeyword = "美食";
+        List<String> searchKeywords = preferenceMapper.mapKeywords(requestedKeyword);
         AmapService.Place center;
         if (longitude.isBlank() || latitude.isBlank()) {
             List<AmapService.Place> candidates = amapService.searchPlaceCandidates(location);
@@ -52,14 +64,42 @@ public final class NearbyFoodTool implements Tool {
         } else {
             center = new AmapService.Place(location, longitude, latitude);
         }
-        List<AmapService.Restaurant> restaurants = amapService.nearbyRestaurants(center, keyword);
-        if (restaurants.isEmpty()) {
-            return ToolResult.failure("“" + location + "”附近暂时没有找到“" + keyword
-                    + "”相关店铺。可以换一个品牌、餐品名称，或扩大搜索范围。");
+        Map<String, AmapService.Restaurant> restaurantMatches = new LinkedHashMap<>();
+        Exception lastError = null;
+        int successfulSearches = 0;
+        searchLoop:
+        for (String searchKeyword : searchKeywords) {
+            try {
+                List<AmapService.Restaurant> matches = amapService.nearbyRestaurants(center, searchKeyword);
+                successfulSearches++;
+                for (AmapService.Restaurant restaurant : matches) {
+                    restaurantMatches.putIfAbsent(
+                            restaurant.name() + '|' + restaurant.location(), restaurant);
+                    if (restaurantMatches.size() >= 8) break searchLoop;
+                }
+            } catch (Exception error) {
+                lastError = error;
+                System.err.println("[附近美食] 搜索“" + searchKeyword + "”失败: " + error.getMessage());
+            }
         }
-        return ToolResult.success(formatRestaurantTable(location, keyword, restaurants, amapService),
+        if (successfulSearches == 0 && lastError != null) throw lastError;
+        List<AmapService.Restaurant> restaurants = List.copyOf(restaurantMatches.values());
+        if (restaurants.isEmpty()) {
+            return ToolResult.failure("“" + location + "”附近暂时没有找到与“" + requestedKeyword
+                    + "”匹配的店铺。已尝试：" + String.join("、", searchKeywords)
+                    + "。可以换一个品牌、餐品名称，或扩大搜索范围。");
+        }
+        String displayKeyword = displayKeyword(requestedKeyword, searchKeywords);
+        return ToolResult.success(formatRestaurantTable(location, displayKeyword, restaurants, amapService),
                 new NearbyFoodOutput(List.of(), restaurants,
                         amapService.nearbyStaticMap(center, restaurants), List.of()));
+    }
+
+    static String displayKeyword(String requestedKeyword, List<String> searchKeywords) {
+        if (searchKeywords.size() == 1 && searchKeywords.getFirst().equals(requestedKeyword)) {
+            return requestedKeyword;
+        }
+        return requestedKeyword + "（已按：" + String.join("、", searchKeywords) + "）";
     }
 
     private List<byte[]> candidateMapImages(List<AmapService.Place> candidates) throws Exception {
@@ -75,18 +115,23 @@ public final class NearbyFoodTool implements Tool {
                                         AmapService amapService) {
         StringBuilder reply = new StringBuilder("**").append(cell(location)).append("**附近的**")
                 .append(cell(keyword)).append("**：\n\n")
-                .append("| 序号 | 店铺 | 地址 | 导航 |\n")
-                .append("| --- | --- | --- | --- |\n");
+                .append("| 序号 | 店铺 | 地址 | 高德导航 | 饿了么 | 美团 |\n")
+                .append("| --- | --- | --- | --- | --- | --- |\n");
         for (int index = 0; index < restaurants.size(); index++) {
             AmapService.Restaurant restaurant = restaurants.get(index);
+            String restaurantName = restaurant.name();
             reply.append("| ").append(index + 1)
-                    .append(" | ").append(cell(restaurant.name()))
+                    .append(" | ").append(cell(restaurantName))
                     .append(" | ").append(cell(restaurant.address().isBlank()
                             ? "以地图详情为准" : restaurant.address()))
                     .append(" | [点击此链接跳转](")
-                    .append(amapService.restaurantUrl(restaurant)).append(") |\n");
+                    .append(amapService.restaurantUrl(restaurant)).append(")")
+                    .append(" | [点击此链接跳转](")
+                    .append(LinkShortener.elemeUrl(restaurantName)).append(")")
+                    .append(" | [点击此链接跳转](")
+                    .append(LinkShortener.meituanUrl(restaurantName)).append(") |\n");
         }
-        return reply.append("\n> 以上为高德店铺位置链接，不是外卖下单链接。")
+        return reply.append("\n> 高德链接用于导航；饿了么和美团链接使用完整分店名搜索，实际门店和配送范围以平台定位为准。")
                 .toString().trim();
     }
 
