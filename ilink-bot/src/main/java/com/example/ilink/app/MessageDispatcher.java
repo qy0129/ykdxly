@@ -12,23 +12,49 @@ import com.example.ilink.feature.audio.AudioService;
 import com.example.ilink.feature.chat.ChatService;
 import com.example.ilink.feature.document.DocumentAiService;
 import com.example.ilink.feature.document.DocumentService;
+import com.example.ilink.feature.express.ExpressService;
+import com.example.ilink.feature.express.ExpressPageService;
+import com.example.ilink.feature.express.ExpressHttpServer;
 import com.example.ilink.feature.finance.ExpenseSplitService;
+import com.example.ilink.feature.food.FoodOrderService;
+import com.example.ilink.feature.food.FoodPreferenceMapper;
 import com.example.ilink.feature.image.ImageService;
 import com.example.ilink.feature.image.VisionService;
 import com.example.ilink.rag.EmbeddingService;
 import com.example.ilink.rag.Retriever;
 import com.example.ilink.rag.VectorStore;
+import com.example.ilink.feature.image.GeneratedImage;
 import com.example.ilink.feature.persona.Personas;
+import com.example.ilink.feature.memory.MemoryService;
+import com.example.ilink.feature.mail.QqMailService;
+import com.example.ilink.feature.media.BangumiService;
+import com.example.ilink.feature.media.LrcLibService;
+import com.example.ilink.feature.media.MediaKnowledgeService;
+import com.example.ilink.feature.media.MusicBrainzService;
 import com.example.ilink.feature.planning.TaskPlanningService;
+import com.example.ilink.feature.planning.TodoService;
 import com.example.ilink.feature.calculator.CalculatorService;
 import com.example.ilink.feature.weather.WeatherService;
+import com.example.ilink.feature.web.NewsSearchService;
+import com.example.ilink.feature.web.BilibiliSearchService;
+import com.example.ilink.feature.web.ShortLinkService;
+import com.example.ilink.feature.web.WebSearchService;
 import com.example.ilink.feature.calendar.CalendarService;
+import com.example.ilink.feature.calendar.ReminderTextFormatter;
+import com.example.ilink.feature.calendar.HolidayService;
 import com.example.ilink.feature.travel.AmapService;
+import com.example.ilink.feature.travel.DidiMcpClient;
+import com.example.ilink.feature.visual.QrCodeService;
+import com.example.ilink.feature.visual.VisualCardFactory;
+import com.example.ilink.feature.visual.VisualCardRenderer;
+import com.example.ilink.feature.visual.VisualDeckSender;
 import com.example.ilink.tools.audio.AudioTranscribeTool;
 import com.example.ilink.tools.audio.SpeechTool;
 import com.example.ilink.tools.core.ToolManager;
 import com.example.ilink.tools.finance.ExpenseSplitTool;
+import com.example.ilink.tools.express.ExpressTool;
 import com.example.ilink.tools.food.FoodDeliveryTool;
+import com.example.ilink.tools.food.FoodOrderTool;
 import com.example.ilink.tools.food.NearbyFoodTool;
 import com.example.ilink.tools.document.DocumentEditTool;
 import com.example.ilink.tools.document.DocumentGenerateTool;
@@ -66,8 +92,11 @@ import com.example.ilink.model.AudioSource;
 import com.example.ilink.model.DocumentRecord;
 import com.example.ilink.routing.IntentRecognizer;
 import com.example.ilink.storage.MediaStore;
+import com.example.ilink.storage.MySqlStore;
+import com.example.ilink.storage.TodoStore;
 import com.example.ilink.storage.CalendarEventStore;
 import com.example.ilink.model.CalendarEvent;
+import com.example.ilink.model.ReminderDelivery;
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.core.model.WeixinMessage;
 
@@ -79,6 +108,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.HashSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -103,21 +133,37 @@ public final class MessageDispatcher implements AutoCloseable {
     private final AudioHistoryStore audioHistory = new AudioHistoryStore();
     private final DocumentSessionStore documentSessions = new DocumentSessionStore();
     private final PlanSessionStore planSessions = new PlanSessionStore();
-    private final IntentRecognizer intentRecognizer = new IntentRecognizer(httpClient);
-    private final ChatService chatService = new ChatService(httpClient, chatHistory, sessions);
+   
     private final EmbeddingService embeddingService = new EmbeddingService(httpClient);
     private final VectorStore vectorStore = new VectorStore();
     private final Retriever retriever = new Retriever(embeddingService, vectorStore);
     private final DocumentAiService documentAiService = new DocumentAiService(httpClient, chatHistory, retriever);
+    private final MemoryService memoryService = new MemoryService();
+    private final IntentRecognizer intentRecognizer = new IntentRecognizer( httpClient, chatHistory, memoryService, sessions);
+    private final ChatService chatService = new ChatService(httpClient, chatHistory, sessions, memoryService);
+   
     private final AudioService audioService = new AudioService(httpClient);
     private final VisionService visionService = new VisionService(httpClient);
     private final DocumentService documentService = new DocumentService(visionService);
     private final ImageService imageService = new ImageService(httpClient);
     private final WeatherService weatherService = new WeatherService(httpClient);
+    private final WebSearchService webSearchService = new WebSearchService(httpClient);
+    private final ShortLinkService shortLinkService = new ShortLinkService();
+    private final BilibiliSearchService bilibiliSearchService = new BilibiliSearchService(
+            webSearchService, shortLinkService);
+    private final NewsSearchService newsSearchService = new NewsSearchService(httpClient);
+    private final MediaKnowledgeService mediaKnowledgeService = new MediaKnowledgeService(
+            new BangumiService(httpClient), new MusicBrainzService(httpClient),
+            new LrcLibService(httpClient), webSearchService);
+    private final QqMailService qqMailService = new QqMailService();
     private final TaskPlanningService planningService = new TaskPlanningService(httpClient);
     private final ExpenseSplitService expenseSplitService = new ExpenseSplitService(httpClient);
+    private final ExpressService expressService = new ExpressService(httpClient);
+    private final FoodOrderService foodOrderService = new FoodOrderService(httpClient);
     private final MediaStore mediaStore = new MediaStore();
     private final AmapService amapService = new AmapService(httpClient);
+    private final ExpressPageService expressPageService = new ExpressPageService();
+    private final ExpressHttpServer expressHttpServer = new ExpressHttpServer(expressPageService);
     private final ToolManager toolManager = new ToolManager()
             .register(new WeatherTool(weatherService))
             .register(new DrawTool(imageService))
@@ -138,8 +184,9 @@ public final class MessageDispatcher implements AutoCloseable {
             .register(new PlanProgressTool(planningService, planSessions))
             .register(new CalculatorTool())
             .register(new ExpenseSplitTool(expenseSplitService))
+            .register(new FoodOrderTool(foodOrderService))
             .register(new FoodDeliveryTool())
-            .register(new NearbyFoodTool(amapService))
+            .register(new NearbyFoodTool(amapService, new FoodPreferenceMapper(httpClient)))
             .register(new LengthTool())
             .register(new WeightTool())
             .register(new TemperatureTool())
@@ -153,57 +200,115 @@ public final class MessageDispatcher implements AutoCloseable {
             .register(new TaxTool())
             .register(new MortgageTool())
             .register(new ChineseMoneyTool())
-            .register(new RelationTool());
+            .register(new RelationTool())
+            .register(new ExpressTool(expressService, expressPageService));
+
     private final CalculatorService calculatorService = new CalculatorService(httpClient, toolManager);
     private final CalculatorTextRouter calculatorTextRouter = new CalculatorTextRouter(toolManager);
     private final Set<String> voiceReplyUsers = ConcurrentHashMap.newKeySet();
     private final ReplySender replySender = new ReplySender(
-            audioService, mediaStore, audioHistory, toolManager);
+            audioService, mediaStore, audioHistory, toolManager, sessions, chatHistory);
+    private final VisualCardFactory visualCardFactory = new VisualCardFactory();
+    private final VisualDeckSender visualDeckSender = new VisualDeckSender(
+            new VisualCardRenderer(new QrCodeService()), replySender::markSent, replySender::rememberText);
     private final CalendarService calendarService = new CalendarService(new CalendarEventStore());
+    private final TodoService todoService = new TodoService(new TodoStore(), calendarService);
     private final CalendarWorkflow calendarWorkflow = new CalendarWorkflow(
             calendarService, new CalendarSessionStore(), replySender);
     private final HealthDietWorkflow healthDietWorkflow = new HealthDietWorkflow(
             calendarService, new DietPlanSessionStore(), replySender, toolManager);
     private final NearbyFoodWorkflow nearbyFoodWorkflow = new NearbyFoodWorkflow(
             sessions, toolManager, replySender);
+    private final FoodOrderWorkflow foodOrderWorkflow = new FoodOrderWorkflow(
+            sessions, amapService, foodOrderService, replySender);
     private final TravelWorkflow travelWorkflow = new TravelWorkflow(
             amapService, calendarService, replySender);
+    private final TaxiWorkflow taxiWorkflow = new TaxiWorkflow(new DidiMcpClient(), replySender);
     private final PlanWorkflow planWorkflow = new PlanWorkflow(
             toolManager, planSessions, chatHistory, replySender, documentService, calendarService);
+    private final VisualCardWorkflow visualCardWorkflow = new VisualCardWorkflow(
+            visualDeckSender, visualCardFactory, planSessions, calendarService, todoService,
+            toolManager, foodOrderService, qqMailService, newsSearchService,
+            mediaKnowledgeService, bilibiliSearchService, amapService);
     private final UserRequestHandler requestHandler = new UserRequestHandler(
             chatHistory, sessions, documentSessions,
             intentRecognizer, chatService, weatherService,
             mediaStore, replySender, toolManager, planWorkflow, calculatorService, calendarWorkflow,
-            healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow);
+            healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, foodOrderWorkflow,
+            taxiWorkflow,
+            memoryService, todoService,
+            webSearchService, newsSearchService, bilibiliSearchService, mediaKnowledgeService,
+            qqMailService, visualCardWorkflow);
     private final ScheduledExecutorService progressScheduler = Executors.newScheduledThreadPool(1);
     private final ScheduledExecutorService reminderScheduler = Executors.newScheduledThreadPool(1);
+    private final ScheduledExecutorService briefingScheduler = Executors.newSingleThreadScheduledExecutor();
+    private final Set<String> knownUsers = ConcurrentHashMap.newKeySet();
+    private final Set<String> briefedUsers = ConcurrentHashMap.newKeySet();
+    private final Set<String> briefingUsersInProgress = ConcurrentHashMap.newKeySet();
+    private final LoginBriefingService loginBriefingService = new LoginBriefingService(
+            weatherService, calendarService, todoService, planSessions, sessions,
+            new HolidayService(), memoryService, qqMailService, newsSearchService, webSearchService);
+    private final DailyDashboardServer dailyDashboardServer;
+    private CloudflareTunnel expressTunnel;
     private volatile ILinkClient activeClient;
 
     /** 创建分发器时就准备提醒扫描；真正发消息前必须等待登录客户端就绪。 */
     public MessageDispatcher() {
-        reminderScheduler.scheduleAtFixedRate(this::sendDueReminders, 10, 60, TimeUnit.SECONDS);
+        DailyDashboardService dashboardService = new DailyDashboardService(
+                todoService, calendarService, planSessions, weatherService, sessions, memoryService);
+        dailyDashboardServer = new DailyDashboardServer(dashboardService);
+        dailyDashboardServer.start();
+        expressHttpServer.start();
+        startExpressTunnel();
+        reminderScheduler.scheduleAtFixedRate(this::sendDueReminders, 1, 1, TimeUnit.SECONDS);
+    }
+
+    private void startExpressTunnel() {
+        if (!Config.EXPRESS_BASE_URL.isBlank() || !Config.EXPRESS_TUNNEL_ENABLED) return;
+        expressTunnel = new CloudflareTunnel(Config.EXPRESS_TUNNEL_COMMAND,
+                expressPageService.actualPort, Config.EXPRESS_TUNNEL_TIMEOUT);
+        String publicUrl = expressTunnel.start();
+        if (publicUrl.isBlank()) {
+            expressTunnel.close();
+            expressTunnel = null;
+            System.err.println("[快递H5] 公网隧道启动失败，暂时使用本机地址");
+            return;
+        }
+        expressPageService.useBaseUrl(publicUrl);
+        System.out.println("[快递H5] 公网地址：" + publicUrl);
     }
 
     /** 登录成功后注入长连接，供没有新入站消息时的主动提醒使用。 */
     public void onClientReady(ILinkClient client) {
         this.activeClient = client;
+        briefedUsers.clear();
+        if (Config.LOGIN_BRIEFING_ENABLED) {
+            System.out.println("[登录简报] 登录触发，等待会话上下文就绪");
+            briefingScheduler.schedule(() -> sendLoginBriefings(client), 1, TimeUnit.SECONDS);
+        }
     }
 
     /** 接收一条 SDK 消息，并异步提交给内部处理流程。 */
     public void handleMessage(ILinkClient client, WeixinMessage message) {
         activeClient = client;
         String userId = message.getFrom_user_id();
+        dailyDashboardServer.useUser(userId);
+        knownUsers.add(userId);
+        if (Config.LOGIN_BRIEFING_ENABLED) {
+            briefingScheduler.execute(() -> sendLoginBriefingForUser(client, userId));
+        }
+        long startedAtMillis = System.currentTimeMillis();
         boolean voiceOnly = voiceReplyUsers.contains(userId)
                 || "voice".equalsIgnoreCase(Config.REPLY_MODE);
         ScheduledFuture<?> progressTask = progressScheduler.schedule(() -> {
             try {
-                if (!voiceOnly) {
+                if (!voiceOnly && !replySender.hasSentReplySince(userId, startedAtMillis)) {
                     client.sendText(userId, "正在回复中，请稍等......");
                 }
             } catch (Exception e) {
                 System.err.println("发送处理中提示失败: " + e.getMessage());
             }
-        }, 5, TimeUnit.SECONDS);
+        }, 12, TimeUnit.SECONDS);
 
         try {
             handleMessageInternal(client, message);
@@ -216,30 +321,30 @@ public final class MessageDispatcher implements AutoCloseable {
     private void handleMessageInternal(ILinkClient client, WeixinMessage message) {
         try {
             String userId = message.getFrom_user_id();
+            knownUsers.add(userId);
             client.startTyping(userId);
             List<com.github.wechat.ilink.sdk.core.model.MessageItem> items = message.getItem_list();
             if (items == null || items.isEmpty()) return;
 
             com.github.wechat.ilink.sdk.core.model.MessageItem first = items.get(0);
-            if (first.getText_item() != null) {
-                String text = first.getText_item().getText();
-                System.out.println("[" + userId + "] " + text);
-                if (calculatorTextRouter.isCalculatorCommand(text)) {
-                    replySender.sendReply(client, userId, calculatorTextRouter.handle(userId, text));
-                    return;
-                }
-                requestHandler.handle(client, userId, text);
-                return;
-            }
+            com.github.wechat.ilink.sdk.core.model.MessageItem textMessage = items.stream()
+                    .filter(item -> item.getText_item() != null)
+                    .findFirst().orElse(null);
+            com.github.wechat.ilink.sdk.core.model.MessageItem imageMessage = items.stream()
+                    .filter(item -> item.getImage_item() != null)
+                    .findFirst().orElse(null);
 
-            if (first.getImage_item() != null) {
-                byte[] image = client.downloadImageFromMessageItem(first);
+            // 图片优先落盘，再处理同一消息携带的文字要求，确保视觉工具能取得当前图片。
+            if (imageMessage != null) {
+                byte[] image = client.downloadImageFromMessageItem(imageMessage);
                 if (image == null || image.length == 0) {
                     replySender.sendReply(client, userId, "图片下载失败");
                     return;
                 }
 
-                Path saved = mediaStore.save(userId, "image", image, "png");
+                GeneratedImage receivedImage = GeneratedImage.from(image, null);
+                Path saved = mediaStore.save(userId, "image", image, receivedImage.extension());
+                documentSessions.clear(userId);
                 sessions.setLastImage(userId, saved.toString());
                 sessions.setPendingImage(userId, saved.toString());
 
@@ -292,6 +397,8 @@ public final class MessageDispatcher implements AutoCloseable {
 
                 chatHistory.addMedia(userId, "语音", saved.toString(), text);
                 System.out.println("[" + userId + "] [语音] " + text);
+                chatHistory.addUserMessage(userId, text);
+                memoryService.observe(userId, text);
                 requestHandler.handle(client, userId, text);
                 return;
             }
@@ -312,6 +419,8 @@ public final class MessageDispatcher implements AutoCloseable {
 
                 Path saved = mediaStore.save(userId, "file", file, extension);
                 try {
+                    sessions.clearPendingImage(userId);
+                    sessions.clearPendingDraw(userId);
                     DocumentService.ParsedDocument parsed = documentService.parse(saved, fileName);
                     documentSessions.set(userId, new DocumentRecord(
                             parsed.fileName(), parsed.extension(), saved.toString(), parsed.text()));
@@ -342,7 +451,7 @@ public final class MessageDispatcher implements AutoCloseable {
         } catch (Exception e) {
             System.err.println("处理消息异常: " + e.getMessage());
             try {
-                client.sendText(message.getFrom_user_id(), "网络波动了，请再发一次～");
+            replySender.sendReply(client, message.getFrom_user_id(), "网络波动了，请再发一次～");
             } catch (Exception ignored) {}
         }
     }
@@ -357,20 +466,107 @@ public final class MessageDispatcher implements AutoCloseable {
     public void close() {
         progressScheduler.shutdownNow();
         reminderScheduler.shutdownNow();
+        briefingScheduler.shutdownNow();
+        dailyDashboardServer.close();
+        expressHttpServer.stop();
+        if (expressTunnel != null) expressTunnel.close();
     }
 
     /** 扫描并发送到期提醒，单条发送失败不会影响后续用户的提醒。 */
     private void sendDueReminders() {
         ILinkClient client = activeClient;
         if (client == null || !client.isLoggedIn()) return;
-        for (CalendarEvent event : calendarService.claimDueEvents(LocalDateTime.now())) {
+        Set<String> sendableUsers = sendableUsers(client);
+        if (sendableUsers.isEmpty()) return;
+        for (ReminderDelivery delivery : calendarService.claimDueReminders(LocalDateTime.now(), sendableUsers)) {
+            CalendarEvent event = calendarService.getEvent(delivery.eventId());
+            if (event == null) {
+                calendarService.markReminderFailed(delivery, LocalDateTime.now(), "日历事件不存在");
+                continue;
+            }
             try {
-                String repeat = "none".equals(event.recurrence()) ? "" : "这是一项" + recurrenceName(event.recurrence()) + "提醒。";
-                replySender.sendReply(client, event.userId(), "提醒你：" + event.title() + "\n" + repeat);
+                replySender.sendReply(client, event.userId(), ReminderTextFormatter.format(event));
+                calendarService.markReminderSent(delivery, LocalDateTime.now());
             } catch (Exception e) {
                 System.err.println("[日历提醒] 发送失败: " + e.getMessage());
+                calendarService.markReminderFailed(delivery, LocalDateTime.now(), e.getMessage());
             }
         }
+    }
+
+    /** 每次机器人登录后，为所有已知用户发送简报并补发逾期提醒。 */
+    private void sendLoginBriefings(ILinkClient client) {
+        if (client == null || !client.isLoggedIn()) {
+            System.err.println("[登录简报] 跳过：客户端尚未登录");
+            return;
+        }
+        Set<String> users = new HashSet<>(MySqlStore.getInstance().loadKnownUserIds());
+        users.addAll(knownUsers);
+        System.out.println("[登录简报] 候选用户数=" + users.size());
+        for (String userId : users) {
+            sendLoginBriefingForUser(client, userId);
+        }
+    }
+
+    /** 用户具备上下文时发送一次简报；失败则允许后续消息再次触发。 */
+    private void sendLoginBriefingForUser(ILinkClient client, String userId) {
+        if (client == null || !client.isLoggedIn()) return;
+        if (!hasSendContext(client, userId)) {
+            System.out.println("[登录简报] 跳过：用户缺少可发送会话上下文 user=" + userId);
+            return;
+        }
+        if (briefedUsers.contains(userId) || !briefingUsersInProgress.add(userId)) return;
+
+        try {
+            List<ReminderDelivery> deliveries = calendarService.claimOverdueRemindersForUser(
+                    userId, LocalDateTime.now());
+            try {
+                System.out.println("[登录简报] 开始构建 user=" + userId);
+                String draft = loginBriefingService.build(userId, List.of());
+                String dashboardUrl = dailyDashboardServer.urlFor(userId);
+                String message = chatService.polishBriefing(userId, draft);
+                String textFallback = dashboardUrl.isBlank() ? message
+                        : message + "\n\n你的七日计划页：\n" + dashboardUrl;
+                visualDeckSender.sendText(client, userId, textFallback);
+                briefedUsers.add(userId);
+                System.out.println("[登录简报] 发送成功 user=" + userId);
+            } catch (Exception e) {
+                System.err.println("[登录简报] 发送失败 user=" + userId + ": " + e.getMessage());
+            }
+            for (ReminderDelivery delivery : deliveries) {
+                CalendarEvent event = calendarService.getEvent(delivery.eventId());
+                if (event == null) {
+                    calendarService.markReminderFailed(delivery, LocalDateTime.now(), "日历事件不存在");
+                    continue;
+                }
+                try {
+                    replySender.sendReply(client, userId, ReminderTextFormatter.format(event));
+                    calendarService.markReminderSent(delivery, LocalDateTime.now());
+                } catch (Exception e) {
+                    System.err.println("[离线提醒] 补发失败 user=" + userId + ": " + e.getMessage());
+                    calendarService.markReminderFailed(delivery, LocalDateTime.now(), e.getMessage());
+                }
+            }
+        } finally {
+            briefingUsersInProgress.remove(userId);
+        }
+    }
+
+    private boolean hasSendContext(ILinkClient client, String userId) {
+        var resume = client.exportResumeContext();
+        if (resume == null) return false;
+        var context = resume.getConversationContextMap().get(userId);
+        return context != null && context.hasContextToken();
+    }
+
+    private Set<String> sendableUsers(ILinkClient client) {
+        var resume = client.exportResumeContext();
+        if (resume == null) return Set.of();
+        Set<String> users = new HashSet<>();
+        resume.getConversationContextMap().forEach((userId, context) -> {
+            if (context != null && context.hasContextToken()) users.add(userId);
+        });
+        return users;
     }
 
     private String recurrenceName(String recurrence) {

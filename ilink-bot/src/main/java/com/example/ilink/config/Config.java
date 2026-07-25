@@ -43,7 +43,7 @@ public class Config {
     public static final String DOCUMENT_MODEL = loadProperty("document.model", "deepseek-ai/DeepSeek-Coder-V2-Instruct");
     public static final int DOCUMENT_MAX_TEXT_CHARS = Integer.parseInt(loadProperty("document.max_text_chars", "40000"));
     public static final Duration REQ_TIMEOUT = Duration.ofSeconds(
-            Long.parseLong(loadProperty("request.timeout.seconds", "120")));
+            Long.parseLong(loadProperty("request.timeout.seconds", "180")));
     public static final Duration DOCUMENT_REQ_TIMEOUT = Duration.ofSeconds(
             Long.parseLong(loadProperty("document.request.timeout.seconds", "240")));
     public static final Duration VISION_REQ_TIMEOUT = Duration.ofSeconds(
@@ -66,10 +66,78 @@ public class Config {
     public static final String DATABASE_BOT_ID = loadProperty("database.bot.id", "ilink-bot-1");
     /** 高德 Web 服务 Key；为空时保留文字出行建议，不生成地图图片。 */
     public static final String AMAP_API_KEY = loadProperty("amap.api.key", "");
+    /**embedding配置。*/
     public static final String EMBEDDING_API_URL = loadProperty("embedding.api.url",
             "https://api.siliconflow.cn/v1/embeddings");
     public static final String EMBEDDING_MODEL = loadProperty("embedding.model", "BAAI/bge-large-zh-v1.5");
     public static final int EMBEDDING_DIMENSION = Integer.parseInt(loadProperty("embedding.dimension", "1024"));
+    /** 百度地图 AK，用于快递 H5 和服务端出行规划。 */
+    public static final String BAIDU_MAP_AK = loadProperty("baidu.map.ak", "");
+    /** 滴滴 MCP Key；优先从环境变量 DIDI_MCP_KEY 读取，避免把密钥写入配置文件。 */
+    public static final String DIDI_MCP_KEY = loadSecretProperty("DIDI_MCP_KEY", "didi.mcp.key");
+    /** 是否使用滴滴 MCP 调试环境；生产环境默认关闭。 */
+    public static final boolean DIDI_MCP_SANDBOX =
+            Boolean.parseBoolean(loadProperty("didi.mcp.sandbox", "false"));
+    /** 快递 H5 页面服务端口。 */
+    public static final int EXPRESS_PORT = Integer.parseInt(loadProperty("express.port", "8089"));
+    /** 快递 H5 页面公网地址；为空时使用本机地址。 */
+    public static final String EXPRESS_BASE_URL = loadProperty("express.base-url", "");
+    public static final boolean EXPRESS_TUNNEL_ENABLED =
+            Boolean.parseBoolean(loadProperty("express.tunnel.enabled", "false"));
+    public static final String EXPRESS_TUNNEL_COMMAND =
+            loadProperty("express.tunnel.command", "data/tools/cloudflared.exe");
+    public static final Duration EXPRESS_TUNNEL_TIMEOUT = Duration.ofSeconds(
+            Long.parseLong(loadProperty("express.tunnel.timeout.seconds", "25")));
+    public static final boolean LOGIN_BRIEFING_ENABLED =
+            Boolean.parseBoolean(loadProperty("briefing.login.enabled", "true"));
+    public static final boolean BRIEFING_POLISH_ENABLED =
+            Boolean.parseBoolean(loadProperty("briefing.polish.enabled", "true"));
+    public static final Duration BRIEFING_POLISH_TIMEOUT = Duration.ofSeconds(
+            Long.parseLong(loadProperty("briefing.polish.timeout.seconds", "60")));
+    public static final String BRIEFING_DEFAULT_LOCATION = loadProperty("briefing.default.location", "");
+    public static final boolean DAILY_DASHBOARD_ENABLED =
+            Boolean.parseBoolean(loadProperty("dashboard.enabled", "true"));
+    public static final String DAILY_DASHBOARD_BIND_ADDRESS =
+            loadProperty("dashboard.bind.address", "0.0.0.0");
+    public static final int DAILY_DASHBOARD_PORT =
+            Integer.parseInt(loadProperty("dashboard.port", "8787"));
+    public static final String DAILY_DASHBOARD_PUBLIC_URL =
+            loadProperty("dashboard.public.url", "");
+    public static final boolean DAILY_DASHBOARD_TUNNEL_ENABLED =
+            Boolean.parseBoolean(loadProperty("dashboard.tunnel.enabled", "false"));
+    public static final String DAILY_DASHBOARD_TUNNEL_COMMAND =
+            loadProperty("dashboard.tunnel.command", "data/tools/cloudflared.exe");
+    public static final Duration DAILY_DASHBOARD_TUNNEL_TIMEOUT = Duration.ofSeconds(
+            Long.parseLong(loadProperty("dashboard.tunnel.timeout.seconds", "25")));
+    public static final boolean VISUAL_CARDS_ENABLED =
+            Boolean.parseBoolean(loadProperty("visual.cards.enabled", "true"));
+    public static final String VISUAL_CARDS_MODE = loadProperty("visual.cards.mode", "image");
+    public static final int VISUAL_CARDS_MAX_DECK_SIZE = Math.max(1, Math.min(6,
+            Integer.parseInt(loadProperty("visual.cards.max.deck.size", "6"))));
+    public static final boolean VISUAL_LINK_QRCODE =
+            Boolean.parseBoolean(loadProperty("visual.cards.link.qrcode", "true"));
+    public static final String TAVILY_API_KEY = loadProperty("web.search.tavily.api.key", "");
+    public static final int WEB_SEARCH_TIMEOUT_SECONDS =
+            Integer.parseInt(loadProperty("web.search.timeout.seconds", "20"));
+    public static final int WEB_SEARCH_RESULT_LIMIT =
+            Integer.parseInt(loadProperty("web.search.result.limit", "5"));
+    public static final Path SDK_RESUME_CONTEXT_FILE =
+            Path.of(loadProperty("sdk.resume.context.file", "data/sdk-resume-context.json"));
+    public static final String KUAIDI100_CUSTOMER = loadProperty("kuaidi100.customer", "");
+    public static final String KUAIDI100_KEY = loadProperty("kuaidi100.key", "");
+    public static final String BANGUMI_API_BASE = loadProperty("bangumi.api.base", "https://api.bgm.tv");
+    public static final String MUSICBRAINZ_API_BASE = loadProperty(
+            "musicbrainz.api.base", "https://musicbrainz.org/ws/2");
+    public static final String MUSICBRAINZ_USER_AGENT = loadProperty(
+            "musicbrainz.user.agent", "ilink-bot/1.0");
+    public static final String LRCLIB_API_BASE = loadProperty("lrclib.api.base", "https://lrclib.net/api");
+    public static final boolean QQ_MAIL_ENABLED = Boolean.parseBoolean(
+            loadProperty("qq.mail.enabled", "false"));
+    public static final String QQ_MAIL_ADDRESS = loadProperty("qq.mail.address", "");
+    public static final String QQ_MAIL_AUTH_CODE = loadProperty("qq.mail.auth.code", "");
+    public static final String QQ_MAIL_OWNER_USER_ID = loadProperty("qq.mail.owner.user.id", "");
+    public static final String QQ_MAIL_IMAP_HOST = loadProperty("qq.mail.imap.host", "imap.qq.com");
+    public static final int QQ_MAIL_IMAP_PORT = Integer.parseInt(loadProperty("qq.mail.imap.port", "993"));
 
     /** 读取 API Key；不存在或仍为模板值时终止启动。 */
     private static String loadApiKey() {
@@ -106,5 +174,12 @@ public class Config {
         } catch (Exception e) {
             return defaultValue;
         }
+    }
+
+    private static String loadSecretProperty(String environmentName, String propertyName) {
+        String environmentValue = System.getenv(environmentName);
+        if (environmentValue != null && !environmentValue.isBlank()) return environmentValue.trim();
+        String propertyValue = loadProperty(propertyName, "");
+        return propertyValue.isBlank() ? loadProperty(environmentName, "") : propertyValue;
     }
 }

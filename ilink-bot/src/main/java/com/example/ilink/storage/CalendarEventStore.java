@@ -3,7 +3,7 @@ package com.example.ilink.storage;
 import com.example.ilink.model.CalendarEvent;
 
 import java.time.LocalDateTime;
-import java.util.ArrayList;
+import java.time.LocalDate;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -42,40 +42,28 @@ public final class CalendarEventStore {
                 .orElse(null);
     }
 
-    /**
-     * 领取到期提醒时先推进下一次触发时间。即使调度器再次扫描，也不会重复发送同一条提醒。
-     */
-    public synchronized List<CalendarEvent> claimDue(LocalDateTime now) {
-        List<CalendarEvent> due = new ArrayList<>();
-        for (CalendarEvent event : events.values()) {
-            if (!"active".equals(event.status()) || event.nextReminderAt() == null
-                    || event.nextReminderAt().isAfter(now)) {
-                continue;
-            }
-            due.add(event);
-            save(event.withNextReminderAt(nextOccurrence(event.nextReminderAt(), event.recurrence(), now)));
-        }
-        due.sort(Comparator.comparing(CalendarEvent::nextReminderAt));
-        return due;
+    public synchronized CalendarEvent get(String eventId) {
+        return events.get(eventId);
     }
 
-    private LocalDateTime nextOccurrence(LocalDateTime current, String recurrence, LocalDateTime now) {
-        LocalDateTime next = switch (recurrence) {
-            case "daily" -> current.plusDays(1);
-            case "weekly" -> current.plusWeeks(1);
-            case "monthly" -> current.plusMonths(1);
-            case "yearly" -> current.plusYears(1);
-            default -> null;
-        };
-        while (next != null && !next.isAfter(now)) {
-            next = switch (recurrence) {
-                case "daily" -> next.plusDays(1);
-                case "weekly" -> next.plusWeeks(1);
-                case "monthly" -> next.plusMonths(1);
-                case "yearly" -> next.plusYears(1);
-                default -> null;
-            };
-        }
-        return next;
+    public synchronized List<CalendarEvent> findActive(String userId, String titleKeyword, LocalDate day) {
+        String keyword = titleKeyword == null ? "" : titleKeyword.trim();
+        return events.values().stream()
+                .filter(event -> event.userId().equals(userId) && "active".equals(event.status()))
+                .filter(event -> keyword.isBlank() || event.title().contains(keyword))
+                .filter(event -> day == null || event.startAt().toLocalDate().equals(day))
+                .sorted(Comparator.comparing(CalendarEvent::startAt))
+                .toList();
+    }
+
+    public synchronized List<CalendarEvent> findActiveGroup(String userId, String source, String groupId) {
+        return events.values().stream()
+                .filter(event -> event.userId().equals(userId) && "active".equals(event.status()))
+                .filter(event -> source.equals(event.source()) && groupId.equals(event.groupId()))
+                .toList();
+    }
+
+    public synchronized List<CalendarEvent> all() {
+        return List.copyOf(events.values());
     }
 }

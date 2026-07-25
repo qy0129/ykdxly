@@ -30,7 +30,7 @@ public final class ImageGenerationService {
         this.httpClient = httpClient;
     }
     /** 调用图片生成模型并下载返回的图片。 */
-    public byte[] generateImage(String prompt, String imageSize) throws Exception {
+    public GeneratedImage generateImage(String prompt, String imageSize) throws Exception {
         System.out.println("[绘图] 开始生成: " + prompt + " 尺寸: " + imageSize);
         JsonObject body = new JsonObject();
         body.addProperty("model", Config.DRAW_MODEL);
@@ -71,7 +71,7 @@ public final class ImageGenerationService {
             String contentType = imgResponse.headers().firstValue("Content-Type").orElse("");
             System.out.println("[绘图] 下载成功: " + imgResponse.body().length + " bytes, Content-Type: " + contentType);
             if (contentType.startsWith("image/") || contentType.startsWith("application/octet-stream")) {
-                return imgResponse.body();
+                return GeneratedImage.from(imgResponse.body(), contentType);
             }
             System.err.println("[绘图] 返回的不是图片: " + contentType);
             System.err.println("[绘图] 内容前200字节: " + new String(imgResponse.body(), 0, Math.min(200, imgResponse.body().length)));
@@ -83,12 +83,14 @@ public final class ImageGenerationService {
     }
 
     /** 上传本地图片并调用图片编辑模型。 */
-    public byte[] editImage(Path sourceImage, String prompt) throws Exception {
+    public GeneratedImage editImage(Path sourceImage, String prompt) throws Exception {
         byte[] imageBytes = Files.readAllBytes(sourceImage);
+        GeneratedImage source = GeneratedImage.from(imageBytes, Files.probeContentType(sourceImage));
         JsonObject body = new JsonObject();
         body.addProperty("model", Config.IMAGE_EDIT_MODEL);
         body.addProperty("prompt", prompt);
-        body.addProperty("image", "data:image/png;base64," + Base64.getEncoder().encodeToString(imageBytes));
+        body.addProperty("image", "data:" + source.contentType() + ";base64,"
+                + Base64.getEncoder().encodeToString(imageBytes));
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(Config.DRAW_API_URL))
@@ -107,7 +109,7 @@ public final class ImageGenerationService {
     }
 
     /** 从图片接口响应中提取 URL 并下载图片字节。 */
-    private byte[] downloadGeneratedImage(String responseBody) throws Exception {
+    private GeneratedImage downloadGeneratedImage(String responseBody) throws Exception {
         JsonObject json = JsonParser.parseString(responseBody).getAsJsonObject();
         String imageUrl = json.getAsJsonArray("images").get(0).getAsJsonObject().get("url").getAsString();
         HttpRequest request = HttpRequest.newBuilder()
@@ -117,6 +119,8 @@ public final class ImageGenerationService {
                 .GET()
                 .build();
         HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
-        return response.statusCode() == 200 ? response.body() : null;
+        if (response.statusCode() != 200) return null;
+        String contentType = response.headers().firstValue("Content-Type").orElse("");
+        return GeneratedImage.from(response.body(), contentType);
     }
 }

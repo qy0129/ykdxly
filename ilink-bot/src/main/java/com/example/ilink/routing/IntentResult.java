@@ -1,5 +1,7 @@
 package com.example.ilink.routing;
 
+import java.util.List;
+
 /**
  * 意图识别结果。
  *
@@ -33,6 +35,9 @@ public record IntentResult(
         String calculationDiscountPercent,
         String travelOrigin,
         String travelDestination,
+        List<String> travelStops,
+        String originCity,
+        String destinationCity,
         String travelDepartureTime,
         int timeBudgetMinutes,
         String mealKeyword,
@@ -43,5 +48,16 @@ public record IntentResult(
         String calendarTitle,
         String calendarTime,
         String calendarRecurrence,
-        int calendarReminderMinutes) {
+        int calendarReminderMinutes,
+        String calendarTimeType,
+        long calendarTimeAmount,
+        String calendarTimeUnit,
+        int calendarLeadTimeSeconds,
+        String bilibiliQuery,
+        String bilibiliCategory,
+        String mediaQuery,
+        String mediaCategory,
+        String emailAction,
+        String emailKeyword,
+        String foodOrderRestaurants) {
 }

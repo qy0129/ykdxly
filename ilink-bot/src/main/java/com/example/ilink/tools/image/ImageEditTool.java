@@ -2,6 +2,7 @@ package com.example.ilink.tools.image;
 
 import com.example.ilink.conversation.UserSessionStore;
 import com.example.ilink.feature.image.ImageService;
+import com.example.ilink.feature.image.GeneratedImage;
 import com.example.ilink.tools.core.Tool;
 import com.example.ilink.tools.core.ToolArguments;
 import com.example.ilink.tools.core.ToolContext;
@@ -51,7 +52,7 @@ public final class ImageEditTool implements Tool {
             return ToolResult.failure("没有找到需要编辑的图片");
         }
 
-        byte[] image = imageService.editImage(
+        GeneratedImage image = imageService.editImage(
                 Path.of(imagePath), ToolArguments.requireString(arguments, "prompt"));
         if (image == null) {
             return ToolResult.failure("图片编辑失败");

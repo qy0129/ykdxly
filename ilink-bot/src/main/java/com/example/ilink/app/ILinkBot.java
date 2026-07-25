@@ -1,8 +1,11 @@
 package com.example.ilink.app;
 
 import com.example.ilink.config.Config;
+import com.example.ilink.storage.SdkResumeContextStore;
 import com.github.wechat.ilink.sdk.ILinkClient;
+import com.github.wechat.ilink.sdk.ILinkClientBuilder;
 import com.github.wechat.ilink.sdk.core.config.ILinkConfig;
+import com.github.wechat.ilink.sdk.core.context.ResumeContext;
 import com.github.wechat.ilink.sdk.core.listener.OnMessageListener;
 import com.github.wechat.ilink.sdk.core.listener.OnLoginListener;
 import com.github.wechat.ilink.sdk.core.login.LoginStatus;
@@ -37,6 +40,7 @@ public class ILinkBot {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final MessageDispatcher dispatcher = new MessageDispatcher();
     private final LoginQrPage loginQrPage = new LoginQrPage();
+    private final SdkResumeContextStore resumeContextStore = new SdkResumeContextStore();
     private final AtomicBoolean running = new AtomicBoolean(true);
     private ILinkClient client;
 
@@ -58,13 +62,32 @@ public class ILinkBot {
                 ILinkClient loginClient = null;
                 boolean loginSucceeded = false;
                 try {
-                    loginClient = createClient();
+                    ResumeContext savedContext = resumeContextStore.load();
+                    loginClient = createClient(savedContext);
                     this.client = loginClient;
 
-                    System.out.println("[登录] 正在获取二维码...");
-                    String qrcodeImg = loginClient.executeLogin();
-                    showLoginQrCode(qrcodeImg);
-                    loginSucceeded = waitForLogin(loginClient);
+                    if (savedContext != null && loginClient.isLoggedIn()) {
+                        try {
+                            loginClient.getUpdates();
+                            loginSucceeded = true;
+                            resumeContextStore.save(loginClient.exportResumeContext());
+                            dispatcher.onClientReady(loginClient);
+                            System.out.println("[登录] 已恢复上次会话，无需重新扫码");
+                        } catch (Exception resumeError) {
+                            System.err.println("[登录] 上次会话已失效，改用扫码登录: " + rootMessage(resumeError));
+                            resumeContextStore.clear();
+                            closeClient(loginClient);
+                            loginClient = createClient(null);
+                            this.client = loginClient;
+                        }
+                    }
+
+                    if (!loginSucceeded) {
+                        System.out.println("[登录] 正在获取二维码...");
+                        String qrcodeImg = loginClient.executeLogin();
+                        showLoginQrCode(qrcodeImg);
+                        loginSucceeded = waitForLogin(loginClient);
+                    }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return;
@@ -87,8 +110,6 @@ public class ILinkBot {
                 return;
             }
 
-            // 登录后的客户端连接由日历调度器复用，用于在用户未发消息时主动提醒。
-            dispatcher.onClientReady(client);
             System.out.println("登录成功！监听器已就绪，等待消息... (Ctrl+C 退出)\n");
             latch.await();
             executor.shutdownNow();
@@ -100,7 +121,7 @@ public class ILinkBot {
     }
 
     /** 创建带网络重试、超时和登录回调的 SDK 客户端。 */
-    private ILinkClient createClient() {
+    private ILinkClient createClient(ResumeContext resumeContext) {
         ILinkConfig config = ILinkConfig.builder()
                 .connectTimeoutMs(60000)
                 .readTimeoutMs(60000)
@@ -112,13 +133,16 @@ public class ILinkBot {
                 .autoReconnectEnabled(true)
                 .build();
 
-        return ILinkClient.builder()
+        ILinkClientBuilder builder = ILinkClient.builder()
                 .config(config)
                 .onLogin(new OnLoginListener() {
                     /** 登录成功时输出中文状态，便于在控制台确认登录结果。 */
                     @Override
                     public void onLoginSuccess(com.github.wechat.ilink.sdk.core.login.LoginContext context) {
                         System.out.println("[登录] 登录成功");
+                        resumeContextStore.save(ILinkBot.this.client.exportResumeContext());
+                        // 初次扫码和自动重连都会进入这里，每次登录都触发离线补发和温柔简报。
+                        dispatcher.onClientReady(ILinkBot.this.client);
                     }
 
                     /** 登录失败时输出 SDK 返回的具体原因。 */
@@ -131,12 +155,14 @@ public class ILinkBot {
                     /** 将 SDK 收到的消息提交到后台线程逐条处理。 */
                     @Override
                     public void onMessages(List<WeixinMessage> messages) {
+                        resumeContextStore.save(ILinkBot.this.client.exportResumeContext());
                         for (WeixinMessage message : messages) {
                             executor.submit(() -> dispatcher.handleMessage(ILinkBot.this.client, message));
                         }
                     }
-                })
-                .build();
+                });
+        if (resumeContext != null) builder.resumeContext(resumeContext);
+        return builder.build();
     }
 
     /** 轮询当前登录状态，遇到过期、错误或 Future 异常时结束本次登录。 */
@@ -224,6 +250,7 @@ public class ILinkBot {
         loginQrPage.cleanup();
         if (client != null) {
             try {
+                resumeContextStore.save(client.exportResumeContext());
                 client.cancelLogin();
                 client.close();
             } catch (Exception ignored) {}

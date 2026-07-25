@@ -16,10 +16,15 @@ import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.regex.Pattern;
 import java.util.Set;
 
 /** 解析自然语言中的消费信息，并计算多人 AA 或不同付款金额的结算方案。 */
 public final class ExpenseSplitService {
+
+    private static final Pattern EXPLICIT_TOTAL_PATTERN = Pattern.compile(
+            "(?:总金额|总额|总价|合计|总计|总共|一共|共计|消费总额|账单总额|账单金额)\\D{0,8}\\d"
+                    + "|(?:消费|聚餐|吃饭|账单)\\D{0,4}(?:共|总共|一共)\\D{0,8}\\d");
 
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
@@ -32,6 +37,9 @@ public final class ExpenseSplitService {
     /** 从用户原话中提取账单信息并返回可直接执行的结算结果。 */
     public String split(String userInput) {
         SplitRequest request = extractRequest(userInput);
+        if (request != null) {
+            request = inferTotalWhenOmitted(userInput, request);
+        }
         return request == null
                 ? "没能理解分摊信息。请说明总金额、参与人和已付款金额，例如：我、张三、李四吃饭共300元，我付了300元。"
                 : calculate(request);
@@ -51,7 +59,7 @@ public final class ExpenseSplitService {
             system.addProperty("content", "你只提取多人费用分摊参数，必须只输出 JSON。"
                     + "格式：{\"title\":\"聚餐\",\"total\":300,\"currency\":\"元\","
                     + "\"participants\":[{\"name\":\"我\",\"paid\":300},{\"name\":\"张三\",\"paid\":0}]}。"
-                    + "total 是消费总额；participants 必须包含全部参与者。"
+                    + "total 是用户明确说出的消费总额；如果用户没有明确说总额，total 必须填 0，绝对不要猜测或自行求和；participants 必须包含全部参与者。"
                     + "用户说 AA、平分且没有付款明细时，所有 paid 填 0。"
                     + "用户说谁付了多少钱时如实填写 paid；未付款者填 0。"
                     + "不要补造参与者、金额或付款记录。");
@@ -84,6 +92,22 @@ public final class ExpenseSplitService {
             System.err.println("[AA分摊] 参数提取失败：" + e.getMessage());
             return null;
         }
+    }
+
+    /** 用户未明确总额时，付款记录本身就是本次消费总额。 */
+    private SplitRequest inferTotalWhenOmitted(String userInput, SplitRequest request) {
+        if (userInput != null && EXPLICIT_TOTAL_PATTERN.matcher(userInput).find()) {
+            return request;
+        }
+
+        BigDecimal paidTotal = request.participants().stream()
+                .map(Participant::paid)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        paidTotal = MoneyUtils.round(paidTotal);
+        if (paidTotal.compareTo(BigDecimal.ZERO) <= 0) {
+            return request;
+        }
+        return new SplitRequest(request.title(), paidTotal, request.currency(), request.participants());
     }
 
     /** 解析模型返回的 JSON，并进行基本的金额和参与人校验。 */
