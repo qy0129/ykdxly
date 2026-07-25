@@ -22,6 +22,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 
 import java.util.List;
+import java.util.Set;
 import java.util.Map;
 import java.util.HashMap;
 import java.time.LocalDate;
@@ -279,7 +280,7 @@ public final class PlanWorkflow {
     /** 根据用户要求发送计划文本、文件和语音。 */
     private void sendPlanResult(ILinkClient client, String userId, String planText,
                                 PlanOutputOptions options) throws Exception {
-        if ("docx".equals(options.outputFileType()) || "pdf".equals(options.outputFileType())) {
+        if (Set.of("docx", "pdf", "xlsx", "pptx").contains(options.outputFileType())) {
             JsonObject documentArguments = new JsonObject();
             documentArguments.addProperty("content", planText);
             documentArguments.addProperty("output_type", options.outputFileType());

@@ -41,6 +41,7 @@ public final class UserSessionStore {
     private final Map<String, String> pendingDrawPrompts = new ConcurrentHashMap<>();
     private final Map<String, String> lastImagePaths = new ConcurrentHashMap<>();
     private final Map<String, String> pendingImagePaths = new ConcurrentHashMap<>();
+    private final Map<String, String> lastImageAnalyses = new ConcurrentHashMap<>();
     private final Map<String, List<WeatherLocation>> pendingWeatherLocations = new ConcurrentHashMap<>();
     private final Map<String, String> pendingWeatherDays = new ConcurrentHashMap<>();
     private final Set<String> loadedWeatherUsers = ConcurrentHashMap.newKeySet();
@@ -124,6 +125,7 @@ public final class UserSessionStore {
     public void setPendingImage(String userId, String path) {
         ensureMediaLoaded(userId);
         pendingImagePaths.put(userId, path);
+        lastImageAnalyses.remove(userId);
         database.saveUserState(userId, PENDING_IMAGE_KEY, path);
     }
 
@@ -229,6 +231,20 @@ public final class UserSessionStore {
         } catch (JsonSyntaxException ignored) {
             database.deleteUserState(userId, PENDING_EXPRESS_KEY);
         }
+    }
+
+    /** 保存最近图片的完整识别结果，供后续生成文档时复用。 */
+    public void setLastImageAnalysis(String userId, String analysis) {
+        if (analysis == null || analysis.isBlank()) {
+            lastImageAnalyses.remove(userId);
+        } else {
+            lastImageAnalyses.put(userId, analysis);
+        }
+    }
+
+    /** 获取最近图片的完整识别结果。 */
+    public String getLastImageAnalysis(String userId) {
+        return lastImageAnalyses.get(userId);
     }
 
     /** 保存等待用户确认的同名天气地点。 */

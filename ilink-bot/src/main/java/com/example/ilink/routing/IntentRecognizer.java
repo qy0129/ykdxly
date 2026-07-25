@@ -625,17 +625,23 @@ public final class IntentRecognizer {
                 + "音色、男声、女声、温柔声音不属于人设切换。\n");
         prompt.append("4. audio_transcribe：用户明确要求获取某条历史语音的文字、转写或内容时使用。"
                 + "audio_source 表示机器人、用户或任意来源；audio_index 从最新一条开始计数。\n");
-        prompt.append("5. image_action：用户明确要求分析、解题或修改已发送图片时使用。"
+        prompt.append("5. image_action：用户明确要求分析、解题或修改已发送图片本身时使用。"
                 + "只有 pending_image=true，或用户明确指向上一张图片且 has_last_image=true 时才可使用。"
+                + "⚠️ 以下情况不是 image_action，必须判为 document_edit："
+                + "A）插入图片到文档：'把图片放到文档里'、'把图片插入文档'、'在文档中添加图片'；"
+                + "B）图片内容生成新文档：'图片转文档'、'拍照转文档'、'把图片上的文字整理成文档/表格'。"
+                + "A 是把图片文件嵌入已有文档，必须是 document_edit；B 是根据本轮图片内容新建文件，必须是 generate_file，不能使用历史文档。"
+                + "image_action 仅用于对图片本身做操作（分析图片内容、解题、美化、裁剪、加滤镜）。"
                 + "image_action 选择 analyze、solve、edit 或 clarify，完整要求写入 image_prompt。\n");
         prompt.append("6. draw_size：仅当 pending_draw_size=true 且用户正在回答图片尺寸时使用。"
                 + "方形对应1024x1024，竖屏对应768x1024，横屏对应1024x576。"
                 + "如果用户转而提出无关请求，应按新请求判断，不要强制 draw_size。\n\n");
         prompt.append("7. document_summary：当前有文件且用户要求总结文件时使用。\n");
         prompt.append("8. document_question：当前有文件且用户根据文件内容提问时使用。\n");
-        prompt.append("9. generate_file：用户明确要求把文件总结或回答整理成 PDF 或 DOCX 时使用。\n");
-        prompt.append("document_action 只能是 none|summary|question；没有文件时必须为 none。"
-                + "生成文件时 output_file_type 为 docx 或 pdf，否则为 none。\n\n");
+        prompt.append("9. generate_file：用户要求从零创建新文件、或把聊天回答整理成文件时使用。"
+                + "⚠️ 禁止用于格式转换！'转成Word/PDF'、'改成docx/pdf格式'、'导出为Word' 这类请求必须判为 document_edit，绝不能判为 generate_file。\n");
+        prompt.append("document_action 只能是 none|summary|question|edit；没有文件时必须为 none。"
+                + "编辑或格式转换时 output_file_type 为用户指定的格式（docx/pdf/xlsx/pptx/txt/md/csv），否则为 none。\n\n");
         prompt.append("10. weather：用户明确查询某个城市、区县、乡镇的天气、温度、降雨或风力时使用。"
                 + "weather_location 必须填写可供 Open-Meteo 检索的英文地点名，例如北京填 Beijing，上海填 Shanghai，"
                 + "和平镇填 Heping；用户提供了省、市、县时也要保留这些英文行政区信息。"
@@ -703,7 +709,9 @@ public final class IntentRecognizer {
                 + "只表达‘我在某地，想吃某品牌/餐品’但没有要求下单时使用nearby_food；"
                 + "只问附近有什么餐厅时仍使用nearby_food；要求营养或减脂外卖建议时仍使用diet_plan。\n\n");
 
-        prompt.append("Document rules: when has_document=true, use document_summary for summarizing, document_question for questions, document_edit when the user asks to modify, rewrite, delete, add, or correct the current document, and generate_file when the user asks for a PDF or DOCX output. document_action must be none, summary, question, or edit. output_file_type must be none, docx, or pdf.\n");
+        prompt.append("Document rules: when has_document=true, use document_summary for summarizing, document_question for questions, document_edit when the user asks to modify, rewrite, delete, add, correct, insert image into document, or convert the format of the current document (PDF转Word/Word转PDF等), and generate_file only when the user asks to create a brand new file from scratch. document_action must be none, summary, question, or edit. output_file_type supports: docx, pdf, xlsx, pptx, txt, md, csv, or none. "
+        + "⚠️ 强制规则：'转成Word/PDF/Excel'='改成xxx格式'='导出为xxx' → 必须 document_edit；'把图片放到/插入/添加到文档' → 必须 document_edit。"
+        + "output_file_type 规则：用户说'生成 Word/文档/转成Word/改成Word格式' → docx；说'PDF/转成PDF' → pdf；说'Excel/xlsx' → xlsx；说'PPT/pptx' → pptx；说'TXT/文本' → txt；说'Markdown/md' → md；说'CSV' → csv；未明确说明 → none。\n");
         prompt.append("输出规则：\n");
         prompt.append("- 用户明确只要语音时 reply_mode=voice；明确同时要文字和语音时为both；要求关闭语音时为text；否则为keep。\n");
         prompt.append("- voice_style：小男孩=boy，小女孩=girl，成年男声=male，成年女声=female，温柔柔和=warm，活泼元气=lively，无要求=default。\n");
@@ -722,7 +730,8 @@ public final class IntentRecognizer {
                 + "\"voice_style\":\"default|boy|girl|male|female|warm|lively\","
                 + "\"persona\":\"\",\"image_action\":\"none|analyze|solve|edit|clarify\","
                 + "\"image_prompt\":\"\",\"audio_source\":\"any|bot|user\",\"audio_index\":1,"
-                + "\"document_action\":\"none|summary|question\",\"output_file_type\":\"none|docx|pdf\","
+                + "\"document_action\":\"none|summary|question|edit\",\"output_file_type\":\"none|docx|pdf|xlsx|pptx|txt|md|csv\","
+              
                 + "\"weather_location\":\"\",\"weather_day\":\"today|tomorrow|today_morning|today_afternoon|today_evening|tomorrow_morning|tomorrow_afternoon|tomorrow_evening\","
                 + "\"plan_goal\":\"\",\"plan_deadline\":\"\",\"plan_available_time\":\"\","
                 + "\"calculation_operation\":\"add|subtract|multiply|divide|percentage|total_price\","
