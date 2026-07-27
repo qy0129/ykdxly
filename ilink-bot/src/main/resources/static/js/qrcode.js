@@ -142,6 +142,12 @@
   }
 
   if (qrTrigger) qrTrigger.addEventListener('click', openQrModal);
+  if (qrTrigger) qrTrigger.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      openQrModal();
+    }
+  });
   if (qrModalClose) qrModalClose.addEventListener('click', closeQrModal);
   if (qrModal) qrModal.addEventListener('click', function (event) {
     if (event.target === qrModal) closeQrModal();

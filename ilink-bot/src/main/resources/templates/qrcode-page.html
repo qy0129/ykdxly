@@ -153,7 +153,7 @@
         <small>微信机器人登录认证</small>
       </div>
 
-      <button class="qr-box" id="qrTrigger" type="button" aria-label="放大微信登录二维码">
+      <div class="qr-box" id="qrTrigger" role="button" tabindex="0" aria-label="放大微信登录二维码">
         <span class="b b1"></span><span class="b b2"></span>
         <span class="b b3"></span><span class="b b4"></span>
         <img id="qrImage" src="${QR_CODE_DATA}" alt="微信登录二维码">
@@ -162,7 +162,7 @@
           <div class="msg">QR CODE EXPIRED</div>
           <div class="sub">二维码已失效，程序正在刷新二维码</div>
         </div>
-      </button>
+      </div>
 
       <div class="status-row">
         <span class="stat">WAITING FOR MOBILE SCAN</span>
@@ -197,7 +197,7 @@
   </div>
 </div>
 
-<script>window.QR_EXPIRE_SECONDS = ${QR_EXPIRE_SECONDS};</script>
+<script>window.QR_EXPIRE_SECONDS = Number('${QR_EXPIRE_SECONDS}');</script>
 <script src="../static/js/qrcode.js" defer></script>
 </body>
 </html>
