@@ -6,13 +6,20 @@ import com.example.ilink.adapter.inbound.wechat.LoginQrPage;
 import com.example.ilink.adapter.inbound.wechat.MessageDispatcher;
 import com.example.ilink.adapter.inbound.wechat.WechatMessageAdapter;
 import com.example.ilink.application.briefing.LoginBriefingService;
+import com.example.ilink.application.command.CommandHandler;
+import com.example.ilink.application.command.CommandRouter;
 import com.example.ilink.application.conversation.AudioHistoryStore;
+import com.example.ilink.application.conversation.ContextManager;
+import com.example.ilink.application.conversation.NewSessionService;
+import com.example.ilink.application.welcome.WelcomeHandler;
 import com.example.ilink.application.conversation.CalendarSessionStore;
 import com.example.ilink.application.conversation.ChatHistoryStore;
 import com.example.ilink.application.conversation.DietPlanSessionStore;
 import com.example.ilink.application.conversation.DocumentSessionStore;
 import com.example.ilink.application.conversation.PlanSessionStore;
 import com.example.ilink.application.conversation.UserSessionStore;
+import com.example.ilink.capabilities.memory.MemoryExtractor;
+import com.example.ilink.application.conversation.SessionService;
 import com.example.ilink.application.messaging.CapabilityDispatcher;
 import com.example.ilink.application.messaging.MessageProcessor;
 import com.example.ilink.application.messaging.MessageSerialExecutor;
@@ -106,7 +113,9 @@ import com.example.ilink.capabilities.web.ShortLinkService;
 import com.example.ilink.capabilities.web.WebSearchService;
 import com.example.ilink.platform.media.MediaStore;
 import com.example.ilink.platform.http.HttpClientFactory;
+import com.example.ilink.platform.persistence.DefaultUserSessionStore;
 import com.example.ilink.platform.persistence.MySqlStore;
+import com.example.ilink.platform.persistence.UserRepository;
 import com.example.ilink.platform.sdk.SdkResumeContextStore;
 
 import java.net.http.HttpClient;
@@ -143,7 +152,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         HttpClient httpClient = HttpClientFactory.create(Duration.ofSeconds(15));
 
         ChatHistoryStore chatHistory = new ChatHistoryStore(httpClient);
-        UserSessionStore sessions = new UserSessionStore();
+        UserSessionStore sessions = new DefaultUserSessionStore();
         AudioHistoryStore audioHistory = new AudioHistoryStore();
         DocumentSessionStore documentSessions = new DocumentSessionStore();
         PlanSessionStore planSessions = new PlanSessionStore();
@@ -151,6 +160,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
         Retriever retriever = new Retriever(new EmbeddingService(httpClient), new VectorStore());
         DocumentAiService documentAiService = new DocumentAiService(httpClient, chatHistory, retriever);
         MemoryService memoryService = new MemoryService();
+        MemoryExtractor memoryExtractor = new MemoryExtractor(memoryService, httpClient);
+        ContextManager contextManager = new ContextManager(sessions, memoryService);
         IntentRecognizer intentRecognizer = new IntentRecognizer(httpClient, chatHistory, memoryService, sessions);
         ChatService chatService = new ChatService(httpClient, chatHistory, sessions, memoryService);
 
@@ -221,6 +232,13 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 new VisualCardRenderer(new QrCodeService()), replySender::markSent, replySender::rememberText);
         CalendarService calendarService = new CalendarService(new CalendarEventStore());
         TodoService todoService = new TodoService(new TodoStore(), calendarService);
+        UserRepository userRepository = new UserRepository(MySqlStore.getInstance());
+        WelcomeHandler welcomeHandler = new WelcomeHandler(userRepository);
+        CommandRouter commandRouter = new CommandRouter();
+        NewSessionService newSessionService = new NewSessionService(sessions);
+        SessionService sessionService = new SessionService(MySqlStore.getInstance(), sessions);
+        CommandHandler commandHandler = new CommandHandler(
+                sessionService, sessions, memoryService, todoService, planSessions, welcomeHandler, replySender);
 
         CalendarWorkflow calendarWorkflow = new CalendarWorkflow(
                 calendarService, new CalendarSessionStore(), replySender);
@@ -241,7 +259,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         UserRequestHandler requestHandler = new UserRequestHandler(
                 chatHistory, sessions, documentSessions,
                 intentRecognizer, chatService, weatherService,
-                mediaStore, replySender, toolManager, planWorkflow,
+                mediaStore, replySender, toolManager, contextManager, planWorkflow,
                 new CalculatorService(httpClient, toolManager), calendarWorkflow,
                 healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, foodOrderWorkflow,
                 taxiWorkflow, memoryService, todoService,
@@ -250,7 +268,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
         MessageProcessor messageProcessor = new MessageProcessor(
                 chatHistory, sessions, audioHistory, documentSessions,
                 audioService, imageService, documentService, memoryService,
-                mediaStore, replySender, new CapabilityDispatcher(requestHandler));
+                mediaStore, replySender, new CapabilityDispatcher(requestHandler),
+                commandRouter, commandHandler, memoryExtractor);
 
         LoginBriefingService loginBriefingService = new LoginBriefingService(
                 weatherService, calendarService, todoService, planSessions, sessions,
@@ -260,7 +279,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
 
         MessageDispatcher dispatcher = new MessageDispatcher(
                 messageProcessor, replySender, chatService, calendarService,
-                visualDeckSender, loginBriefingService,
+                visualDeckSender, loginBriefingService, welcomeHandler,
                 new DailyDashboardServer(dashboardService), expressHttpServer, expressPageService);
         return new ApplicationBootstrap(
                 dispatcher, new WechatMessageAdapter(), new MessageSerialExecutor(),

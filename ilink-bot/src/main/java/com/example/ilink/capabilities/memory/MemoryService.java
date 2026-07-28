@@ -1,6 +1,5 @@
 package com.example.ilink.capabilities.memory;
 
-import com.example.ilink.capabilities.memory.UserMemory;
 import com.example.ilink.platform.persistence.MySqlStore;
 
 import java.time.LocalDateTime;
@@ -13,20 +12,18 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** 个人记忆的提取、保存、查询和遗忘服务。 */
+/**
+ * 个人记忆的提取、保存、查询和遗忘服务。
+ *
+ * <p>仅 {@link MemoryExtractor} 通过 {@link #saveExtractedMemory(MemoryCandidate)} 写入数据库。
+ * 其他调用方应当使用 {@link #remember(String, String)} 或只读查询。</p>
+ */
 public final class MemoryService {
 
     private static final Pattern LOCATION_PATTERN = Pattern.compile(
             "(?:我住在|我常住|我的常住地是|我所在的城市是|我家在)([^，。！？]{1,30})");
     private static final Pattern SENSITIVE_PATTERN = Pattern.compile(
             ".*(密码|身份证|银行卡|信用卡|验证码|支付口令).*", Pattern.CASE_INSENSITIVE);
-
-    private static final Pattern NAME_PATTERN = Pattern.compile("(?:我叫|我的名字是|名字叫)([^，。！？]{1,20})");
-    private static final Pattern HOME_PATTERN = Pattern.compile("(?:我住在|我常住在|我的常住地是|我家在)([^，。！？]{2,40})");
-    private static final Pattern WORK_PATTERN = Pattern.compile("(?:我在)([^，。！？]{2,40})(?:上班|工作)");
-    private static final Pattern DIET_PATTERN = Pattern.compile(".*(?:不吃|忌口|过敏).*");
-    private static final Pattern STABLE_PREFERENCE_PATTERN = Pattern.compile(".*(?:我平时|我一直|我通常).*(?:喜欢|偏好|习惯).*");
-    private static final Pattern LONG_TERM_GOAL_PATTERN = Pattern.compile(".*(?:长期目标|今年的目标|我的目标是).*");
 
     private final MySqlStore database = MySqlStore.getInstance();
     private final Map<String, List<UserMemory>> cache = new ConcurrentHashMap<>();
@@ -39,42 +36,34 @@ public final class MemoryService {
         }
 
         MemoryValue memoryValue = classify(content);
-        save(userId, memoryValue, request, 1.0);
+        save(userId, memoryValue, request, 1.0, 8);
         return "好，我记住了：" + memoryValue.value();
     }
 
-    /** 从自然表达中提取稳定的个人信息，不保存临时位置和一次性任务。 */
+    /**
+     * 从自然表达中提取稳定的个人信息。
+     *
+     * <p>已废弃，提取逻辑已移至 {@code MemoryExtractor}。
+     * 保留空方法避免编译错误，新代码应直接调用 MemoryExtractor。</p>
+     */
     public void observe(String userId, String message) {
-        if (userId == null || userId.isBlank() || message == null || message.isBlank()
-                || SENSITIVE_PATTERN.matcher(message).matches()) return;
+    }
 
-        String text = message.trim();
-        Matcher name = NAME_PATTERN.matcher(text);
-        if (name.find()) {
-            save(userId, new MemoryValue("profile", "user_name", name.group(1).trim()), text, 0.95);
-            return;
-        }
-        Matcher home = HOME_PATTERN.matcher(text);
-        if (home.find()) {
-            save(userId, new MemoryValue("location", "home_location", home.group(1).trim()), text, 0.95);
-            return;
-        }
-        Matcher work = WORK_PATTERN.matcher(text);
-        if (work.find()) {
-            save(userId, new MemoryValue("profile", "work_place", work.group(1).trim()), text, 0.9);
-            return;
-        }
-        if (DIET_PATTERN.matcher(text).matches()) {
-            save(userId, new MemoryValue("preference", stableKey("diet", text), text), text, 0.9);
-            return;
-        }
-        if (STABLE_PREFERENCE_PATTERN.matcher(text).matches()) {
-            save(userId, new MemoryValue("preference", stableKey("preference", text), text), text, 0.8);
-            return;
-        }
-        if (LONG_TERM_GOAL_PATTERN.matcher(text).matches()) {
-            save(userId, new MemoryValue("goal", stableKey("goal", text), text), text, 0.8);
-        }
+    /** 仅 {@link MemoryExtractor} 调用的写入入口。 */
+    public void saveExtractedMemory(MemoryCandidate candidate) {
+        if (candidate == null || candidate.userId() == null || candidate.userId().isBlank()
+                || candidate.content() == null || candidate.content().isBlank()) return;
+        String key = candidate.key() != null ? candidate.key() : stableKey(candidate.type(), candidate.content());
+        double confidence = Math.min(1.0, candidate.importance() / 10.0);
+        save(candidate.userId(), new MemoryValue(candidate.type(), key, candidate.content()),
+                candidate.source(), confidence, candidate.importance());
+    }
+
+    /** @deprecated 仅用于旧版 {@link com.example.ilink.application.extractor.MemoryExtractor} 兼容，新代码使用 {@link #saveExtractedMemory(MemoryCandidate)}。 */
+    @Deprecated
+    public void saveFromExtractor(String userId, String type, String key, String value, double confidence) {
+        if (userId == null || userId.isBlank() || key == null || key.isBlank()) return;
+        save(userId, new MemoryValue(type, key, value), "MemoryExtractor", confidence, 5);
     }
 
     public String forget(String userId, String request) {
@@ -123,14 +112,14 @@ public final class MemoryService {
         return cache.computeIfAbsent(userId, database::loadMemories);
     }
 
-    private void save(String userId, MemoryValue memoryValue, String source, double confidence) {
+    private void save(String userId, MemoryValue memoryValue, String source, double confidence, int importance) {
         List<UserMemory> existing = new ArrayList<>(load(userId));
         UserMemory previous = existing.stream().filter(memory -> memory.key().equals(memoryValue.key()))
                 .findFirst().orElse(null);
         if (previous != null && previous.value().equals(memoryValue.value())) return;
         LocalDateTime now = LocalDateTime.now();
         UserMemory memory = new UserMemory(previous == null ? UUID.randomUUID().toString() : previous.id(), userId,
-                memoryValue.type(), memoryValue.key(), memoryValue.value(), source, confidence,
+                memoryValue.type(), memoryValue.key(), memoryValue.value(), importance, source, confidence,
                 "active", previous == null ? now : previous.createdAt(), now, now);
         database.saveMemory(memory);
         existing.removeIf(item -> item.key().equals(memory.key()));

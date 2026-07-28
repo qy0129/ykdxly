@@ -1,5 +1,6 @@
 package com.example.ilink.platform.persistence;
 
+import com.example.ilink.application.conversation.User;
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.capabilities.calendar.CalendarEvent;
 import com.example.ilink.capabilities.planning.PlanTask;
@@ -596,9 +597,9 @@ public final class MySqlStore implements AutoCloseable {
 
     public void saveMemory(UserMemory memory) {
         if (!isAvailable()) return;
-        String sql = "INSERT INTO user_memories (id, bot_id, user_id, memory_type, memory_key, memory_value, source, "
-                + "confidence, status, created_at, updated_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                + "ON DUPLICATE KEY UPDATE memory_value=?, source=?, confidence=?, status='active', "
+        String sql = "INSERT INTO user_memories (id, bot_id, user_id, memory_type, memory_key, memory_value, importance, "
+                + "source, confidence, status, created_at, updated_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                + "ON DUPLICATE KEY UPDATE memory_value=?, importance=?, source=?, confidence=?, status='active', "
                 + "updated_at=?, last_used_at=?";
         try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, memory.id());
@@ -607,17 +608,19 @@ public final class MySqlStore implements AutoCloseable {
             statement.setString(4, memory.type());
             statement.setString(5, memory.key());
             statement.setString(6, memory.value());
-            statement.setString(7, memory.source());
-            statement.setDouble(8, memory.confidence());
-            statement.setString(9, memory.status());
-            statement.setTimestamp(10, Timestamp.valueOf(memory.createdAt()));
-            statement.setTimestamp(11, Timestamp.valueOf(memory.updatedAt()));
-            setTimestamp(statement, 12, memory.lastUsedAt());
-            statement.setString(13, memory.value());
-            statement.setString(14, memory.source());
-            statement.setDouble(15, memory.confidence());
-            statement.setTimestamp(16, Timestamp.valueOf(memory.updatedAt()));
-            setTimestamp(statement, 17, memory.lastUsedAt());
+            statement.setInt(7, memory.importance());
+            statement.setString(8, memory.source());
+            statement.setDouble(9, memory.confidence());
+            statement.setString(10, memory.status());
+            statement.setTimestamp(11, Timestamp.valueOf(memory.createdAt()));
+            statement.setTimestamp(12, Timestamp.valueOf(memory.updatedAt()));
+            setTimestamp(statement, 13, memory.lastUsedAt());
+            statement.setString(14, memory.value());
+            statement.setInt(15, memory.importance());
+            statement.setString(16, memory.source());
+            statement.setDouble(17, memory.confidence());
+            statement.setTimestamp(18, Timestamp.valueOf(memory.updatedAt()));
+            setTimestamp(statement, 19, memory.lastUsedAt());
             statement.executeUpdate();
         } catch (SQLException e) {
             logFailure("保存个人记忆", e);
@@ -626,7 +629,7 @@ public final class MySqlStore implements AutoCloseable {
 
     public List<UserMemory> loadMemories(String userId) {
         if (!isAvailable()) return List.of();
-        String sql = "SELECT id, memory_type, memory_key, memory_value, source, confidence, status, created_at, "
+        String sql = "SELECT id, memory_type, memory_key, memory_value, importance, source, confidence, status, created_at, "
                 + "updated_at, last_used_at FROM user_memories WHERE bot_id=? AND user_id=? AND status='active' "
                 + "ORDER BY updated_at DESC LIMIT 100";
         List<UserMemory> memories = new ArrayList<>();
@@ -636,7 +639,8 @@ public final class MySqlStore implements AutoCloseable {
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
                     memories.add(new UserMemory(result.getString("id"), userId, result.getString("memory_type"),
-                            result.getString("memory_key"), result.getString("memory_value"), result.getString("source"),
+                            result.getString("memory_key"), result.getString("memory_value"),
+                            result.getInt("importance"), result.getString("source"),
                             result.getDouble("confidence"), result.getString("status"),
                             result.getTimestamp("created_at").toLocalDateTime(),
                             result.getTimestamp("updated_at").toLocalDateTime(),
@@ -663,6 +667,268 @@ public final class MySqlStore implements AutoCloseable {
         } catch (SQLException e) {
             logFailure("删除个人记忆", e);
             return 0;
+        }
+    }
+
+    // ========== User (v2.0) ==========
+
+    public User createUser(String wechatId, String nickname) {
+        if (!isAvailable()) return null;
+        String sql = "INSERT INTO user (wechat_id, nickname, first_login_time, last_login_time) VALUES (?, ?, NOW(), NOW())";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
+            statement.setString(1, wechatId);
+            statement.setString(2, nickname == null ? "" : nickname);
+            statement.executeUpdate();
+            try (ResultSet keys = statement.getGeneratedKeys()) {
+                if (keys.next()) {
+                    return new User(keys.getLong(1), wechatId, nickname,
+                            LocalDateTime.now(), LocalDateTime.now(), LocalDateTime.now(), LocalDateTime.now());
+                }
+            }
+        } catch (SQLException e) {
+            logFailure("创建用户", e);
+        }
+        return null;
+    }
+
+    public User findUserByWechatId(String wechatId) {
+        if (!isAvailable()) return null;
+        String sql = "SELECT id, wechat_id, nickname, first_login_time, last_login_time, created_time, updated_time "
+                + "FROM user WHERE wechat_id = ?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, wechatId);
+            try (ResultSet result = statement.executeQuery()) {
+                if (result.next()) {
+                    return new User(result.getLong("id"), result.getString("wechat_id"),
+                            result.getString("nickname"),
+                            toLocalDateTime(result.getTimestamp("first_login_time")),
+                            toLocalDateTime(result.getTimestamp("last_login_time")),
+                            toLocalDateTime(result.getTimestamp("created_time")),
+                            toLocalDateTime(result.getTimestamp("updated_time")));
+                }
+            }
+        } catch (SQLException e) {
+            logFailure("查询用户", e);
+        }
+        return null;
+    }
+
+    public void updateUserLogin(String wechatId) {
+        if (!isAvailable()) return;
+        String sql = "UPDATE user SET last_login_time = NOW() WHERE wechat_id = ?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, wechatId);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("更新用户登录时间", e);
+        }
+    }
+
+    // ========== Session (v2.0) ==========
+
+    public void createSession(String sessionId, String wechatId, String title) {
+        if (!isAvailable() || sessionId == null || sessionId.isBlank()) return;
+        String sql = "INSERT INTO chat_session (session_id, wechat_id, title, status, last_active_time) "
+                + "VALUES (?, ?, ?, 'ACTIVE', NOW())";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, sessionId);
+            statement.setString(2, wechatId);
+            statement.setString(3, title);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("创建会话", e);
+        }
+    }
+
+    public void deactivateOtherSessions(String excludeSessionId, String wechatId) {
+        if (!isAvailable()) return;
+        String sql = "UPDATE chat_session SET status = 'INACTIVE' "
+                + "WHERE wechat_id = ? AND status = 'ACTIVE' AND session_id != ?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, wechatId);
+            statement.setString(2, excludeSessionId);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("停用旧会话", e);
+        }
+    }
+
+    public void updateSessionActiveTime(String sessionId) {
+        if (!isAvailable()) return;
+        String sql = "UPDATE chat_session SET last_active_time = NOW() WHERE session_id = ?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, sessionId);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("更新会话活跃时间", e);
+        }
+    }
+
+    public String findActiveSessionId(String wechatId) {
+        if (!isAvailable()) return null;
+        String sql = "SELECT session_id FROM chat_session WHERE wechat_id = ? AND status = 'ACTIVE' "
+                + "ORDER BY last_active_time DESC LIMIT 1";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, wechatId);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? result.getString("session_id") : null;
+            }
+        } catch (SQLException e) {
+            logFailure("查询活跃会话", e);
+            return null;
+        }
+    }
+
+    public SessionRow findSession(String sessionId) {
+        if (!isAvailable()) return null;
+        String sql = "SELECT session_id, wechat_id, title, status, last_active_time, created_time "
+                + "FROM chat_session WHERE session_id = ?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, sessionId);
+            try (ResultSet result = statement.executeQuery()) {
+                if (result.next()) {
+                    return new SessionRow(result.getString("session_id"), result.getString("wechat_id"),
+                            result.getString("title"), result.getString("status"),
+                            toLocalDateTime(result.getTimestamp("last_active_time")),
+                            toLocalDateTime(result.getTimestamp("created_time")));
+                }
+            }
+        } catch (SQLException e) {
+            logFailure("查询会话", e);
+        }
+        return null;
+    }
+
+    public List<SessionRow> listUserSessions(String wechatId) {
+        if (!isAvailable()) return List.of();
+        String sql = "SELECT session_id, wechat_id, title, status, last_active_time, created_time "
+                + "FROM chat_session WHERE wechat_id = ? ORDER BY last_active_time DESC";
+        List<SessionRow> sessions = new ArrayList<>();
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, wechatId);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    sessions.add(new SessionRow(result.getString("session_id"), result.getString("wechat_id"),
+                            result.getString("title"), result.getString("status"),
+                            toLocalDateTime(result.getTimestamp("last_active_time")),
+                            toLocalDateTime(result.getTimestamp("created_time"))));
+                }
+            }
+        } catch (SQLException e) {
+            logFailure("查询用户会话列表", e);
+        }
+        return sessions;
+    }
+
+    public void switchActiveSession(String sessionId, String wechatId) {
+        if (!isAvailable()) return;
+        deactivateOtherSessions(sessionId, wechatId);
+        String sql = "UPDATE chat_session SET status = 'ACTIVE' WHERE session_id = ?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, sessionId);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("切换活跃会话", e);
+        }
+    }
+
+    public void closeSession(String sessionId) {
+        if (!isAvailable()) return;
+        String sql = "UPDATE chat_session SET status = 'INACTIVE' WHERE session_id = ?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, sessionId);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("关闭会话", e);
+        }
+    }
+
+    // ========== Session Messages (v2.0) ==========
+
+    public void saveChatMessage(String sessionId, String role, String content, String messageType) {
+        if (!isAvailable() || sessionId == null || sessionId.isBlank()) return;
+        String sql = "INSERT INTO chat_messages (bot_id, user_id, session_id, role, message_type, content) "
+                + "VALUES (?, ?, ?, ?, ?, ?)";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, "");
+            statement.setString(3, sessionId);
+            statement.setString(4, role);
+            statement.setString(5, messageType == null ? "TEXT" : messageType);
+            statement.setString(6, content);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("保存会话消息", e);
+        }
+    }
+
+    public List<ChatEntry> loadSessionMessages(String sessionId, int limit) {
+        if (!isAvailable()) return List.of();
+        String sql = "SELECT role, content FROM ("
+                + "SELECT id, role, content FROM chat_messages "
+                + "WHERE session_id = ? ORDER BY id DESC LIMIT ?"
+                + ") recent ORDER BY id ASC";
+        List<ChatEntry> messages = new ArrayList<>();
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, sessionId);
+            statement.setInt(2, limit);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    messages.add(new ChatEntry(result.getString("role"), result.getString("content")));
+                }
+            }
+        } catch (SQLException e) {
+            logFailure("读取会话消息", e);
+        }
+        return messages;
+    }
+
+    // ========== Session Summaries (v2.0) ==========
+
+    public void saveSessionSummary(String sessionId, String summary, int messageCount) {
+        if (!isAvailable()) return;
+        String sql = "INSERT INTO conversation_summaries (bot_id, user_id, session_id, summary, message_count) "
+                + "VALUES (?, ?, ?, ?, ?) "
+                + "ON DUPLICATE KEY UPDATE summary = VALUES(summary), message_count = VALUES(message_count), "
+                + "updated_at = CURRENT_TIMESTAMP";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, "");
+            statement.setString(3, sessionId);
+            statement.setString(4, summary);
+            statement.setInt(5, messageCount);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("保存会话摘要", e);
+        }
+    }
+
+    public String loadSessionSummary(String sessionId) {
+        if (!isAvailable()) return null;
+        String sql = "SELECT summary FROM conversation_summaries WHERE session_id = ?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, sessionId);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? result.getString("summary") : null;
+            }
+        } catch (SQLException e) {
+            logFailure("读取会话摘要", e);
+            return null;
         }
     }
 
@@ -813,6 +1079,43 @@ public final class MySqlStore implements AutoCloseable {
                     + "UNIQUE KEY uk_user_memory_key (bot_id, user_id, memory_key),"
                     + "INDEX idx_user_memories (bot_id, user_id, status, updated_at)"
                     + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+            // ========== v2.0 新增表 ==========
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS user ("
+                    + "id BIGINT PRIMARY KEY AUTO_INCREMENT,"
+                    + "wechat_id VARCHAR(128) NOT NULL UNIQUE,"
+                    + "nickname VARCHAR(100),"
+                    + "first_login_time DATETIME,"
+                    + "last_login_time DATETIME,"
+                    + "created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+                    + "updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+                    + "INDEX idx_wechat_id (wechat_id)"
+                    + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS chat_session ("
+                    + "id BIGINT PRIMARY KEY AUTO_INCREMENT,"
+                    + "session_id VARCHAR(64) UNIQUE NOT NULL,"
+                    + "wechat_id VARCHAR(128) NOT NULL,"
+                    + "title VARCHAR(100),"
+                    + "status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',"
+                    + "last_active_time DATETIME,"
+                    + "created_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+                    + "updated_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+                    + "INDEX idx_session_wechat (wechat_id, status),"
+                    + "INDEX idx_session_id (session_id)"
+                    + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+
+            // ========== 扩展已有表列 ==========
+            ensureColumn(connection, statement, "chat_messages", "session_id",
+                    "VARCHAR(64) DEFAULT NULL AFTER user_id");
+            ensureColumn(connection, statement, "chat_messages", "message_type",
+                    "VARCHAR(30) DEFAULT 'TEXT' AFTER role");
+            ensureColumn(connection, statement, "conversation_summaries", "session_id",
+                    "VARCHAR(64) DEFAULT NULL AFTER user_id");
+            ensureColumn(connection, statement, "conversation_summaries", "message_count",
+                    "INT DEFAULT 0 AFTER summary");
+            ensureColumn(connection, statement, "user_memories", "importance",
+                    "INT DEFAULT 0 AFTER memory_value");
         }
     }
 
@@ -861,6 +1164,11 @@ public final class MySqlStore implements AutoCloseable {
 
     /** 数据库中的一条聊天消息。 */
     public record ChatEntry(String role, String content) {
+    }
+
+    /** 数据库中的一条会话记录。 */
+    public record SessionRow(String sessionId, String wechatId, String title, String status,
+                             LocalDateTime lastActiveTime, LocalDateTime createdTime) {
     }
 
 }

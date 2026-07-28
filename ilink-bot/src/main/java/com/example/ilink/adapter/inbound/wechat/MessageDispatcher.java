@@ -9,6 +9,7 @@ import com.example.ilink.application.messaging.IncomingMessage;
 import com.example.ilink.application.messaging.MessageProcessor;
 import com.example.ilink.application.messaging.ReplySender;
 import com.example.ilink.application.messaging.UserRequestHandler;
+import com.example.ilink.application.welcome.WelcomeHandler;
 import com.example.ilink.application.workflow.visual.VisualDeckSender;
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.capabilities.calendar.CalendarEvent;
@@ -23,6 +24,7 @@ import com.github.wechat.ilink.sdk.ILinkClient;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -44,6 +46,7 @@ public final class MessageDispatcher implements AutoCloseable {
     private final CalendarService calendarService;
     private final VisualDeckSender visualDeckSender;
     private final LoginBriefingService loginBriefingService;
+    private final WelcomeHandler welcomeHandler;
     private final DailyDashboardServer dailyDashboardServer;
     private final ExpressHttpServer expressHttpServer;
     private final ExpressPageService expressPageService;
@@ -60,6 +63,7 @@ public final class MessageDispatcher implements AutoCloseable {
     public MessageDispatcher(MessageProcessor messageProcessor, ReplySender replySender,
                              ChatService chatService, CalendarService calendarService,
                              VisualDeckSender visualDeckSender, LoginBriefingService loginBriefingService,
+                             WelcomeHandler welcomeHandler,
                              DailyDashboardServer dailyDashboardServer, ExpressHttpServer expressHttpServer,
                              ExpressPageService expressPageService) {
         this.messageProcessor = messageProcessor;
@@ -68,6 +72,7 @@ public final class MessageDispatcher implements AutoCloseable {
         this.calendarService = calendarService;
         this.visualDeckSender = visualDeckSender;
         this.loginBriefingService = loginBriefingService;
+        this.welcomeHandler = welcomeHandler;
         this.dailyDashboardServer = dailyDashboardServer;
         this.expressHttpServer = expressHttpServer;
         this.expressPageService = expressPageService;
@@ -107,6 +112,11 @@ public final class MessageDispatcher implements AutoCloseable {
     public void handleMessage(ILinkClient client, IncomingMessage message) {
         activeClient = client;
         String userId = message.principalId();
+        try {
+            welcomeHandler.handleFirstLogin(new WechatReplyChannel(client), userId);
+        } catch (Exception e) {
+            System.err.println("[欢迎] 处理失败: " + e.getMessage());
+        }
         AgentContext context = AgentContext.wechat(userId, new WechatReplyChannel(client));
         activeUserId = userId;
         dailyDashboardServer.useUser(userId);
