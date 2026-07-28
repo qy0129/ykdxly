@@ -118,7 +118,7 @@ public final class MessageProcessor {
         GeneratedImage receivedImage = GeneratedImage.from(image, null);
         Path saved = mediaStore.save(userId, "image", image, receivedImage.extension());
         documentSessions.clear(userId);
-        sessions.setLastImage(userId, saved.toString());
+        sessions.setLastImage(userId, saved.toString(), UserSessionStore.ImageSource.USER);
         sessions.setPendingImage(userId, saved.toString());
 
         String description = null;

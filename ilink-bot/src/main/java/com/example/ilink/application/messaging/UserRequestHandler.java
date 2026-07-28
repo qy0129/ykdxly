@@ -37,6 +37,8 @@ import com.example.ilink.application.routing.IntentPlan;
 import com.example.ilink.application.routing.IntentPolicy;
 import com.example.ilink.application.routing.IntentRecognizer;
 import com.example.ilink.application.routing.IntentResult;
+import com.example.ilink.application.routing.CapabilityContractValidator;
+import com.example.ilink.application.routing.DrawSizeParser;
 import com.example.ilink.platform.media.MediaStore;
 import com.example.ilink.capabilities.audio.AudioTranscribeTool;
 import com.example.ilink.application.tooling.ToolContext;
@@ -58,6 +60,7 @@ import com.example.ilink.capabilities.planning.DateTimeParser;
 import com.example.ilink.capabilities.weather.WeatherTool;
 import com.google.gson.JsonObject;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -100,6 +103,7 @@ public final class UserRequestHandler {
     private final QqMailService qqMailService;
     private final VisualCardWorkflow visualCardWorkflow;
     private final ActionPlanExecutor actionPlanExecutor = new ActionPlanExecutor();
+    private final CapabilityContractValidator capabilityValidator = new CapabilityContractValidator();
 
     /** 注入所有业务服务，保持本类只负责请求编排。 */
     public UserRequestHandler(ChatHistoryStore chatHistory, UserSessionStore sessions,
@@ -166,6 +170,8 @@ public final class UserRequestHandler {
             }
         }
 
+        if (handlePendingDrawContinuation(client, userId, text)) return;
+
         if (hasBlockingPending(userId) && !acceptsBlockingReply(userId, text)) {
             clearBlockingPending(userId);
             actionPlanExecutor.cancel(userId);
@@ -182,6 +188,11 @@ public final class UserRequestHandler {
         if (visualCardWorkflow.handle(agentContext, text)) return;
         if (handlePendingExpress(client, userId, text)) return;
         if (handleDirectCommand(client, userId, text)) return;
+        if (IntentPolicy.isExplicitImageEdit(text) && !hasCurrentImage(userId)) {
+            replySender.sendReply(client, userId,
+                    "请先发送需要修改的图片。发送后直接告诉我怎么改，例如“把头发改成白色”。");
+            return;
+        }
 
         if (pendingFileExport != null) {
             // 用户提出了新要求，已在入口统一清除旧状态。
@@ -295,10 +306,62 @@ public final class UserRequestHandler {
         return true;
     }
 
+    /** 待选尺寸属于封闭状态，直接本地续办，不再请求路由模型。 */
+    private boolean handlePendingDrawContinuation(ReplyChannel client, String userId,
+                                                  String text) throws Exception {
+        UserSessionStore.PendingDrawRequest pending = sessions.getPendingDraw(userId);
+        if (pending == null) return false;
+
+        String imageSize = DrawSizeParser.parse(text);
+        if (!"none".equals(imageSize)) {
+            sessions.clearPendingDraw(userId);
+            generatePendingImage(client, userId, pending, imageSize);
+            resumeActionPlan(client, userId);
+            return true;
+        }
+        if (DrawSizeParser.isCancel(text)) {
+            sessions.clearPendingDraw(userId);
+            actionPlanExecutor.cancel(userId);
+            replySender.sendReply(client, userId, "已取消这次绘图。");
+            return true;
+        }
+
+        // 不符合尺寸选项时按新请求处理，防止旧状态劫持后续对话。
+        sessions.clearPendingDraw(userId);
+        actionPlanExecutor.cancel(userId);
+        return false;
+    }
+
+    private boolean hasCurrentImage(String userId) {
+        UserSessionStore.ImageReference reference = sessions.resolveCurrentImage(userId);
+        return reference != null && !reference.path().isBlank() && Files.isRegularFile(Path.of(reference.path()));
+    }
+
     /** 高确定性的记忆指令直接执行，避免继续扩大通用路由模型负担。 */
     private boolean handleMemoryCommand(ReplyChannel client, String userId, String text) throws Exception {
         String normalized = text.trim();
         if (normalized.matches("^(请)?(帮我)?记住.*") || normalized.startsWith("以后记得")) {
+            String homeLocation = memoryService.extractHomeLocation(normalized);
+            String currentLocation = memoryService.extractCurrentLocation(normalized);
+            if (!homeLocation.isBlank() || !currentLocation.isBlank()) {
+                String invalidLocation = verifyRememberedLocation(homeLocation);
+                if (invalidLocation.isBlank() && !currentLocation.isBlank()
+                        && !currentLocation.equals(homeLocation)) {
+                    invalidLocation = verifyRememberedLocation(currentLocation);
+                }
+                if (!invalidLocation.isBlank()) {
+                    replySender.sendReply(client, userId, invalidLocation);
+                    return true;
+                }
+
+                String reply = homeLocation.isBlank()
+                        ? "好，我记住你现在在“" + currentLocation + "”。"
+                        : memoryService.remember(userId, normalized);
+                sessions.setCurrentLocation(userId,
+                        currentLocation.isBlank() ? homeLocation : currentLocation);
+                replySender.sendReply(client, userId, reply);
+                return true;
+            }
             String reply = memoryService.remember(userId, normalized);
             String location = memoryService.value(userId, "home_location");
             if (!location.isBlank()) sessions.setCurrentLocation(userId, location);
@@ -314,6 +377,23 @@ public final class UserRequestHandler {
             return true;
         }
         return false;
+    }
+
+    /** 记忆中的地点必须先经过地点服务核验，避免保存整句或不存在的地点。 */
+    private String verifyRememberedLocation(String location) throws Exception {
+        if (location == null || location.isBlank()) return "";
+        try {
+            List<WeatherLocation> locations = weatherService.searchLocations(location);
+            if (locations.isEmpty()) {
+                return "我识别到地点“" + location + "”，但没有查到这个地点。请确认具体地点后再让我记住。";
+            }
+            if (locations.size() > 1 && WeatherService.clearlyPrimary(locations) == null) {
+                return buildWeatherLocationChoices(locations);
+            }
+            return "";
+        } catch (Exception error) {
+            return "我暂时无法核对地点“" + location + "”是否存在，请稍后再试。";
+        }
     }
 
     /** 待办、新闻、联网搜索和天气使用高确定性本地路由，避免被通用模型误分流。 */
@@ -613,6 +693,20 @@ public final class UserRequestHandler {
     private void executeAction(ReplyChannel client, String userId, IntentAction action) throws Exception {
         IntentResult route = action.route();
         String actionText = action.requestText();
+        CapabilityContractValidator.Validation validation = capabilityValidator.validate(
+                actionText, route, new CapabilityContractValidator.Context(
+                        sessions.getPendingDraw(userId) != null,
+                        hasCurrentImage(userId),
+                        documentSessions.get(userId) != null));
+        if (!validation.allowed()) {
+            System.out.println("[能力校验] 拒绝意图=" + route.intent() + "，要求=" + actionText);
+            if (validation.decision() == CapabilityContractValidator.Decision.FALLBACK_CHAT) {
+                sendChatReply(client, userId, actionText, route);
+            } else {
+                replySender.sendReply(client, userId, validation.message());
+            }
+            return;
+        }
         System.out.println("[动作执行] 意图=" + intentName(route.intent())
                 + "，要求=" + actionText
                 + "，回复方式=" + replyModeName(route.replyMode())
@@ -649,16 +743,19 @@ public final class UserRequestHandler {
             case "document_summary", "document_question", "generate_file", "document_edit" ->
                     handleDocumentAction(client, userId, actionText, route);
             default -> {
-                String reply = chatService.chat(userId, actionText);
-                if (reply == null || reply.isBlank()) {
-                    reply = "网络波动了，请再发一次～";
-                }
-                chatHistory.add(userId, actionText, reply);
-                replySender.applyReplyMode(route.replyMode());
-                System.out.println("[机器人回复] " + reply);
-                replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
+                sendChatReply(client, userId, actionText, route);
             }
         }
+    }
+
+    private void sendChatReply(ReplyChannel client, String userId, String text,
+                               IntentResult route) throws Exception {
+        String reply = chatService.chat(userId, text);
+        if (reply == null || reply.isBlank()) reply = "网络波动了，请再发一次～";
+        chatHistory.add(userId, text, reply);
+        replySender.applyReplyMode(route.replyMode());
+        System.out.println("[机器人回复] " + reply);
+        replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
     }
 
     /** 当前补充会话结束后继续执行同一段话中尚未完成的动作。 */
@@ -672,7 +769,8 @@ public final class UserRequestHandler {
 
     /** 判断是否有必须先由用户补充地点、时间或偏好的工作流。 */
     private boolean hasBlockingPending(String userId) {
-        return sessions.hasPendingExpress(userId)
+        return sessions.getPendingDraw(userId) != null
+                || sessions.hasPendingExpress(userId)
                 || sessions.hasPendingWeatherLocations(userId)
                 || planWorkflow.hasPendingPlan(userId)
                 || planWorkflow.hasPendingCalendarSync(userId)
@@ -699,6 +797,9 @@ public final class UserRequestHandler {
     private boolean acceptsBlockingReply(String userId, String text) {
         String value = text == null ? "" : text.trim();
         if ("取消".equals(value)) return true;
+        if (sessions.getPendingDraw(userId) != null) {
+            return !"none".equals(DrawSizeParser.parse(value)) || DrawSizeParser.isCancel(value);
+        }
         if (sessions.hasPendingExpress(userId)) {
             return isExpressCommand(value) || !ExpressService.extractTrackingNo(value).isBlank()
                     || !ExpressService.extractOrderNo(value).isBlank() || !extractExpressPhone(value).isBlank()
@@ -729,6 +830,7 @@ public final class UserRequestHandler {
     }
 
     private void clearBlockingPending(String userId) {
+        sessions.clearPendingDraw(userId);
         sessions.clearPendingExpress(userId);
         sessions.clearPendingWeatherLocations(userId);
         planWorkflow.clearPending(userId);
@@ -803,32 +905,20 @@ public final class UserRequestHandler {
         replySender.applyReplyMode(route.replyMode());
 
         if ("none".equals(route.imageSize())) {
-            sessions.setPendingDraw(userId, route.enPrompt());
+            sessions.setPendingDraw(userId, route.enPrompt(), route.cnDescription(), userText);
             replySender.sendReply(client, userId, "请问你想要什么尺寸？方形(1:1)、竖屏(3:4)还是横屏(16:9)？");
             return;
         }
 
-        JsonObject arguments = new JsonObject();
-        arguments.addProperty("prompt", route.enPrompt());
-        arguments.addProperty("image_size", route.imageSize());
-        ToolResult result = toolManager.execute(
-                DrawTool.NAME, new ToolContext(userId), arguments);
-        GeneratedImage image = result.dataAs(GeneratedImage.class);
-        if (result.success() && image != null) {
-            Path saved = mediaStore.save(userId, "image", image.bytes(), image.extension());
-            documentSessions.clear(userId);
-            sessions.setLastImage(userId, saved.toString());
-            chatHistory.addMedia(userId, "图片", saved.toString(), route.cnDescription());
-            client.sendImage(userId, image.bytes(), image.fileName("draw"), route.cnDescription());
-        } else {
-            replySender.sendReply(client, userId, result.output());
-        }
+        generatePendingImage(client, userId,
+                new UserSessionStore.PendingDrawRequest(route.enPrompt(), route.cnDescription(),
+                        userText, Long.MAX_VALUE), route.imageSize());
     }
 
     /** 处理用户对上一次绘图请求补充的尺寸选择。 */
     private void handleDrawSize(ReplyChannel client, String userId, IntentResult route) throws Exception {
-        String prompt = sessions.peekPendingDraw(userId);
-        if (prompt == null) {
+        UserSessionStore.PendingDrawRequest pending = sessions.getPendingDraw(userId);
+        if (pending == null) {
             replySender.sendReply(client, userId, "当前没有等待确认尺寸的绘图请求");
             return;
         }
@@ -838,20 +928,30 @@ public final class UserRequestHandler {
         }
 
         sessions.clearPendingDraw(userId);
+        generatePendingImage(client, userId, pending, route.imageSize());
+    }
+
+    private void generatePendingImage(ReplyChannel client, String userId,
+                                      UserSessionStore.PendingDrawRequest pending,
+                                      String imageSize) throws Exception {
         JsonObject arguments = new JsonObject();
-        arguments.addProperty("prompt", prompt);
-        arguments.addProperty("image_size", route.imageSize());
+        arguments.addProperty("prompt", pending.prompt());
+        arguments.addProperty("image_size", imageSize);
         ToolResult result = toolManager.execute(
                 DrawTool.NAME, new ToolContext(userId), arguments);
-        GeneratedImage image = result.dataAs(GeneratedImage.class);
-        if (result.success() && image != null) {
+        if (result.hasMedia(GeneratedImage.class)) {
+            GeneratedImage image = result.dataAs(GeneratedImage.class);
             Path saved = mediaStore.save(userId, "image", image.bytes(), image.extension());
             documentSessions.clear(userId);
             sessions.setLastImage(userId, saved.toString());
-            chatHistory.addMedia(userId, "图片", saved.toString(), "已按你的要求生成");
-            client.sendImage(userId, image.bytes(), image.fileName("draw"), "已按你的要求生成");
+            String description = pending.description().isBlank()
+                    ? "已按你的要求生成" : pending.description();
+            chatHistory.addMedia(userId, "图片", saved.toString(), description);
+            client.sendImage(userId, image.bytes(), image.fileName("draw"), "");
+            replySender.markSent();
         } else {
-            replySender.sendReply(client, userId, result.output());
+            String error = result.success() ? "图片服务没有返回有效图片，请稍后重试。" : result.output();
+            replySender.sendReply(client, userId, error);
         }
     }
 
@@ -907,15 +1007,17 @@ public final class UserRequestHandler {
             arguments.addProperty("prompt", route.imagePrompt());
             ToolResult result = toolManager.execute(
                     ImageEditTool.NAME, new ToolContext(userId), arguments);
-            GeneratedImage edited = result.dataAs(GeneratedImage.class);
-            if (result.success() && edited != null) {
+            if (result.hasMedia(GeneratedImage.class)) {
+                GeneratedImage edited = result.dataAs(GeneratedImage.class);
                 Path saved = mediaStore.save(userId, "image", edited.bytes(), edited.extension());
                 documentSessions.clear(userId);
                 sessions.setLastImage(userId, saved.toString());
                 chatHistory.addMedia(userId, "图片", saved.toString(), "已根据用户要求修改图片");
-                client.sendImage(userId, edited.bytes(), edited.fileName("edited"), "已完成图片修改");
+                client.sendImage(userId, edited.bytes(), edited.fileName("edited"), "");
+                replySender.markSent();
             } else {
-                replySender.sendReply(client, userId, result.output());
+                String error = result.success() ? "图片服务没有返回有效图片，请稍后重试。" : result.output();
+                replySender.sendReply(client, userId, error);
             }
         }
     }

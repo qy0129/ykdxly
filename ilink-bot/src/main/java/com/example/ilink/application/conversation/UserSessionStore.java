@@ -38,9 +38,9 @@ public final class UserSessionStore {
     private final Gson gson = new Gson();
     private final Map<String, String> personas = new ConcurrentHashMap<>();
     private final Set<String> loadedPersonaUsers = ConcurrentHashMap.newKeySet();
-    private final Map<String, String> pendingDrawPrompts = new ConcurrentHashMap<>();
-    private final Map<String, String> lastImagePaths = new ConcurrentHashMap<>();
-    private final Map<String, String> pendingImagePaths = new ConcurrentHashMap<>();
+    private final Map<String, PendingDrawRequest> pendingDrawRequests = new ConcurrentHashMap<>();
+    private final Map<String, ImageReference> lastImages = new ConcurrentHashMap<>();
+    private final Map<String, ImageReference> pendingImages = new ConcurrentHashMap<>();
     private final Map<String, String> lastImageAnalyses = new ConcurrentHashMap<>();
     private final Map<String, List<WeatherLocation>> pendingWeatherLocations = new ConcurrentHashMap<>();
     private final Map<String, String> pendingWeatherDays = new ConcurrentHashMap<>();
@@ -90,68 +90,132 @@ public final class UserSessionStore {
 
     /** 保存等待用户补充尺寸的绘图提示词。 */
     public void setPendingDraw(String userId, String prompt) {
+        setPendingDraw(userId, prompt, "", "");
+    }
+
+    public void setPendingDraw(String userId, String prompt, String description, String originalRequest) {
         ensureMediaLoaded(userId);
-        pendingDrawPrompts.put(userId, prompt);
-        database.saveUserState(userId, PENDING_DRAW_KEY, prompt);
+        PendingDrawRequest request = new PendingDrawRequest(prompt, description, originalRequest,
+                System.currentTimeMillis() + PENDING_TTL_MILLIS);
+        pendingDrawRequests.put(userId, request);
+        database.saveUserState(userId, PENDING_DRAW_KEY, gson.toJson(request));
     }
 
     /** 查看待确认绘图提示词，但不清除它。 */
     public String peekPendingDraw(String userId) {
+        PendingDrawRequest request = getPendingDraw(userId);
+        return request == null ? null : request.prompt();
+    }
+
+    public PendingDrawRequest getPendingDraw(String userId) {
         ensureMediaLoaded(userId);
-        return pendingDrawPrompts.get(userId);
+        PendingDrawRequest request = pendingDrawRequests.get(userId);
+        if (request != null && request.expiresAtMillis() <= System.currentTimeMillis()) {
+            clearPendingDraw(userId);
+            return null;
+        }
+        return request;
     }
 
     /** 清除待确认绘图请求。 */
     public void clearPendingDraw(String userId) {
         loadedMediaUsers.add(userId);
-        pendingDrawPrompts.remove(userId);
+        pendingDrawRequests.remove(userId);
         database.deleteUserState(userId, PENDING_DRAW_KEY);
     }
 
     /** 保存用户最近一次可继续处理的图片路径。 */
     public void setLastImage(String userId, String path) {
+        setLastImage(userId, path, ImageSource.BOT);
+    }
+
+    public void setLastImage(String userId, String path, ImageSource source) {
         ensureMediaLoaded(userId);
-        lastImagePaths.put(userId, path);
-        database.saveUserState(userId, LAST_IMAGE_KEY, path);
+        ImageReference reference = new ImageReference(path, source, System.currentTimeMillis());
+        lastImages.put(userId, reference);
+        database.saveUserState(userId, LAST_IMAGE_KEY, gson.toJson(reference));
     }
 
     /** 获取用户最近一次图片路径。 */
     public String getLastImage(String userId) {
+        ImageReference reference = getLastImageReference(userId);
+        return reference == null ? null : reference.path();
+    }
+
+    public ImageReference getLastImageReference(String userId) {
         ensureMediaLoaded(userId);
-        return lastImagePaths.get(userId);
+        return lastImages.get(userId);
     }
 
     /** 保存刚收到、等待用户说明处理方式的图片路径。 */
     public void setPendingImage(String userId, String path) {
         ensureMediaLoaded(userId);
-        pendingImagePaths.put(userId, path);
+        ImageReference reference = new ImageReference(path, ImageSource.USER, System.currentTimeMillis());
+        pendingImages.put(userId, reference);
         lastImageAnalyses.remove(userId);
-        database.saveUserState(userId, PENDING_IMAGE_KEY, path);
+        database.saveUserState(userId, PENDING_IMAGE_KEY, gson.toJson(reference));
     }
 
     /** 查看待处理图片路径，但不清除它。 */
     public String peekPendingImage(String userId) {
+        ImageReference reference = getPendingImageReference(userId);
+        return reference == null ? null : reference.path();
+    }
+
+    public ImageReference getPendingImageReference(String userId) {
         ensureMediaLoaded(userId);
-        return pendingImagePaths.get(userId);
+        return pendingImages.get(userId);
+    }
+
+    /** 优先解析本轮用户图片，否则返回最近一张可处理图片。 */
+    public ImageReference resolveCurrentImage(String userId) {
+        ImageReference pending = getPendingImageReference(userId);
+        return pending != null ? pending : getLastImageReference(userId);
     }
 
     /** 清除待处理图片状态。 */
     public void clearPendingImage(String userId) {
         loadedMediaUsers.add(userId);
-        pendingImagePaths.remove(userId);
+        pendingImages.remove(userId);
         database.deleteUserState(userId, PENDING_IMAGE_KEY);
     }
 
     private void ensureMediaLoaded(String userId) {
         if (userId == null || userId.isBlank() || !loadedMediaUsers.add(userId)) return;
-        loadStringState(userId, PENDING_DRAW_KEY, pendingDrawPrompts);
-        loadStringState(userId, LAST_IMAGE_KEY, lastImagePaths);
-        loadStringState(userId, PENDING_IMAGE_KEY, pendingImagePaths);
+        loadPendingDrawState(userId);
+        loadImageState(userId, LAST_IMAGE_KEY, lastImages, ImageSource.BOT);
+        loadImageState(userId, PENDING_IMAGE_KEY, pendingImages, ImageSource.USER);
     }
 
-    private void loadStringState(String userId, String key, Map<String, String> target) {
+    private void loadPendingDrawState(String userId) {
+        String value = database.loadUserState(userId, PENDING_DRAW_KEY);
+        if (value.isBlank()) return;
+        try {
+            PendingDrawRequest request = value.startsWith("{")
+                    ? gson.fromJson(value, PendingDrawRequest.class)
+                    : new PendingDrawRequest(value, "", "", System.currentTimeMillis() + PENDING_TTL_MILLIS);
+            if (request != null && request.expiresAtMillis() > System.currentTimeMillis()) {
+                pendingDrawRequests.put(userId, request);
+            } else {
+                database.deleteUserState(userId, PENDING_DRAW_KEY);
+            }
+        } catch (JsonSyntaxException error) {
+            database.deleteUserState(userId, PENDING_DRAW_KEY);
+        }
+    }
+
+    private void loadImageState(String userId, String key, Map<String, ImageReference> target,
+                                ImageSource legacySource) {
         String value = database.loadUserState(userId, key);
-        if (!value.isBlank()) target.put(userId, value);
+        if (value.isBlank()) return;
+        try {
+            ImageReference reference = value.startsWith("{")
+                    ? gson.fromJson(value, ImageReference.class)
+                    : new ImageReference(value, legacySource, System.currentTimeMillis());
+            if (reference != null && !reference.path().isBlank()) target.put(userId, reference);
+        } catch (JsonSyntaxException error) {
+            database.deleteUserState(userId, key);
+        }
     }
 
     public void setPendingFileExport(String userId, String userText, IntentResult route) {
@@ -358,6 +422,24 @@ public final class UserSessionStore {
     }
 
     public record PendingExpressState(String stage, String referenceNo) { }
+
+    public enum ImageSource { USER, BOT }
+
+    public record ImageReference(String path, ImageSource source, long createdAtMillis) {
+        public ImageReference {
+            path = path == null ? "" : path.trim();
+            source = source == null ? ImageSource.BOT : source;
+        }
+    }
+
+    public record PendingDrawRequest(String prompt, String description, String originalRequest,
+                                     long expiresAtMillis) {
+        public PendingDrawRequest {
+            prompt = prompt == null ? "" : prompt.trim();
+            description = description == null ? "" : description.trim();
+            originalRequest = originalRequest == null ? "" : originalRequest.trim();
+        }
+    }
 
     public record PendingFileExport(String userText, IntentResult route, long expiresAtMillis) { }
 

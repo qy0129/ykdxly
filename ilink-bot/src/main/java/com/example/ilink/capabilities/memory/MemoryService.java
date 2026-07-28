@@ -17,13 +17,15 @@ import java.util.regex.Pattern;
 public final class MemoryService {
 
     private static final Pattern LOCATION_PATTERN = Pattern.compile(
-            "(?:我住在|我常住|我的常住地是|我所在的城市是|我家在)([^，。！？]{1,30})");
+            "(?:我住在|我常住(?:地)?(?:在)?|我的常住地(?:是|在)|我所在的城市(?:是|在)|我家(?:在|是))"
+                    + "([^，。！？,!?；;]{1,40})");
     private static final Pattern SENSITIVE_PATTERN = Pattern.compile(
             ".*(密码|身份证|银行卡|信用卡|验证码|支付口令).*", Pattern.CASE_INSENSITIVE);
 
     private static final Pattern NAME_PATTERN = Pattern.compile("(?:我叫|我的名字是|名字叫)([^，。！？]{1,20})");
-    private static final Pattern HOME_PATTERN = Pattern.compile("(?:我住在|我常住在|我的常住地是|我家在)([^，。！？]{2,40})");
     private static final Pattern WORK_PATTERN = Pattern.compile("(?:我在)([^，。！？]{2,40})(?:上班|工作)");
+    private static final Pattern CURRENT_LOCATION_PATTERN = Pattern.compile(
+            "(?:我现在在|我目前在|我当前在|当前位置(?:是|在))([^，。！？,!?；;]{1,40})");
     private static final Pattern DIET_PATTERN = Pattern.compile(".*(?:不吃|忌口|过敏).*");
     private static final Pattern STABLE_PREFERENCE_PATTERN = Pattern.compile(".*(?:我平时|我一直|我通常).*(?:喜欢|偏好|习惯).*");
     private static final Pattern LONG_TERM_GOAL_PATTERN = Pattern.compile(".*(?:长期目标|今年的目标|我的目标是).*");
@@ -52,11 +54,6 @@ public final class MemoryService {
         Matcher name = NAME_PATTERN.matcher(text);
         if (name.find()) {
             save(userId, new MemoryValue("profile", "user_name", name.group(1).trim()), text, 0.95);
-            return;
-        }
-        Matcher home = HOME_PATTERN.matcher(text);
-        if (home.find()) {
-            save(userId, new MemoryValue("location", "home_location", home.group(1).trim()), text, 0.95);
             return;
         }
         Matcher work = WORK_PATTERN.matcher(text);
@@ -108,6 +105,16 @@ public final class MemoryService {
                 .findFirst().orElse("");
     }
 
+    /** 提取用户明确表达的常住地点，地点是否存在由上层地点服务核验。 */
+    public String extractHomeLocation(String request) {
+        return extractLocation(LOCATION_PATTERN, request);
+    }
+
+    /** 提取用户明确表达的当前地点，避免把整句描述当成地点。 */
+    public String extractCurrentLocation(String request) {
+        return extractLocation(CURRENT_LOCATION_PATTERN, request);
+    }
+
     /** 生成只包含稳定事实的上下文，不注入来源原文和敏感数据。 */
     public String prompt(String userId) {
         List<UserMemory> memories = load(userId);
@@ -147,7 +154,7 @@ public final class MemoryService {
     private MemoryValue classify(String content) {
         Matcher location = LOCATION_PATTERN.matcher(content);
         if (location.find()) {
-            String city = location.group(1).trim();
+            String city = cleanLocation(location.group(1));
             return new MemoryValue("location", "home_location", city);
         }
         if (content.contains("怕冷")) return new MemoryValue("preference", "temperature_preference", "我比较怕冷");
@@ -160,6 +167,18 @@ public final class MemoryService {
         }
         if (content.matches(".*(目标|计划).*")) return new MemoryValue("goal", stableKey("goal", content), content);
         return new MemoryValue("profile", stableKey("fact", content), content);
+    }
+
+    private String extractLocation(Pattern pattern, String request) {
+        if (request == null || request.isBlank()) return "";
+        Matcher matcher = pattern.matcher(request);
+        return matcher.find() ? cleanLocation(matcher.group(1)) : "";
+    }
+
+    private String cleanLocation(String value) {
+        return value == null ? "" : value
+                .replaceFirst("\\s*(并且|同时|而且|以及).*", "")
+                .trim();
     }
 
     private String stableKey(String prefix, String content) {

@@ -46,8 +46,8 @@ public final class ImageEditTool implements Tool {
     /** 编辑当前图片并返回新图片字节。 */
     @Override
     public ToolResult execute(ToolContext context, JsonObject arguments) throws Exception {
-        String pendingImage = sessions.peekPendingImage(context.userId());
-        String imagePath = pendingImage != null ? pendingImage : sessions.getLastImage(context.userId());
+        UserSessionStore.ImageReference imageReference = sessions.resolveCurrentImage(context.userId());
+        String imagePath = imageReference == null ? null : imageReference.path();
         if (imagePath == null || !Files.exists(Path.of(imagePath))) {
             return ToolResult.failure("没有找到需要编辑的图片");
         }
@@ -58,6 +58,6 @@ public final class ImageEditTool implements Tool {
             return ToolResult.failure("图片编辑失败");
         }
         sessions.clearPendingImage(context.userId());
-        return ToolResult.success("图片编辑完成", image);
+        return ToolResult.media("图片编辑完成", image);
     }
 }
