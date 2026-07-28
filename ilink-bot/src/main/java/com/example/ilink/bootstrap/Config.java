@@ -145,8 +145,8 @@ public class Config {
     private static String loadApiKey() {
         try {
             Properties props = new Properties();
-            Path path = Path.of("config.properties");
-            if (Files.exists(path)) {
+            Path path = configPath();
+            if (path != null) {
                 try (InputStream in = Files.newInputStream(path)) {
                     props.load(in);
                     String key = props.getProperty("api.key");
@@ -163,8 +163,8 @@ public class Config {
     private static String loadProperty(String name, String defaultValue) {
         try {
             Properties props = new Properties();
-            Path path = Path.of("config.properties");
-            if (Files.exists(path)) {
+            Path path = configPath();
+            if (path != null) {
                 try (InputStream in = Files.newInputStream(path)) {
                     props.load(in);
                 }
@@ -173,6 +173,17 @@ public class Config {
         } catch (Exception e) {
             return defaultValue;
         }
+    }
+
+    /** 支持从项目目录启动时读取项目上一级的私有配置文件。 */
+    private static Path configPath() {
+        Path directory = Path.of("").toAbsolutePath().normalize();
+        for (int level = 0; level < 4 && directory != null; level++) {
+            Path candidate = directory.resolve("config.properties");
+            if (Files.isRegularFile(candidate)) return candidate;
+            directory = directory.getParent();
+        }
+        return null;
     }
 
     private static String loadSecretProperty(String environmentName, String propertyName) {

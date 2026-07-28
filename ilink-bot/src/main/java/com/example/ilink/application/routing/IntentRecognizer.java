@@ -54,6 +54,8 @@ public final class IntentRecognizer {
     public IntentPlan recognize(String userId, String userMessage, IntentContext context) {
         IntentPlan localCalendarPlan = localCalendarCreatePlan(userMessage);
         if (localCalendarPlan != null) return localCalendarPlan;
+        IntentPlan localVisualPlan = localVisualPlan(userMessage, context);
+        if (localVisualPlan != null) return localVisualPlan;
 
         // 路由模型只输出结构化意图，业务执行由 UserRequestHandler 负责。
         try {
@@ -251,7 +253,7 @@ public final class IntentRecognizer {
             action.addProperty("bilibili_query", inferBilibiliQuery(requestText,
                     string(action, "bilibili_category")));
             intent = "bilibili_search";
-        } else if ("chat".equals(intent) && isNearbyDiningRequest(requestText)) {
+        } else if ("chat".equals(intent) && isNearbyDiningRequest(userMessage)) {
             action.addProperty("intent", "nearby_food");
             action.addProperty("nearby_action", "search");
             action.addProperty("meal_keyword", inferNearbyFoodKeyword(requestText));
@@ -346,15 +348,15 @@ public final class IntentRecognizer {
 
         String resolvedIntent = string(action, "intent");
         if ("nearby_food".equals(resolvedIntent)
-                && !isNearbyDiningRequest(requestText)
-                && !isExplicitLocationRememberRequest(requestText)) {
+                && !isNearbyDiningRequest(userMessage)
+                && !isExplicitLocationRememberRequest(userMessage)) {
             action.addProperty("intent", "chat");
             action.addProperty("nearby_location", "");
             action.addProperty("nearby_action", "search");
             action.addProperty("meal_keyword", "");
             return;
         }
-        if ("food_order".equals(resolvedIntent) && isNearbyDiningRequest(requestText)) {
+        if ("food_order".equals(resolvedIntent) && isNearbyDiningRequest(userMessage)) {
             action.addProperty("intent", "nearby_food");
             action.addProperty("nearby_action", "search");
             String restaurant = string(action, "food_order_restaurants");
@@ -449,11 +451,7 @@ public final class IntentRecognizer {
     }
 
     static boolean isNearbyDiningRequest(String text) {
-        if (text == null || text.isBlank()) return false;
-        boolean hasLocation = text.matches(".*(我现在在|我在|当前位置|这附近|附近).*" );
-        boolean explicitOrder = text.matches(".*(点外卖|外卖下单|下单|点餐|美团|饿了么|外卖链接).*" );
-        return hasLocation && !explicitOrder
-                && text.matches(".*(想吃|想喝|找|有没有|哪里有|附近有|有什么好吃|有啥好吃|吃什么|推荐.*(?:餐厅|美食|吃的)).*" );
+        return IntentPolicy.isNearbyDiningRequest(text);
     }
 
     static String inferNearbyFoodKeyword(String text) {
@@ -592,9 +590,29 @@ public final class IntentRecognizer {
     }
 
     private static boolean isExplicitLocationRememberRequest(String text) {
-        if (text == null || text.isBlank()) return false;
-        return text.matches(".*(我现在在|我在|当前位置|我的位置|记住.*位置).*" )
-                && !text.matches(".*(想吃|想喝|找|有没有|哪里有|附近有|有什么好吃|有啥好吃|吃什么|餐厅|美食).*" );
+        return IntentPolicy.isExplicitLocationRememberRequest(text);
+    }
+
+    /** 明确且单一的绘图、改图请求本地直达，避免与位置、文档等意图竞争。 */
+    private IntentPlan localVisualPlan(String message, IntentContext context) {
+        if (message == null || message.isBlank() || looksLikeCompoundRequest(message)) return null;
+        JsonObject action = new JsonObject();
+        if (IntentPolicy.isExplicitImageEdit(message)) {
+            action.addProperty("intent", "image_action");
+            action.addProperty("image_action", "edit");
+            action.addProperty("image_prompt", message.trim());
+            return new IntentPlan(List.of(new IntentAction(message, toIntentResult(action))));
+        }
+        if (!IntentPolicy.isExplicitImageCreation(message)) return null;
+        action.addProperty("intent", "draw");
+        action.addProperty("en_prompt", message.trim());
+        action.addProperty("cn_description", message.trim());
+        action.addProperty("image_size", DrawSizeParser.parseMention(message));
+        return new IntentPlan(List.of(new IntentAction(message, toIntentResult(action))));
+    }
+
+    private static boolean looksLikeCompoundRequest(String message) {
+        return message.matches(".*(同时|并且|然后|接着|另外|顺便|再帮我).*");
     }
 
     /** 读取可选字符串字段，模型省略时返回空字符串。 */

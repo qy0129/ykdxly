@@ -70,7 +70,7 @@ public final class ImageAnalysisTool implements Tool {
 
     /** 优先返回待处理图片，否则返回最近图片。 */
     private String currentImagePath(String userId) {
-        String pendingImage = sessions.peekPendingImage(userId);
-        return pendingImage != null ? pendingImage : sessions.getLastImage(userId);
+        UserSessionStore.ImageReference reference = sessions.resolveCurrentImage(userId);
+        return reference == null ? null : reference.path();
     }
 }

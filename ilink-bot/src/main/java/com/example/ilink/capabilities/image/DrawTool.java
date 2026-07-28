@@ -47,6 +47,6 @@ public final class DrawTool implements Tool {
         GeneratedImage image = imageService.generateImage(prompt, imageSize);
         return image == null
                 ? ToolResult.failure("图片生成失败")
-                : ToolResult.success("图片已生成", image);
+                : ToolResult.media("图片已生成", image);
     }
 }

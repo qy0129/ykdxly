@@ -60,6 +60,27 @@ public final class IntentPolicy {
         return text != null && DOCUMENT_EDIT.matcher(text).find();
     }
 
+    /** 用户是否明确表达“在当前位置寻找餐饮”。 */
+    public static boolean isNearbyDiningRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        boolean hasLocation = text.matches(".*(我现在在|我在|当前位置|这附近|附近).*" );
+        return hasLocation && !isExplicitFoodOrderRequest(text)
+                && text.matches(".*(想吃|想喝|找|有没有|哪里有|附近有|有什么好吃|有啥好吃|吃什么|推荐.*(?:餐厅|美食|吃的)).*" );
+    }
+
+    /** 用户是否只是明确提供当前位置，供后续位置能力使用。 */
+    public static boolean isExplicitLocationRememberRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        String value = text.trim();
+        return value.matches("^(我现在在|我在|当前位置是|我的位置是|我位于).+")
+                && !value.matches(".*(想吃|想喝|附近|餐厅|美食|天气|导航|路线|打车|外卖|下单).*" );
+    }
+
+    /** 用户是否明确要求点餐、下单或获取外卖入口。 */
+    public static boolean isExplicitFoodOrderRequest(String text) {
+        return text != null && text.matches(".*(点外卖|外卖下单|下单|点餐|美团|饿了么|外卖链接).*" );
+    }
+
     /** 用户是否明确授权生成或导出文档文件。 */
     public static boolean hasExplicitFileRequest(String text) {
         if (text == null || text.isBlank()) return false;
