@@ -9,7 +9,6 @@ import com.example.ilink.capabilities.planning.TodoItem;
 import com.example.ilink.capabilities.memory.UserMemory;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -24,12 +23,14 @@ import java.util.List;
  *
  * <p>数据库默认关闭；连接失败时仅记录错误，现有内存功能仍可继续运行。</p>
  */
-public final class MySqlStore {
+public final class MySqlStore implements AutoCloseable {
 
     private static final MySqlStore INSTANCE = new MySqlStore();
 
     private final boolean enabled;
     private volatile boolean available;
+    private DatabaseConnectionPool connectionPool;
+
     private MySqlStore() {
         enabled = Config.DATABASE_ENABLED;
         if (!enabled) {
@@ -38,10 +39,13 @@ public final class MySqlStore {
 
         try {
             Class.forName("com.mysql.cj.jdbc.Driver");
+            connectionPool = new DatabaseConnectionPool();
             initializeTables();
             available = true;
             System.out.println("[Database] MySQL 已连接，bot_id=" + Config.DATABASE_BOT_ID);
         } catch (Exception e) {
+            if (connectionPool != null) connectionPool.close();
+            connectionPool = null;
             System.err.println("[Database] MySQL 初始化失败，继续使用内存存储: " + e.getMessage());
         }
     }
@@ -829,8 +833,17 @@ public final class MySqlStore {
     }
 
     Connection openConnection() throws SQLException {
-        return DriverManager.getConnection(
-                Config.DATABASE_URL, Config.DATABASE_USERNAME, Config.DATABASE_PASSWORD);
+        if (connectionPool == null) throw new SQLException("数据库连接池未初始化");
+        return connectionPool.getConnection();
+    }
+
+    @Override
+    public void close() {
+        available = false;
+        if (connectionPool != null) {
+            connectionPool.close();
+            connectionPool = null;
+        }
     }
 
     private void addMessageBatch(PreparedStatement statement, String userId,

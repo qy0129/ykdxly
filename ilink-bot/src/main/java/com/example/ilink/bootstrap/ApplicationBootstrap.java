@@ -106,6 +106,7 @@ import com.example.ilink.capabilities.web.ShortLinkService;
 import com.example.ilink.capabilities.web.WebSearchService;
 import com.example.ilink.platform.media.MediaStore;
 import com.example.ilink.platform.http.HttpClientFactory;
+import com.example.ilink.platform.persistence.MySqlStore;
 import com.example.ilink.platform.sdk.SdkResumeContextStore;
 
 import java.net.http.HttpClient;
@@ -119,17 +120,23 @@ public final class ApplicationBootstrap implements AutoCloseable {
     private final MessageSerialExecutor messageExecutor;
     private final LoginQrPage loginQrPage;
     private final SdkResumeContextStore resumeContextStore;
+    private final ChatHistoryStore chatHistory;
+    private final MySqlStore database;
 
     private ApplicationBootstrap(MessageDispatcher messageDispatcher,
                                  WechatMessageAdapter messageAdapter,
                                  MessageSerialExecutor messageExecutor,
                                  LoginQrPage loginQrPage,
-                                 SdkResumeContextStore resumeContextStore) {
+                                 SdkResumeContextStore resumeContextStore,
+                                 ChatHistoryStore chatHistory,
+                                 MySqlStore database) {
         this.messageDispatcher = messageDispatcher;
         this.messageAdapter = messageAdapter;
         this.messageExecutor = messageExecutor;
         this.loginQrPage = loginQrPage;
         this.resumeContextStore = resumeContextStore;
+        this.chatHistory = chatHistory;
+        this.database = database;
     }
 
     public static ApplicationBootstrap create() {
@@ -257,7 +264,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 new DailyDashboardServer(dashboardService), expressHttpServer, expressPageService);
         return new ApplicationBootstrap(
                 dispatcher, new WechatMessageAdapter(), new MessageSerialExecutor(),
-                new LoginQrPage(), new SdkResumeContextStore());
+                new LoginQrPage(), new SdkResumeContextStore(), chatHistory,
+                MySqlStore.getInstance());
     }
 
     public MessageDispatcher messageDispatcher() {
@@ -285,5 +293,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         messageExecutor.close();
         messageDispatcher.close();
         loginQrPage.cleanup();
+        chatHistory.close();
+        database.close();
     }
 }

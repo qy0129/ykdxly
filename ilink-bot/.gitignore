@@ -5,4 +5,4 @@ dependency-reduced-pom.xml
 models/
 *.silk
 qrcode.png
-config.properties
+../config.properties

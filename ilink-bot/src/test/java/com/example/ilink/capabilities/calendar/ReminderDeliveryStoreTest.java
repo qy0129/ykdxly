@@ -1,0 +1,33 @@
+package com.example.ilink.capabilities.calendar;
+
+import org.junit.jupiter.api.Test;
+
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class ReminderDeliveryStoreTest {
+
+    @Test
+    void claimsOnlyDueRemindersForAllowedUser() {
+        LocalDateTime now = LocalDateTime.of(2026, 7, 28, 10, 0);
+        ReminderDeliveryStore store = new ReminderDeliveryStore();
+        store.schedule(event("due", "user-a", now.minusMinutes(1)));
+        store.schedule(event("future", "user-a", now.plusMinutes(1)));
+        store.schedule(event("other-user", "user-b", now.minusMinutes(2)));
+
+        List<ReminderDelivery> claimed = store.claimDue(now, Set.of("user-a"));
+
+        assertEquals(1, claimed.size());
+        assertEquals("due", claimed.getFirst().eventId());
+        assertTrue(store.claimDue(now, Set.of("user-a")).isEmpty());
+    }
+
+    private CalendarEvent event(String id, String userId, LocalDateTime reminderAt) {
+        return new CalendarEvent(id, userId, id, "测试", reminderAt.plusMinutes(10), reminderAt,
+                "none", "", 10, "active", "", "test", "", reminderAt.minusHours(1));
+    }
+}
