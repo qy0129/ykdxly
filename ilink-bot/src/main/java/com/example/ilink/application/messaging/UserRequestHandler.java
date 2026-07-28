@@ -12,6 +12,7 @@ import com.example.ilink.application.workflow.visual.VisualCardWorkflow;
 
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.application.conversation.ChatHistoryStore;
+import com.example.ilink.application.conversation.ContextManager;
 import com.example.ilink.application.conversation.DocumentSessionStore;
 import com.example.ilink.application.conversation.UserSessionStore;
 import com.example.ilink.capabilities.chat.ChatService;
@@ -86,6 +87,7 @@ public final class UserRequestHandler {
     private final MediaStore mediaStore;
     private final ReplySender replySender;
     private final ToolManager toolManager;
+    private final ContextManager contextManager;
     private final PlanWorkflow planWorkflow;
     private final CalculatorService calculatorService;
     private final CalendarWorkflow calendarWorkflow;
@@ -111,6 +113,7 @@ public final class UserRequestHandler {
                               IntentRecognizer intentRecognizer, ChatService chatService,
                               WeatherService weatherService, MediaStore mediaStore,
                               ReplySender replySender, ToolManager toolManager,
+                              ContextManager contextManager,
                               PlanWorkflow planWorkflow, CalculatorService calculatorService,
                                CalendarWorkflow calendarWorkflow, HealthDietWorkflow healthDietWorkflow,
                                TravelWorkflow travelWorkflow, NearbyFoodWorkflow nearbyFoodWorkflow,
@@ -130,6 +133,7 @@ public final class UserRequestHandler {
         this.mediaStore = mediaStore;
         this.replySender = replySender;
         this.toolManager = toolManager;
+        this.contextManager = contextManager;
         this.planWorkflow = planWorkflow;
         this.calculatorService = calculatorService;
         this.calendarWorkflow = calendarWorkflow;
@@ -151,6 +155,7 @@ public final class UserRequestHandler {
     public void handle(AgentContext agentContext, String text) throws Exception {
         ReplyChannel client = agentContext.replyChannel();
         String userId = agentContext.principalId();
+        contextManager.buildContext(userId);
         if (handleFailedActionRetry(client, userId, text)) return;
 
         UserSessionStore.PendingFileExport pendingFileExport = sessions.getPendingFileExport(userId);
