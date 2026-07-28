@@ -173,6 +173,11 @@ public final class UserRequestHandler {
 
         if (handleMemoryCommand(client, userId, text)) return;
         if (handleRepeatCommand(client, userId, text)) return;
+        if (IntentPolicy.isCasualGreeting(text)) {
+            nearbyFoodWorkflow.clearPending(userId);
+            replySender.sendReply(client, userId, "你好，我在。有什么想让我帮你处理的？");
+            return;
+        }
         if (visualCardWorkflow.hasPending(userId) && visualCardWorkflow.handle(client, userId, text)) return;
         if (visualCardWorkflow.handle(client, userId, text)) return;
         if (handlePendingExpress(client, userId, text)) return;

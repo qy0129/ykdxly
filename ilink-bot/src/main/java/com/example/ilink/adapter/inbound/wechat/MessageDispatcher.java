@@ -106,9 +106,6 @@ public final class MessageDispatcher implements AutoCloseable {
         String userId = message.userId();
         activeUserId = userId;
         dailyDashboardServer.useUser(userId);
-        if (Config.LOGIN_BRIEFING_ENABLED) {
-            briefingScheduler.execute(() -> sendLoginBriefing(client));
-        }
         long startedAtMillis = System.currentTimeMillis();
         boolean voiceOnly = replySender.isVoiceOnly();
         ScheduledFuture<?> progressTask = progressScheduler.schedule(() -> {
@@ -125,6 +122,9 @@ public final class MessageDispatcher implements AutoCloseable {
             messageProcessor.process(client, message);
         } finally {
             progressTask.cancel(false);
+            if (Config.LOGIN_BRIEFING_ENABLED) {
+                briefingScheduler.execute(() -> sendLoginBriefing(client));
+            }
         }
     }
 

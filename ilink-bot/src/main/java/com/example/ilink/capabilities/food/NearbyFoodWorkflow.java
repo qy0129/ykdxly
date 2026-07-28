@@ -108,7 +108,7 @@ public final class NearbyFoodWorkflow {
         }
     }
 
-    /** 先连续发送地图图片，再发送对应的 Markdown 表格。 */
+    /** 先发送一张地点汇总图，再发送对应的 Markdown 表格。 */
     private void searchAndReply(ILinkClient client, String userId, String location,
                                 String longitude, String latitude, String keyword) throws Exception {
         JsonObject arguments = new JsonObject();

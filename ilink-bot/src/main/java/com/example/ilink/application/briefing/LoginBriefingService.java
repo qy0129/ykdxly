@@ -22,6 +22,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -64,11 +65,13 @@ public final class LoginBriefingService {
     public String build(String userId, List<ReminderDelivery> overdueDeliveries) {
         LocalDateTime now = LocalDateTime.now();
         LocalDate today = now.toLocalDate();
+        CompletableFuture<String> weatherFuture = CompletableFuture.supplyAsync(() -> loadWeather(userId));
+        CompletableFuture<String> mailFuture = CompletableFuture.supplyAsync(() -> loadMailBriefing(userId));
         StringBuilder text = new StringBuilder(greeting(now.getHour())).append("，欢迎回来。\n\n")
                 .append("今天是").append(today.format(DATE_FORMAT)).append("。")
                 .append(holidayService.describe(today)).append('\n');
 
-        String weather = loadWeather(userId);
+        String weather = weatherFuture.join();
         if (!weather.isBlank()) {
             text.append('\n').append(weather).append('\n')
                     .append(buildTravelAdvice(weather)).append('\n')
@@ -100,13 +103,19 @@ public final class LoginBriefingService {
         String todoText = todoService.list(userId);
         if (!todoText.contains("没有待完成")) text.append('\n').append(todoText).append('\n');
         appendTodayPlan(text, userId, today);
-        String mailBriefing = qqMailService == null ? "" : qqMailService.briefing(userId);
+        String mailBriefing = mailFuture.join();
         if (!mailBriefing.isBlank()) text.append("\n\n").append(mailBriefing);
-        String newsBriefing = loadNews();
-        if (!newsBriefing.isBlank()) text.append("\n\n").append(newsBriefing);
+        if (Config.BRIEFING_NEWS_ENABLED) {
+            String newsBriefing = loadNews();
+            if (!newsBriefing.isBlank()) text.append("\n\n").append(newsBriefing);
+        }
 
         return text.append("\n不用着急，一件一件来就好，我会继续帮你记着。")
                 .toString().trim();
+    }
+
+    private String loadMailBriefing(String userId) {
+        return qqMailService == null ? "" : qqMailService.briefing(userId);
     }
 
     private synchronized String loadNews() {

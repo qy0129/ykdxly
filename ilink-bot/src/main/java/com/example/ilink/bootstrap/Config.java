@@ -91,10 +91,12 @@ public class Config {
     public static final boolean LOGIN_BRIEFING_ENABLED =
             Boolean.parseBoolean(loadProperty("briefing.login.enabled", "true"));
     public static final boolean BRIEFING_POLISH_ENABLED =
-            Boolean.parseBoolean(loadProperty("briefing.polish.enabled", "true"));
+            Boolean.parseBoolean(loadProperty("briefing.polish.enabled", "false"));
     public static final Duration BRIEFING_POLISH_TIMEOUT = Duration.ofSeconds(
             Long.parseLong(loadProperty("briefing.polish.timeout.seconds", "60")));
     public static final String BRIEFING_DEFAULT_LOCATION = loadProperty("briefing.default.location", "");
+    public static final boolean BRIEFING_NEWS_ENABLED =
+            Boolean.parseBoolean(loadProperty("briefing.news.enabled", "false"));
     public static final boolean DAILY_DASHBOARD_ENABLED =
             Boolean.parseBoolean(loadProperty("dashboard.enabled", "true"));
     public static final String DAILY_DASHBOARD_BIND_ADDRESS =

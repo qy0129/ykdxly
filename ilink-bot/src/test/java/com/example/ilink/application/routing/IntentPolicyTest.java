@@ -43,6 +43,13 @@ class IntentPolicyTest {
     }
 
     @Test
+    void casualGreetingsAreHandledLocally() {
+        assertTrue(IntentPolicy.isCasualGreeting("你好"));
+        assertTrue(IntentPolicy.isCasualGreeting("在吗？"));
+        assertFalse(IntentPolicy.isCasualGreeting("你好，帮我查天气"));
+    }
+
+    @Test
     void wrongFileIntentIsCorrectedToDraw() throws Exception {
         IntentRecognizer recognizer = new IntentRecognizer(HttpClient.newHttpClient());
         JsonObject action = new JsonObject();
@@ -126,5 +133,22 @@ class IntentPolicyTest {
 
         assertEquals("", action.get("meal_keyword").getAsString());
         assertEquals("search", action.get("nearby_action").getAsString());
+    }
+
+    @Test
+    void hallucinatedNearbyFoodIntentFallsBackToChat() throws Exception {
+        IntentRecognizer recognizer = new IntentRecognizer(HttpClient.newHttpClient());
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "nearby_food");
+        action.addProperty("nearby_location", "你好");
+
+        Method normalize = IntentRecognizer.class.getDeclaredMethod(
+                "normalizeAction", String.class, String.class, JsonObject.class, IntentContext.class);
+        normalize.setAccessible(true);
+        normalize.invoke(recognizer, "你好", "你好", action,
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals("chat", action.get("intent").getAsString());
+        assertEquals("", action.get("nearby_location").getAsString());
     }
 }
