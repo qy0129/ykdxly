@@ -38,6 +38,13 @@ public final class IntentPolicy {
                 + "(重新发|重发|再发|再说)(一遍|一次|一下)?(给我)?$");
     }
 
+    /** 简短寒暄不需要经过模型路由或聊天模型。 */
+    public static boolean isCasualGreeting(String text) {
+        if (text == null) return false;
+        String value = text.replaceAll("[，,。.!！?？\\s]", "");
+        return value.matches("^(你好|嗨|哈喽|hello|hi|在吗|早上好|上午好|中午好|下午好|晚上好)$");
+    }
+
     /** 用户是否明确要求创建视觉内容。 */
     public static boolean isExplicitImageCreation(String text) {
         return text != null && IMAGE_CREATION.matcher(text).find();
