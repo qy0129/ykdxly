@@ -99,6 +99,15 @@ public interface UserSessionStore {
 
     void refreshSession(String userId);
 
+    /** 从数据库查询当前活跃的 {@link ChatSession}，不依赖内存缓存。 */
+    ChatSession getActiveSession(String userId);
+
+    /** 便捷方法：直接从 {@link #getActiveSession} 取 sessionId。 */
+    default String getActiveSessionId(String userId) {
+        ChatSession s = getActiveSession(userId);
+        return s == null ? null : s.sessionId();
+    }
+
     // ========== Nested Types ==========
 
     record PendingExpressState(String stage, String referenceNo) {

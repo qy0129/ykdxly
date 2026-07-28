@@ -1,8 +1,8 @@
 package com.example.ilink.capabilities.memory;
 
-import com.example.ilink.application.extractor.MemoryExtractor;
-
 import org.junit.jupiter.api.Test;
+
+import java.net.http.HttpClient;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -28,7 +28,7 @@ class MemoryServiceTest {
     @Test
     void automaticallyKeepsStableFactsButNotTemporaryLocation() {
         MemoryService service = new MemoryService();
-        MemoryExtractor extractor = new MemoryExtractor(service);
+        MemoryExtractor extractor = new MemoryExtractor(service, HttpClient.newHttpClient());
 
         extractor.extract("automatic-memory-user", "我叫李雷");
         extractor.extract("automatic-memory-user", "我住在杭州市西湖区");

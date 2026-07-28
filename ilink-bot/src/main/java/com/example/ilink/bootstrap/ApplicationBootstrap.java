@@ -10,6 +10,7 @@ import com.example.ilink.application.command.CommandHandler;
 import com.example.ilink.application.command.CommandRouter;
 import com.example.ilink.application.conversation.AudioHistoryStore;
 import com.example.ilink.application.conversation.ContextManager;
+import com.example.ilink.application.conversation.NewSessionService;
 import com.example.ilink.application.welcome.WelcomeHandler;
 import com.example.ilink.application.conversation.CalendarSessionStore;
 import com.example.ilink.application.conversation.ChatHistoryStore;
@@ -17,7 +18,8 @@ import com.example.ilink.application.conversation.DietPlanSessionStore;
 import com.example.ilink.application.conversation.DocumentSessionStore;
 import com.example.ilink.application.conversation.PlanSessionStore;
 import com.example.ilink.application.conversation.UserSessionStore;
-import com.example.ilink.application.extractor.MemoryExtractor;
+import com.example.ilink.capabilities.memory.MemoryExtractor;
+import com.example.ilink.application.conversation.SessionService;
 import com.example.ilink.application.messaging.CapabilityDispatcher;
 import com.example.ilink.application.messaging.MessageProcessor;
 import com.example.ilink.application.messaging.MessageSerialExecutor;
@@ -113,6 +115,7 @@ import com.example.ilink.platform.media.MediaStore;
 import com.example.ilink.platform.http.HttpClientFactory;
 import com.example.ilink.platform.persistence.DefaultUserSessionStore;
 import com.example.ilink.platform.persistence.MySqlStore;
+import com.example.ilink.platform.persistence.UserRepository;
 import com.example.ilink.platform.sdk.SdkResumeContextStore;
 
 import java.net.http.HttpClient;
@@ -157,7 +160,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         Retriever retriever = new Retriever(new EmbeddingService(httpClient), new VectorStore());
         DocumentAiService documentAiService = new DocumentAiService(httpClient, chatHistory, retriever);
         MemoryService memoryService = new MemoryService();
-        MemoryExtractor memoryExtractor = new MemoryExtractor(memoryService);
+        MemoryExtractor memoryExtractor = new MemoryExtractor(memoryService, httpClient);
         ContextManager contextManager = new ContextManager(sessions, memoryService);
         IntentRecognizer intentRecognizer = new IntentRecognizer(httpClient, chatHistory, memoryService, sessions);
         ChatService chatService = new ChatService(httpClient, chatHistory, sessions, memoryService);
@@ -229,10 +232,13 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 new VisualCardRenderer(new QrCodeService()), replySender::markSent, replySender::rememberText);
         CalendarService calendarService = new CalendarService(new CalendarEventStore());
         TodoService todoService = new TodoService(new TodoStore(), calendarService);
-        WelcomeHandler welcomeHandler = new WelcomeHandler();
+        UserRepository userRepository = new UserRepository(MySqlStore.getInstance());
+        WelcomeHandler welcomeHandler = new WelcomeHandler(userRepository);
         CommandRouter commandRouter = new CommandRouter();
+        NewSessionService newSessionService = new NewSessionService(sessions);
+        SessionService sessionService = new SessionService(MySqlStore.getInstance(), sessions);
         CommandHandler commandHandler = new CommandHandler(
-                sessions, memoryService, todoService, planSessions, welcomeHandler, replySender);
+                sessionService, sessions, memoryService, todoService, planSessions, welcomeHandler, replySender);
 
         CalendarWorkflow calendarWorkflow = new CalendarWorkflow(
                 calendarService, new CalendarSessionStore(), replySender);
@@ -253,7 +259,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         UserRequestHandler requestHandler = new UserRequestHandler(
                 chatHistory, sessions, documentSessions,
                 intentRecognizer, chatService, weatherService,
-                mediaStore, replySender, toolManager, planWorkflow,
+                mediaStore, replySender, toolManager, contextManager, planWorkflow,
                 new CalculatorService(httpClient, toolManager), calendarWorkflow,
                 healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, foodOrderWorkflow,
                 taxiWorkflow, memoryService, todoService,

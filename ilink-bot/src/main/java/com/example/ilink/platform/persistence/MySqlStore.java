@@ -597,9 +597,9 @@ public final class MySqlStore implements AutoCloseable {
 
     public void saveMemory(UserMemory memory) {
         if (!isAvailable()) return;
-        String sql = "INSERT INTO user_memories (id, bot_id, user_id, memory_type, memory_key, memory_value, source, "
-                + "confidence, status, created_at, updated_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                + "ON DUPLICATE KEY UPDATE memory_value=?, source=?, confidence=?, status='active', "
+        String sql = "INSERT INTO user_memories (id, bot_id, user_id, memory_type, memory_key, memory_value, importance, "
+                + "source, confidence, status, created_at, updated_at, last_used_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                + "ON DUPLICATE KEY UPDATE memory_value=?, importance=?, source=?, confidence=?, status='active', "
                 + "updated_at=?, last_used_at=?";
         try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, memory.id());
@@ -608,17 +608,19 @@ public final class MySqlStore implements AutoCloseable {
             statement.setString(4, memory.type());
             statement.setString(5, memory.key());
             statement.setString(6, memory.value());
-            statement.setString(7, memory.source());
-            statement.setDouble(8, memory.confidence());
-            statement.setString(9, memory.status());
-            statement.setTimestamp(10, Timestamp.valueOf(memory.createdAt()));
-            statement.setTimestamp(11, Timestamp.valueOf(memory.updatedAt()));
-            setTimestamp(statement, 12, memory.lastUsedAt());
-            statement.setString(13, memory.value());
-            statement.setString(14, memory.source());
-            statement.setDouble(15, memory.confidence());
-            statement.setTimestamp(16, Timestamp.valueOf(memory.updatedAt()));
-            setTimestamp(statement, 17, memory.lastUsedAt());
+            statement.setInt(7, memory.importance());
+            statement.setString(8, memory.source());
+            statement.setDouble(9, memory.confidence());
+            statement.setString(10, memory.status());
+            statement.setTimestamp(11, Timestamp.valueOf(memory.createdAt()));
+            statement.setTimestamp(12, Timestamp.valueOf(memory.updatedAt()));
+            setTimestamp(statement, 13, memory.lastUsedAt());
+            statement.setString(14, memory.value());
+            statement.setInt(15, memory.importance());
+            statement.setString(16, memory.source());
+            statement.setDouble(17, memory.confidence());
+            statement.setTimestamp(18, Timestamp.valueOf(memory.updatedAt()));
+            setTimestamp(statement, 19, memory.lastUsedAt());
             statement.executeUpdate();
         } catch (SQLException e) {
             logFailure("保存个人记忆", e);
@@ -627,7 +629,7 @@ public final class MySqlStore implements AutoCloseable {
 
     public List<UserMemory> loadMemories(String userId) {
         if (!isAvailable()) return List.of();
-        String sql = "SELECT id, memory_type, memory_key, memory_value, source, confidence, status, created_at, "
+        String sql = "SELECT id, memory_type, memory_key, memory_value, importance, source, confidence, status, created_at, "
                 + "updated_at, last_used_at FROM user_memories WHERE bot_id=? AND user_id=? AND status='active' "
                 + "ORDER BY updated_at DESC LIMIT 100";
         List<UserMemory> memories = new ArrayList<>();
@@ -637,7 +639,8 @@ public final class MySqlStore implements AutoCloseable {
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
                     memories.add(new UserMemory(result.getString("id"), userId, result.getString("memory_type"),
-                            result.getString("memory_key"), result.getString("memory_value"), result.getString("source"),
+                            result.getString("memory_key"), result.getString("memory_value"),
+                            result.getInt("importance"), result.getString("source"),
                             result.getDouble("confidence"), result.getString("status"),
                             result.getTimestamp("created_at").toLocalDateTime(),
                             result.getTimestamp("updated_at").toLocalDateTime(),
@@ -802,6 +805,53 @@ public final class MySqlStore implements AutoCloseable {
             logFailure("查询会话", e);
         }
         return null;
+    }
+
+    public List<SessionRow> listUserSessions(String wechatId) {
+        if (!isAvailable()) return List.of();
+        String sql = "SELECT session_id, wechat_id, title, status, last_active_time, created_time "
+                + "FROM chat_session WHERE wechat_id = ? ORDER BY last_active_time DESC";
+        List<SessionRow> sessions = new ArrayList<>();
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, wechatId);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    sessions.add(new SessionRow(result.getString("session_id"), result.getString("wechat_id"),
+                            result.getString("title"), result.getString("status"),
+                            toLocalDateTime(result.getTimestamp("last_active_time")),
+                            toLocalDateTime(result.getTimestamp("created_time"))));
+                }
+            }
+        } catch (SQLException e) {
+            logFailure("查询用户会话列表", e);
+        }
+        return sessions;
+    }
+
+    public void switchActiveSession(String sessionId, String wechatId) {
+        if (!isAvailable()) return;
+        deactivateOtherSessions(sessionId, wechatId);
+        String sql = "UPDATE chat_session SET status = 'ACTIVE' WHERE session_id = ?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, sessionId);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("切换活跃会话", e);
+        }
+    }
+
+    public void closeSession(String sessionId) {
+        if (!isAvailable()) return;
+        String sql = "UPDATE chat_session SET status = 'INACTIVE' WHERE session_id = ?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, sessionId);
+            statement.executeUpdate();
+        } catch (SQLException e) {
+            logFailure("关闭会话", e);
+        }
     }
 
     // ========== Session Messages (v2.0) ==========

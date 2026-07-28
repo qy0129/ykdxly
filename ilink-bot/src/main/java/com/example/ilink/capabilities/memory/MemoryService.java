@@ -12,7 +12,12 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** 个人记忆的提取、保存、查询和遗忘服务。 */
+/**
+ * 个人记忆的提取、保存、查询和遗忘服务。
+ *
+ * <p>仅 {@link MemoryExtractor} 通过 {@link #saveExtractedMemory(MemoryCandidate)} 写入数据库。
+ * 其他调用方应当使用 {@link #remember(String, String)} 或只读查询。</p>
+ */
 public final class MemoryService {
 
     private static final Pattern LOCATION_PATTERN = Pattern.compile(
@@ -31,7 +36,7 @@ public final class MemoryService {
         }
 
         MemoryValue memoryValue = classify(content);
-        save(userId, memoryValue, request, 1.0);
+        save(userId, memoryValue, request, 1.0, 8);
         return "好，我记住了：" + memoryValue.value();
     }
 
@@ -44,10 +49,21 @@ public final class MemoryService {
     public void observe(String userId, String message) {
     }
 
-    /** 仅允许 {@code MemoryExtractor} 调用的写入入口。 */
+    /** 仅 {@link MemoryExtractor} 调用的写入入口。 */
+    public void saveExtractedMemory(MemoryCandidate candidate) {
+        if (candidate == null || candidate.userId() == null || candidate.userId().isBlank()
+                || candidate.content() == null || candidate.content().isBlank()) return;
+        String key = candidate.key() != null ? candidate.key() : stableKey(candidate.type(), candidate.content());
+        double confidence = Math.min(1.0, candidate.importance() / 10.0);
+        save(candidate.userId(), new MemoryValue(candidate.type(), key, candidate.content()),
+                candidate.source(), confidence, candidate.importance());
+    }
+
+    /** @deprecated 仅用于旧版 {@link com.example.ilink.application.extractor.MemoryExtractor} 兼容，新代码使用 {@link #saveExtractedMemory(MemoryCandidate)}。 */
+    @Deprecated
     public void saveFromExtractor(String userId, String type, String key, String value, double confidence) {
         if (userId == null || userId.isBlank() || key == null || key.isBlank()) return;
-        save(userId, new MemoryValue(type, key, value), "MemoryExtractor", confidence);
+        save(userId, new MemoryValue(type, key, value), "MemoryExtractor", confidence, 5);
     }
 
     public String forget(String userId, String request) {
@@ -96,14 +112,14 @@ public final class MemoryService {
         return cache.computeIfAbsent(userId, database::loadMemories);
     }
 
-    private void save(String userId, MemoryValue memoryValue, String source, double confidence) {
+    private void save(String userId, MemoryValue memoryValue, String source, double confidence, int importance) {
         List<UserMemory> existing = new ArrayList<>(load(userId));
         UserMemory previous = existing.stream().filter(memory -> memory.key().equals(memoryValue.key()))
                 .findFirst().orElse(null);
         if (previous != null && previous.value().equals(memoryValue.value())) return;
         LocalDateTime now = LocalDateTime.now();
         UserMemory memory = new UserMemory(previous == null ? UUID.randomUUID().toString() : previous.id(), userId,
-                memoryValue.type(), memoryValue.key(), memoryValue.value(), source, confidence,
+                memoryValue.type(), memoryValue.key(), memoryValue.value(), importance, source, confidence,
                 "active", previous == null ? now : previous.createdAt(), now, now);
         database.saveMemory(memory);
         existing.removeIf(item -> item.key().equals(memory.key()));

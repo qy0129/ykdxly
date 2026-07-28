@@ -19,7 +19,6 @@ import com.example.ilink.capabilities.calendar.ReminderTextFormatter;
 import com.example.ilink.capabilities.chat.ChatService;
 import com.example.ilink.capabilities.express.ExpressPageService;
 import com.example.ilink.platform.network.CloudflareTunnel;
-import com.example.ilink.platform.persistence.MySqlStore;
 import com.github.wechat.ilink.sdk.ILinkClient;
 
 import java.time.LocalDateTime;
@@ -113,22 +112,10 @@ public final class MessageDispatcher implements AutoCloseable {
     public void handleMessage(ILinkClient client, IncomingMessage message) {
         activeClient = client;
         String userId = message.principalId();
-        MySqlStore database = MySqlStore.getInstance();
-        if (database.isAvailable() && database.findUserByWechatId(userId) == null) {
-            database.createUser(userId, null);
-            try {
-                welcomeHandler.sendWelcome(
-                        new WechatReplyChannel(client), userId);
-            } catch (Exception e) {
-                System.err.println("[欢迎] 发送失败: " + e.getMessage());
-            }
-        } else if (!database.isAvailable()) {
-            try {
-                welcomeHandler.sendWelcome(
-                        new WechatReplyChannel(client), userId);
-            } catch (Exception e) {
-                System.err.println("[欢迎] 发送失败: " + e.getMessage());
-            }
+        try {
+            welcomeHandler.handleFirstLogin(new WechatReplyChannel(client), userId);
+        } catch (Exception e) {
+            System.err.println("[欢迎] 处理失败: " + e.getMessage());
         }
         AgentContext context = AgentContext.wechat(userId, new WechatReplyChannel(client));
         activeUserId = userId;

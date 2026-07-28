@@ -7,7 +7,7 @@ import com.example.ilink.application.conversation.AudioHistoryStore;
 import com.example.ilink.application.conversation.ChatHistoryStore;
 import com.example.ilink.application.conversation.DocumentSessionStore;
 import com.example.ilink.application.conversation.UserSessionStore;
-import com.example.ilink.application.extractor.MemoryExtractor;
+import com.example.ilink.capabilities.memory.MemoryExtractor;
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.capabilities.audio.AudioService;
 import com.example.ilink.capabilities.audio.AudioSource;
@@ -239,6 +239,10 @@ public final class MessageProcessor {
         if (commandType != CommandType.NONE) {
             commandHandler.handle(context.replyChannel(), userId, commandType);
             return;
+        }
+        String sessionId = sessions.getActiveSessionId(userId);
+        if (sessionId != null) {
+            chatHistory.setUserSessionId(userId, sessionId);
         }
         chatHistory.addUserMessage(userId, text);
         memoryExtractor.extract(userId, text);

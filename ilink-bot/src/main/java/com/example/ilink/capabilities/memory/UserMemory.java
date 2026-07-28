@@ -9,6 +9,7 @@ public record UserMemory(
         String type,
         String key,
         String value,
+        int importance,
         String source,
         double confidence,
         String status,

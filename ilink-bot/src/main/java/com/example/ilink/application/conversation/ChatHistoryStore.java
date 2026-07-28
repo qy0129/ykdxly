@@ -45,6 +45,7 @@ public final class ChatHistoryStore implements AutoCloseable {
     private final ExecutorService compressionExecutor;
     private final Map<String, List<JsonObject>> chatHistory = new ConcurrentHashMap<>();
     private final Map<String, String> conversationSummary = new ConcurrentHashMap<>();
+    private final Map<String, String> userSessionIds = new ConcurrentHashMap<>();
     private final Set<String> loadedUsers = ConcurrentHashMap.newKeySet();
     private final Set<String> compressingUsers = ConcurrentHashMap.newKeySet();
 
@@ -63,6 +64,13 @@ public final class ChatHistoryStore implements AutoCloseable {
             return thread;
         });
     }
+    /** 绑定用户当前活跃的 sessionId，后续消息写入会带上 session_id。 */
+    public void setUserSessionId(String userId, String sessionId) {
+        if (userId != null && sessionId != null) {
+            userSessionIds.put(userId, sessionId);
+        }
+    }
+
     /** 把图片、音频或文档等媒体事件加入对话历史。 */
     public void addMedia(String userId, String type, String path, String summary) {
         add(userId, "[用户发送了" + type + ": " + path + "]", summary);
@@ -101,7 +109,14 @@ public final class ChatHistoryStore implements AutoCloseable {
             history.add(message);
             shouldCompress = history.size() >= MAX_HISTORY;
         }
-        if (asyncWriter != null) asyncWriter.submit(() -> database.saveMessage(userId, role, content));
+        if (asyncWriter != null) {
+            String sessionId = userSessionIds.get(userId);
+            if (sessionId != null) {
+                asyncWriter.submit(() -> database.saveChatMessage(sessionId, role, content, "TEXT"));
+            } else {
+                asyncWriter.submit(() -> database.saveMessage(userId, role, content));
+            }
+        }
         if (shouldCompress) scheduleCompression(userId);
     }
 
@@ -225,8 +240,14 @@ public final class ChatHistoryStore implements AutoCloseable {
             String mergedSummary = conversationSummary.merge(
                     userId, summary, (old, val) -> old + "\n" + val);
             if (asyncWriter != null) {
-                asyncWriter.submit(() -> database.saveSummaryAndDeleteOldest(
-                        userId, mergedSummary, COMPRESS_BATCH));
+                String sessionId = userSessionIds.get(userId);
+                if (sessionId != null) {
+                    String finalSummary = mergedSummary;
+                    asyncWriter.submit(() -> database.saveSessionSummary(sessionId, finalSummary, COMPRESS_BATCH));
+                } else {
+                    asyncWriter.submit(() -> database.saveSummaryAndDeleteOldest(
+                            userId, mergedSummary, COMPRESS_BATCH));
+                }
             }
         } catch (Exception ignored) {}
     }
@@ -249,22 +270,40 @@ public final class ChatHistoryStore implements AutoCloseable {
     private void ensureLoaded(String userId) {
         if (database == null || !database.isAvailable() || !loadedUsers.add(userId)) return;
 
-        String summary = database.loadConversationSummary(userId);
-        if (summary != null && !summary.isBlank()) {
-            conversationSummary.put(userId, summary);
-        }
+        String sessionId = userSessionIds.get(userId);
+        if (sessionId != null) {
+            String summary = database.loadSessionSummary(sessionId);
+            if (summary != null && !summary.isBlank()) {
+                conversationSummary.put(userId, summary);
+            }
+            List<MySqlStore.ChatEntry> storedMessages = database.loadSessionMessages(sessionId, MAX_HISTORY);
+            if (!storedMessages.isEmpty()) {
+                List<JsonObject> history = Collections.synchronizedList(new LinkedList<>());
+                for (MySqlStore.ChatEntry storedMessage : storedMessages) {
+                    JsonObject message = new JsonObject();
+                    message.addProperty("role", storedMessage.role());
+                    message.addProperty("content", storedMessage.content());
+                    history.add(message);
+                }
+                chatHistory.put(userId, history);
+            }
+        } else {
+            String summary = database.loadConversationSummary(userId);
+            if (summary != null && !summary.isBlank()) {
+                conversationSummary.put(userId, summary);
+            }
+            List<MySqlStore.ChatEntry> storedMessages = database.loadRecentMessages(userId, MAX_HISTORY);
+            if (storedMessages.isEmpty()) return;
 
-        List<MySqlStore.ChatEntry> storedMessages = database.loadRecentMessages(userId, MAX_HISTORY);
-        if (storedMessages.isEmpty()) return;
-
-        List<JsonObject> history = Collections.synchronizedList(new LinkedList<>());
-        for (MySqlStore.ChatEntry storedMessage : storedMessages) {
-            JsonObject message = new JsonObject();
-            message.addProperty("role", storedMessage.role());
-            message.addProperty("content", storedMessage.content());
-            history.add(message);
+            List<JsonObject> history = Collections.synchronizedList(new LinkedList<>());
+            for (MySqlStore.ChatEntry storedMessage : storedMessages) {
+                JsonObject message = new JsonObject();
+                message.addProperty("role", storedMessage.role());
+                message.addProperty("content", storedMessage.content());
+                history.add(message);
+            }
+            chatHistory.put(userId, history);
         }
-        chatHistory.put(userId, history);
     }
 
     /** 调用模型把旧消息整理成简短摘要。 */
