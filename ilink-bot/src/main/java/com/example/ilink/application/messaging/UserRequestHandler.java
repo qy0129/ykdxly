@@ -1,15 +1,14 @@
 package com.example.ilink.application.messaging;
 
-import com.example.ilink.adapter.outbound.wechat.ReplySender;
 import com.example.ilink.application.tooling.ActionPlanExecutor;
-import com.example.ilink.capabilities.calendar.CalendarWorkflow;
-import com.example.ilink.capabilities.food.FoodOrderWorkflow;
-import com.example.ilink.capabilities.food.HealthDietWorkflow;
-import com.example.ilink.capabilities.food.NearbyFoodWorkflow;
-import com.example.ilink.capabilities.planning.PlanWorkflow;
-import com.example.ilink.capabilities.travel.TaxiWorkflow;
-import com.example.ilink.capabilities.travel.TravelWorkflow;
-import com.example.ilink.capabilities.visual.VisualCardWorkflow;
+import com.example.ilink.application.workflow.calendar.CalendarWorkflow;
+import com.example.ilink.application.workflow.food.FoodOrderWorkflow;
+import com.example.ilink.application.workflow.food.HealthDietWorkflow;
+import com.example.ilink.application.workflow.food.NearbyFoodWorkflow;
+import com.example.ilink.application.workflow.planning.PlanWorkflow;
+import com.example.ilink.application.workflow.travel.TaxiWorkflow;
+import com.example.ilink.application.workflow.travel.TravelWorkflow;
+import com.example.ilink.application.workflow.visual.VisualCardWorkflow;
 
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.application.conversation.ChatHistoryStore;
@@ -57,7 +56,6 @@ import com.example.ilink.capabilities.persona.PersonaSwitchTool;
 import com.example.ilink.capabilities.planning.DeadlineCountdownTool;
 import com.example.ilink.capabilities.planning.DateTimeParser;
 import com.example.ilink.capabilities.weather.WeatherTool;
-import com.github.wechat.ilink.sdk.ILinkClient;
 import com.google.gson.JsonObject;
 
 import java.nio.file.Path;
@@ -146,7 +144,9 @@ public final class UserRequestHandler {
         this.visualCardWorkflow = visualCardWorkflow;
     }
     /** 识别用户意图并调用对应功能处理器。 */
-    public void handle(ILinkClient client, String userId, String text) throws Exception {
+    public void handle(AgentContext agentContext, String text) throws Exception {
+        ReplyChannel client = agentContext.replyChannel();
+        String userId = agentContext.principalId();
         if (handleFailedActionRetry(client, userId, text)) return;
 
         UserSessionStore.PendingFileExport pendingFileExport = sessions.getPendingFileExport(userId);
@@ -178,8 +178,8 @@ public final class UserRequestHandler {
             replySender.sendReply(client, userId, "你好，我在。有什么想让我帮你处理的？");
             return;
         }
-        if (visualCardWorkflow.hasPending(userId) && visualCardWorkflow.handle(client, userId, text)) return;
-        if (visualCardWorkflow.handle(client, userId, text)) return;
+        if (visualCardWorkflow.hasPending(userId) && visualCardWorkflow.handle(agentContext, text)) return;
+        if (visualCardWorkflow.handle(agentContext, text)) return;
         if (handlePendingExpress(client, userId, text)) return;
         if (handleDirectCommand(client, userId, text)) return;
 
@@ -195,12 +195,12 @@ public final class UserRequestHandler {
             return;
         }
         if (planWorkflow.hasPendingPlan(userId)) {
-            planWorkflow.completePendingPlan(client, userId, text);
+            planWorkflow.completePendingPlan(agentContext, text);
             resumeActionPlan(client, userId);
             return;
         }
         if (planWorkflow.hasPendingCalendarSync(userId)) {
-            planWorkflow.completeCalendarSync(client, userId, text);
+            planWorkflow.completeCalendarSync(agentContext, text);
             resumeActionPlan(client, userId);
             return;
         }
@@ -222,44 +222,44 @@ public final class UserRequestHandler {
                             .orElse(null);
                 }
             }
-            calendarWorkflow.completePending(client, userId, text, pendingRoute);
+            calendarWorkflow.completePending(agentContext, text, pendingRoute);
             resumeActionPlan(client, userId);
             return;
         }
         if (healthDietWorkflow.hasPending(userId)) {
-            healthDietWorkflow.handlePending(client, userId, text);
+            healthDietWorkflow.handlePending(agentContext, text);
             resumeActionPlan(client, userId);
             return;
         }
         if (travelWorkflow.hasPendingLocation(userId)) {
-            travelWorkflow.handleLocationSelection(client, userId, text);
+            travelWorkflow.handleLocationSelection(agentContext, text);
             resumeActionPlan(client, userId);
             return;
         }
         if (nearbyFoodWorkflow.hasPendingLocation(userId)) {
-            nearbyFoodWorkflow.handleLocationSelection(client, userId, text);
+            nearbyFoodWorkflow.handleLocationSelection(agentContext, text);
             resumeActionPlan(client, userId);
             return;
         }
         if (foodOrderWorkflow.hasPending(userId)) {
-            foodOrderWorkflow.handlePending(client, userId, text);
+            foodOrderWorkflow.handlePending(agentContext, text);
             resumeActionPlan(client, userId);
             return;
         }
         if (taxiWorkflow.hasPending(userId)) {
-            taxiWorkflow.handlePending(client, userId, text);
+            taxiWorkflow.handlePending(agentContext, text);
             resumeActionPlan(client, userId);
             return;
         }
 
         // 根据当前用户的临时状态构造上下文，让意图识别知道用户正在处理什么。
-        IntentContext context = new IntentContext(
+        IntentContext intentContext = new IntentContext(
                 sessions.peekPendingImage(userId) != null,
                 sessions.getLastImage(userId) != null,
                 sessions.peekPendingDraw(userId) != null,
                 documentSessions.get(userId) != null,
                 false);
-        IntentPlan plan = intentRecognizer.recognize(userId, text, context);
+        IntentPlan plan = intentRecognizer.recognize(userId, text, intentContext);
         if (plan == null || plan.isEmpty()) {
             replySender.sendReply(client, userId, "网络波动了，请再发一次～");
             return;
@@ -281,7 +281,7 @@ public final class UserRequestHandler {
     }
 
     /** 重发上一条回复，不调用大模型，避免被误识别为邮箱查询。 */
-    private boolean handleRepeatCommand(ILinkClient client, String userId, String text) throws Exception {
+    private boolean handleRepeatCommand(ReplyChannel client, String userId, String text) throws Exception {
         if (!IntentPolicy.isRepeatRequest(text)) return false;
         String previous = replySender.lastText();
         if (previous.isBlank()) previous = chatHistory.lastAssistantMessage(userId);
@@ -296,7 +296,7 @@ public final class UserRequestHandler {
     }
 
     /** 高确定性的记忆指令直接执行，避免继续扩大通用路由模型负担。 */
-    private boolean handleMemoryCommand(ILinkClient client, String userId, String text) throws Exception {
+    private boolean handleMemoryCommand(ReplyChannel client, String userId, String text) throws Exception {
         String normalized = text.trim();
         if (normalized.matches("^(请)?(帮我)?记住.*") || normalized.startsWith("以后记得")) {
             String reply = memoryService.remember(userId, normalized);
@@ -317,7 +317,7 @@ public final class UserRequestHandler {
     }
 
     /** 待办、新闻、联网搜索和天气使用高确定性本地路由，避免被通用模型误分流。 */
-    private boolean handleDirectCommand(ILinkClient client, String userId, String text) throws Exception {
+    private boolean handleDirectCommand(ReplyChannel client, String userId, String text) throws Exception {
         String normalized = text == null ? "" : text.trim();
         if (normalized.isBlank()) return false;
 
@@ -369,7 +369,7 @@ public final class UserRequestHandler {
         return text.replaceAll("[\\s，,。？?]", "").equalsIgnoreCase(trackingNo);
     }
 
-    private void queryExpress(ILinkClient client, String userId, String text) throws Exception {
+    private void queryExpress(ReplyChannel client, String userId, String text) throws Exception {
         String trackingNo = ExpressService.extractTrackingNo(text);
         String orderNo = ExpressService.extractOrderNo(text);
         String phone = extractExpressPhone(text);
@@ -398,7 +398,7 @@ public final class UserRequestHandler {
         executeExpressQuery(client, userId, text, trackingNo, phone);
     }
 
-    private void executeExpressQuery(ILinkClient client, String userId, String sourceText,
+    private void executeExpressQuery(ReplyChannel client, String userId, String sourceText,
                                      String trackingNo, String phone) throws Exception {
         JsonObject arguments = new JsonObject();
         if (!trackingNo.isBlank()) arguments.addProperty("tracking_no", trackingNo);
@@ -417,7 +417,7 @@ public final class UserRequestHandler {
         }
     }
 
-    private boolean handlePendingExpress(ILinkClient client, String userId, String text) throws Exception {
+    private boolean handlePendingExpress(ReplyChannel client, String userId, String text) throws Exception {
         if (!sessions.hasPendingExpress(userId)) return false;
         String normalized = text == null ? "" : text.trim();
         if ("取消".equals(normalized) || normalized.matches("(取消|结束)(快递|物流)?查询")) {
@@ -439,7 +439,7 @@ public final class UserRequestHandler {
     }
 
     /** 用户处于快递查询状态时，图片到达后自动识别并继续查询。 */
-    public void handleExpressImage(ILinkClient client, String userId) throws Exception {
+    public void handleExpressImage(ReplyChannel client, String userId) throws Exception {
         sessions.setPendingExpress(userId, "reading_image", "");
         JsonObject arguments = new JsonObject();
         arguments.addProperty("request", "只识别图片中的快递信息。请严格按以下格式输出，不要解释：\n"
@@ -484,7 +484,7 @@ public final class UserRequestHandler {
         return tail.find() ? tail.group(1) : "";
     }
 
-    private void createTodo(ILinkClient client, String userId, String text) throws Exception {
+    private void createTodo(ReplyChannel client, String userId, String text) throws Exception {
         LocalDateTime dueAt = DateTimeParser.parse(text);
         String title = text.replaceFirst("^(请)?(帮我)?(添加|新增|创建|记)(一个|个)?待办[：:，, ]*", "")
                 .replaceFirst("^待办[：:，, ]*", "")
@@ -507,7 +507,7 @@ public final class UserRequestHandler {
         return text.matches("^(请)?(帮我)?(查|查询|搜索|看看|获取)?(一下)?(今天|今日|最新|实时)?的?.*(新闻|资讯|热搜).*");
     }
 
-    private void searchNews(ILinkClient client, String userId, String text) throws Exception {
+    private void searchNews(ReplyChannel client, String userId, String text) throws Exception {
         String query = text.replaceFirst("^(请)?(帮我)?(查|查询|搜索|看看|获取)?(一下)?", "")
                 .replaceAll("(今天|今日|最新|实时)?的?(新闻|资讯|热搜)", "").trim();
         if (query.isBlank()) query = "最新新闻";
@@ -522,7 +522,7 @@ public final class UserRequestHandler {
         }
     }
 
-    private void searchWeb(ILinkClient client, String userId, String text) throws Exception {
+    private void searchWeb(ReplyChannel client, String userId, String text) throws Exception {
         String query = text.replaceFirst("^(请)?(帮我)?(联网搜索|联网查|上网查|网页搜索|实时搜索)(一下)?[：:，, ]*", "").trim();
         if (query.isBlank()) {
             replySender.sendReply(client, userId, "请告诉我需要联网查询什么内容。");
@@ -562,7 +562,7 @@ public final class UserRequestHandler {
                 || text.matches("^[\\p{IsHan}A-Za-z· ]{2,30}(今天|明天|后天)?(的)?(天气|气温|温度)$");
     }
 
-    private void queryWeatherDirect(ILinkClient client, String userId, String text) throws Exception {
+    private void queryWeatherDirect(ReplyChannel client, String userId, String text) throws Exception {
         LocalDateTime parsedDateTime = DateTimeParser.parse(text);
         LocalDate targetDate = parsedDateTime == null ? LocalDate.now() : parsedDateTime.toLocalDate();
         long dayOffset = java.time.temporal.ChronoUnit.DAYS.between(LocalDate.now(), targetDate);
@@ -610,7 +610,7 @@ public final class UserRequestHandler {
     }
 
     /** 调用一个动作对应的原有业务处理器，动作之间由统一执行器负责排序。 */
-    private void executeAction(ILinkClient client, String userId, IntentAction action) throws Exception {
+    private void executeAction(ReplyChannel client, String userId, IntentAction action) throws Exception {
         IntentResult route = action.route();
         String actionText = action.requestText();
         System.out.println("[动作执行] 意图=" + intentName(route.intent())
@@ -662,7 +662,7 @@ public final class UserRequestHandler {
     }
 
     /** 当前补充会话结束后继续执行同一段话中尚未完成的动作。 */
-    private void resumeActionPlan(ILinkClient client, String userId) throws Exception {
+    private void resumeActionPlan(ReplyChannel client, String userId) throws Exception {
         if (hasBlockingPending(userId)) return;
         actionPlanExecutor.resume(userId,
                 action -> executeAction(client, userId, action),
@@ -685,7 +685,7 @@ public final class UserRequestHandler {
                 || sessions.hasPendingFileExport(userId);
     }
 
-    private boolean handleFailedActionRetry(ILinkClient client, String userId, String text) throws Exception {
+    private boolean handleFailedActionRetry(ReplyChannel client, String userId, String text) throws Exception {
         if (!actionPlanExecutor.hasFailedAction(userId)
                 || !text.trim().matches("(重试|再试一次|重试刚才失败的.*)")) return false;
         actionPlanExecutor.retryFailed(userId,
@@ -715,11 +715,16 @@ public final class UserRequestHandler {
         if (travelWorkflow.hasPendingLocation(userId)) return travelWorkflow.acceptsPendingReply(value);
         if (nearbyFoodWorkflow.hasPendingLocation(userId)) return nearbyFoodWorkflow.acceptsPendingReply(userId, value);
         if (foodOrderWorkflow.hasPending(userId)) return foodOrderWorkflow.acceptsPendingReply(value);
-        if (taxiWorkflow.hasPending(userId)) return taxiWorkflow.acceptsPendingReply(userId, value);
+        if (taxiWorkflow.hasPending(userId)) {
+            return taxiWorkflow.acceptsPendingReply(userId, value) && !looksLikeNewRequest(value);
+        }
         return sessions.hasPendingFileExport(userId) && IntentPolicy.isFileTypeAnswer(value);
     }
 
     private boolean looksLikeNewRequest(String text) {
+        if (text.matches("(?i)^(你好|您好|嗨|哈喽|hi|hello|在吗|谢谢|再见|你是谁|帮助|help)[！!。,.， ]*$")) {
+            return true;
+        }
         return text.matches(".*(天气|快递|物流|待办|新闻|路线|导航|日历|提醒|查一下|查询|搜索|帮我规划|点外卖).*" );
     }
 
@@ -754,7 +759,7 @@ public final class UserRequestHandler {
     }
 
     /** 搜索哔哩哔哩内容；具体视频不可用时服务会返回官方搜索入口。 */
-    private void searchBilibili(ILinkClient client, String userId, IntentResult route) throws Exception {
+    private void searchBilibili(ReplyChannel client, String userId, IntentResult route) throws Exception {
         List<SearchResult> results = bilibiliSearchService.search(
                 route.bilibiliQuery(), route.bilibiliCategory());
         String reply = bilibiliSearchService.formatReply(results);
@@ -763,7 +768,7 @@ public final class UserRequestHandler {
     }
 
     /** 查询动漫或音乐资料，并继续提供哔哩哔哩入口。 */
-    private void lookupMedia(ILinkClient client, String userId, String requestText,
+    private void lookupMedia(ReplyChannel client, String userId, String requestText,
                              IntentResult route) throws Exception {
         String query = route.mediaQuery().isBlank() ? requestText : route.mediaQuery();
         MediaKnowledgeResponse knowledge = mediaKnowledgeService.lookup(
@@ -776,14 +781,14 @@ public final class UserRequestHandler {
     }
 
     /** 只读查询绑定用户的 QQ 邮箱。 */
-    private void queryEmail(ILinkClient client, String userId, IntentResult route) throws Exception {
+    private void queryEmail(ReplyChannel client, String userId, IntentResult route) throws Exception {
         String reply = qqMailService.query(userId, route.emailAction(), route.emailKeyword());
         chatHistory.add(userId, "QQ邮箱查询", reply);
         visualCardWorkflow.sendTextResult(client, userId, "QQ 邮箱", "邮件查询结果", reply);
     }
 
     /** 记录单个动作的错误并继续后续动作，避免一个工具失败导致整段请求中断。 */
-    private void handleActionFailure(ILinkClient client, String userId,
+    private void handleActionFailure(ReplyChannel client, String userId,
                                      IntentAction action, Exception error) throws Exception {
         String actionName = intentName(action.route().intent());
         System.err.println("[动作执行] " + actionName + "失败: " + error.getMessage());
@@ -791,7 +796,7 @@ public final class UserRequestHandler {
     }
 
     /** 处理绘图请求；缺少尺寸时先保存提示词，等待用户补充。 */
-    private void handleDraw(ILinkClient client, String userId, String userText,
+    private void handleDraw(ReplyChannel client, String userId, String userText,
                             IntentResult route) throws Exception {
         sessions.clearPendingDraw(userId);
         chatHistory.add(userId, userText, "[图片] " + route.cnDescription());
@@ -821,7 +826,7 @@ public final class UserRequestHandler {
     }
 
     /** 处理用户对上一次绘图请求补充的尺寸选择。 */
-    private void handleDrawSize(ILinkClient client, String userId, IntentResult route) throws Exception {
+    private void handleDrawSize(ReplyChannel client, String userId, IntentResult route) throws Exception {
         String prompt = sessions.peekPendingDraw(userId);
         if (prompt == null) {
             replySender.sendReply(client, userId, "当前没有等待确认尺寸的绘图请求");
@@ -851,7 +856,7 @@ public final class UserRequestHandler {
     }
 
     /** 校验并切换用户当前人设。 */
-    private void handlePersonaSwitch(ILinkClient client, String userId, String userText,
+    private void handlePersonaSwitch(ReplyChannel client, String userId, String userText,
                                      IntentResult route) throws Exception {
         JsonObject arguments = new JsonObject();
         arguments.addProperty("persona", route.persona());
@@ -865,7 +870,7 @@ public final class UserRequestHandler {
     }
 
     /** 查找历史语音，必要时调用转写服务并返回文字。 */
-    private void handleAudioTranscribe(ILinkClient client, String userId,
+    private void handleAudioTranscribe(ReplyChannel client, String userId,
                                        IntentResult route) throws Exception {
         JsonObject arguments = new JsonObject();
         arguments.addProperty("source", route.audioSource());
@@ -876,7 +881,7 @@ public final class UserRequestHandler {
     }
 
     /** 处理图片分析、解题和编辑请求。 */
-    private void handleImageAction(ILinkClient client, String userId,
+    private void handleImageAction(ReplyChannel client, String userId,
                                    IntentResult route) throws Exception {
         if ("clarify".equals(route.imageAction()) || "none".equals(route.imageAction())) {
             replySender.sendReply(client, userId, "请告诉我想怎么处理图片：分析内容、解答题目，还是修改图片？");
@@ -916,7 +921,7 @@ public final class UserRequestHandler {
     }
 
     /** 调用费用分摊工具，处理多人 AA 和不同付款金额的结算。 */
-    private void handleExpenseSplit(ILinkClient client, String userId, String userText,
+    private void handleExpenseSplit(ReplyChannel client, String userId, String userText,
                                     IntentResult route) throws Exception {
         JsonObject arguments = new JsonObject();
         arguments.addProperty("request", userText);
@@ -928,14 +933,14 @@ public final class UserRequestHandler {
     }
 
     /** 根据当前位置查找具体分店，并生成平台门店链接或精确搜索入口。 */
-    private void handleFoodOrder(ILinkClient client, String userId, String userText,
+    private void handleFoodOrder(ReplyChannel client, String userId, String userText,
                                  IntentResult route) throws Exception {
         replySender.applyReplyMode(route.replyMode());
         foodOrderWorkflow.handle(client, userId, route);
     }
 
     /** 调用截止时间工具，返回用户距离目标时间的剩余时长。 */
-    private void handleDeadlineCountdown(ILinkClient client, String userId, String userText,
+    private void handleDeadlineCountdown(ReplyChannel client, String userId, String userText,
                                          IntentResult route) throws Exception {
         if (route.planDeadline().isBlank()) {
             replySender.sendReply(client, userId, "请告诉我具体截止时间，例如“明天下午六点”。",
@@ -952,7 +957,7 @@ public final class UserRequestHandler {
     }
 
     /** 查询天气；同名地点时保存候选项并等待用户选择。 */
-    private void handleWeather(ILinkClient client, String userId, String userText,
+    private void handleWeather(ReplyChannel client, String userId, String userText,
                                IntentResult route) throws Exception {
         String locationName = route.weatherLocation();
         if (locationName == null || locationName.isBlank()) {
@@ -984,7 +989,7 @@ public final class UserRequestHandler {
     }
 
     /** 处理用户对同名地点的序号选择或补充地点信息。 */
-    private void handleWeatherLocationSelection(ILinkClient client, String userId, String text) throws Exception {
+    private void handleWeatherLocationSelection(ReplyChannel client, String userId, String text) throws Exception {
         if ("取消".equals(text.trim())) {
             sessions.clearPendingWeatherLocations(userId);
             replySender.sendReply(client, userId, "已取消天气查询。");
@@ -1019,7 +1024,7 @@ public final class UserRequestHandler {
     }
 
     /** 请求天气服务并发送统一格式的回复。 */
-    private void sendWeatherReply(ILinkClient client, String userId, String userText,
+    private void sendWeatherReply(ReplyChannel client, String userId, String userText,
                                   WeatherLocation location, String weatherDay,
                                   String replyMode, String voiceStyle) throws Exception {
         String reply = weatherService.queryWeather(location, WeatherService.date(weatherDay), WeatherService.period(weatherDay));
@@ -1047,13 +1052,13 @@ public final class UserRequestHandler {
     }
 
     /** 处理文档问答、总结、生成和编辑请求。 */
-    private void handleDocumentAction(ILinkClient client, String userId, String userText,
+    private void handleDocumentAction(ReplyChannel client, String userId, String userText,
                                       IntentResult route) throws Exception {
         handleDocumentAction(client, userId, userText, route, route.outputFileType());
     }
 
     /** 处理文档动作；forcedOutputType 用于继续上一轮文件格式确认。 */
-    private void handleDocumentAction(ILinkClient client, String userId, String userText,
+    private void handleDocumentAction(ReplyChannel client, String userId, String userText,
                                       IntentResult route, String forcedOutputType) throws Exception {
         DocumentRecord document = documentSessions.get(userId);
         String pendingImage = sessions.peekPendingImage(userId);
@@ -1194,7 +1199,7 @@ public final class UserRequestHandler {
 
 
     /** 根据意图结果调用基础计算工具。 */
-    private void handleCalculator(ILinkClient client, String userId,
+    private void handleCalculator(ReplyChannel client, String userId,
                                   IntentResult route) throws Exception {
         JsonObject arguments = new JsonObject();
         arguments.addProperty("operation", route.calculationOperation().isBlank()

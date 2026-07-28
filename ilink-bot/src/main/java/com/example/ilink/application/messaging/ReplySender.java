@@ -1,4 +1,4 @@
-package com.example.ilink.adapter.outbound.wechat;
+package com.example.ilink.application.messaging;
 
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.application.conversation.AudioHistoryStore;
@@ -19,8 +19,6 @@ import com.example.ilink.capabilities.audio.SpeechTool;
 import com.example.ilink.application.tooling.ToolContext;
 import com.example.ilink.application.tooling.ToolManager;
 import com.example.ilink.application.tooling.ToolResult;
-import com.github.wechat.ilink.sdk.ILinkClient;
-import com.github.wechat.ilink.sdk.core.model.WeixinMessage;
 import com.google.gson.JsonObject;
 
 import java.net.http.HttpClient;
@@ -69,12 +67,12 @@ public final class ReplySender {
         this.chatHistory = chatHistory;
     }
     /** 按当前默认回复模式发送一条回复。 */
-    public void sendReply(ILinkClient client, String userId, String text) throws Exception {
+    public void sendReply(ReplyChannel client, String userId, String text) throws Exception {
         sendReply(client, userId, text, null, "default");
     }
 
     /** 根据指定的回复模式和音色发送文本、语音或两者。 */
-    public void sendReply(ILinkClient client, String userId, String text,
+    public void sendReply(ReplyChannel client, String userId, String text,
                            String replyMode, String voiceStyle) throws Exception {
         String displayText = TextLinkFormatter.format(text);
         boolean voice = voiceReplyEnabled
@@ -137,14 +135,14 @@ public final class ReplySender {
     }
 
     /** 发送图片，用于快递物流页面二维码。 */
-    public void sendImage(ILinkClient client, String userId, byte[] imageBytes,
+    public void sendImage(ReplyChannel client, String userId, byte[] imageBytes,
                           String fileName, String caption) throws Exception {
         client.sendImage(userId, imageBytes, fileName, caption);
         markReplySent();
     }
 
     /** 发送实际格式的音频，并在发送成功后保存历史记录。 */
-    private void sendAudio(ILinkClient client, String userId, String text,
+    private void sendAudio(ReplyChannel client, String userId, String text,
                            SynthesizedAudio audio) throws Exception {
         String fileName = "reply." + audio.format();
         System.out.println("[TTS] 准备发送 " + audio.format().toUpperCase()

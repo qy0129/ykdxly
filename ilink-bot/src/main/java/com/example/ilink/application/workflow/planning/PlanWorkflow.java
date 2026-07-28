@@ -1,9 +1,11 @@
-package com.example.ilink.capabilities.planning;
+package com.example.ilink.application.workflow.planning;
 
-import com.example.ilink.adapter.outbound.wechat.ReplySender;
+import com.example.ilink.application.messaging.ReplyChannel;
+import com.example.ilink.application.messaging.ReplySender;
 
 import com.example.ilink.application.conversation.ChatHistoryStore;
 import com.example.ilink.application.conversation.PlanSessionStore;
+import com.example.ilink.application.messaging.AgentContext;
 import com.example.ilink.capabilities.planning.PlanTask;
 import com.example.ilink.capabilities.planning.TaskPlan;
 import com.example.ilink.application.routing.IntentResult;
@@ -19,7 +21,6 @@ import com.example.ilink.capabilities.planning.PlanAdjustTool;
 import com.example.ilink.capabilities.planning.PlanProgressTool;
 import com.example.ilink.capabilities.planning.TaskDecompositionTool;
 import com.example.ilink.capabilities.planning.TaskPlanTool;
-import com.github.wechat.ilink.sdk.ILinkClient;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 
@@ -63,7 +64,11 @@ public final class PlanWorkflow {
     }
 
     /** 依次完成日期计算、任务拆分、计划生成和可选的文档、语音输出。 */
-    public void createPlan(ILinkClient client, String userId, String userText,
+    public void createPlan(AgentContext context, String userText, IntentResult route) throws Exception {
+        createPlan(context.replyChannel(), context.principalId(), userText, route);
+    }
+
+    public void createPlan(ReplyChannel client, String userId, String userText,
                            IntentResult route) throws Exception {
         String goal = route.planGoal().isBlank() ? userText : route.planGoal();
         // 模型已区分时长和截止时间；时长计划默认在今天完成，不再从原话猜测日期含义。
@@ -106,7 +111,11 @@ public final class PlanWorkflow {
     }
 
     /** 使用用户新回复的截止时间继续完成上一次规划请求。 */
-    public void completePendingPlan(ILinkClient client, String userId,
+    public void completePendingPlan(AgentContext context, String text) throws Exception {
+        completePendingPlan(context.replyChannel(), context.principalId(), text);
+    }
+
+    public void completePendingPlan(ReplyChannel client, String userId,
                                     String deadlineText) throws Exception {
         if ("取消".equals(deadlineText.trim())) {
             planSessions.clearPending(userId);
@@ -122,7 +131,7 @@ public final class PlanWorkflow {
     }
 
     /** 执行完整的计划创建工具链。 */
-    private void executeCreatePlan(ILinkClient client, String userId, String userText,
+    private void executeCreatePlan(ReplyChannel client, String userId, String userText,
                                    String goal, String deadlineExpression,
                                    String availableTime, PlanOutputOptions options) throws Exception {
 
@@ -172,7 +181,11 @@ public final class PlanWorkflow {
     }
 
     /** 调用计划调整工具，并返回调整后的完整计划。 */
-    public void adjustPlan(ILinkClient client, String userId, String userText,
+    public void adjustPlan(AgentContext context, String userText, IntentResult route) throws Exception {
+        adjustPlan(context.replyChannel(), context.principalId(), userText, route);
+    }
+
+    public void adjustPlan(ReplyChannel client, String userId, String userText,
                            IntentResult route) throws Exception {
         TaskPlan previous = planSessions.get(userId);
         JsonObject arguments = new JsonObject();
@@ -189,7 +202,11 @@ public final class PlanWorkflow {
     }
 
     /** 查询并回复当前计划进度。 */
-    public void queryProgress(ILinkClient client, String userId, String userText,
+    public void queryProgress(AgentContext context, String userText, IntentResult route) throws Exception {
+        queryProgress(context.replyChannel(), context.principalId(), userText, route);
+    }
+
+    public void queryProgress(ReplyChannel client, String userId, String userText,
                               IntentResult route) throws Exception {
         ToolResult result = toolManager.execute(
                 PlanProgressTool.NAME, new ToolContext(userId), new JsonObject());
@@ -202,7 +219,11 @@ public final class PlanWorkflow {
     }
 
     /** 用户确认后把计划任务变成一次性日历事件，保留原计划作为进度来源。 */
-    public void completeCalendarSync(ILinkClient client, String userId, String text) throws Exception {
+    public void completeCalendarSync(AgentContext context, String text) throws Exception {
+        completeCalendarSync(context.replyChannel(), context.principalId(), text);
+    }
+
+    public void completeCalendarSync(ReplyChannel client, String userId, String text) throws Exception {
         TaskPlan plan = planSessions.getPendingCalendarSync(userId);
         if (plan == null) return;
         if (text.contains("取消") || text.contains("不")) {
@@ -280,7 +301,7 @@ public final class PlanWorkflow {
     }
 
     /** 根据用户要求发送计划文本、文件和语音。 */
-    private void sendPlanResult(ILinkClient client, String userId, String planText,
+    private void sendPlanResult(ReplyChannel client, String userId, String planText,
                                 PlanOutputOptions options) throws Exception {
         if (Set.of("docx", "pdf", "xlsx", "pptx").contains(options.outputFileType())) {
             JsonObject documentArguments = new JsonObject();

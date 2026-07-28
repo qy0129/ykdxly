@@ -2,10 +2,14 @@ package com.example.ilink.adapter.inbound.wechat;
 
 import com.example.ilink.adapter.inbound.http.DailyDashboardServer;
 import com.example.ilink.adapter.inbound.http.ExpressHttpServer;
-import com.example.ilink.adapter.outbound.wechat.ReplySender;
+import com.example.ilink.adapter.outbound.wechat.WechatReplyChannel;
 import com.example.ilink.application.briefing.LoginBriefingService;
+import com.example.ilink.application.messaging.AgentContext;
 import com.example.ilink.application.messaging.IncomingMessage;
 import com.example.ilink.application.messaging.MessageProcessor;
+import com.example.ilink.application.messaging.ReplySender;
+import com.example.ilink.application.messaging.UserRequestHandler;
+import com.example.ilink.application.workflow.visual.VisualDeckSender;
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.capabilities.calendar.CalendarEvent;
 import com.example.ilink.capabilities.calendar.CalendarService;
@@ -13,7 +17,6 @@ import com.example.ilink.capabilities.calendar.ReminderDelivery;
 import com.example.ilink.capabilities.calendar.ReminderTextFormatter;
 import com.example.ilink.capabilities.chat.ChatService;
 import com.example.ilink.capabilities.express.ExpressPageService;
-import com.example.ilink.capabilities.visual.VisualDeckSender;
 import com.example.ilink.platform.network.CloudflareTunnel;
 import com.github.wechat.ilink.sdk.ILinkClient;
 
@@ -103,7 +106,8 @@ public final class MessageDispatcher implements AutoCloseable {
     /** 接收一条 SDK 消息，并异步提交给内部处理流程。 */
     public void handleMessage(ILinkClient client, IncomingMessage message) {
         activeClient = client;
-        String userId = message.userId();
+        String userId = message.principalId();
+        AgentContext context = AgentContext.wechat(userId, new WechatReplyChannel(client));
         activeUserId = userId;
         dailyDashboardServer.useUser(userId);
         long startedAtMillis = System.currentTimeMillis();
@@ -119,7 +123,7 @@ public final class MessageDispatcher implements AutoCloseable {
         }, 12, TimeUnit.SECONDS);
 
         try {
-            messageProcessor.process(client, message);
+            messageProcessor.process(context, message);
         } finally {
             progressTask.cancel(false);
             if (Config.LOGIN_BRIEFING_ENABLED) {
@@ -152,7 +156,7 @@ public final class MessageDispatcher implements AutoCloseable {
                 continue;
             }
             try {
-                replySender.sendReply(client, userId, ReminderTextFormatter.format(event));
+                replySender.sendReply(new WechatReplyChannel(client), userId, ReminderTextFormatter.format(event));
                 calendarService.markReminderSent(delivery, LocalDateTime.now());
             } catch (Exception e) {
                 System.err.println("[日历提醒] 发送失败: " + e.getMessage());
@@ -190,7 +194,7 @@ public final class MessageDispatcher implements AutoCloseable {
                 String message = chatService.polishBriefing(userId, draft);
                 String textFallback = dashboardUrl.isBlank() ? message
                         : message + "\n\n你的七日计划页：\n" + dashboardUrl;
-                visualDeckSender.sendText(client, userId, textFallback);
+                visualDeckSender.sendText(new WechatReplyChannel(client), userId, textFallback);
                 briefingSent = true;
                 System.out.println("[登录简报] 发送成功 user=" + userId);
             } catch (Exception e) {
@@ -203,7 +207,7 @@ public final class MessageDispatcher implements AutoCloseable {
                     continue;
                 }
                 try {
-                    replySender.sendReply(client, userId, ReminderTextFormatter.format(event));
+                    replySender.sendReply(new WechatReplyChannel(client), userId, ReminderTextFormatter.format(event));
                     calendarService.markReminderSent(delivery, LocalDateTime.now());
                 } catch (Exception e) {
                     System.err.println("[离线提醒] 补发失败 user=" + userId + ": " + e.getMessage());

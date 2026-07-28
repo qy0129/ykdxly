@@ -1,8 +1,10 @@
-package com.example.ilink.capabilities.food;
+package com.example.ilink.application.workflow.food;
 
-import com.example.ilink.adapter.outbound.wechat.ReplySender;
+import com.example.ilink.application.messaging.ReplyChannel;
+import com.example.ilink.application.messaging.ReplySender;
 
 import com.example.ilink.application.conversation.DietPlanSessionStore;
+import com.example.ilink.application.messaging.AgentContext;
 import com.example.ilink.capabilities.calendar.CalendarService;
 import com.example.ilink.capabilities.calendar.CalendarEvent;
 import com.example.ilink.application.routing.IntentResult;
@@ -10,7 +12,6 @@ import com.example.ilink.application.tooling.ToolContext;
 import com.example.ilink.application.tooling.ToolManager;
 import com.example.ilink.application.tooling.ToolResult;
 import com.example.ilink.capabilities.food.FoodDeliveryTool;
-import com.github.wechat.ilink.sdk.ILinkClient;
 import com.google.gson.JsonObject;
 
 import java.time.LocalDateTime;
@@ -38,7 +39,11 @@ public final class HealthDietWorkflow {
     public void clearPending(String userId) { sessions.clear(userId); }
 
     /** 新饮食请求使用路由模型给出的目标进入偏好收集流程。 */
-    public void handle(ILinkClient client, String userId, IntentResult route) throws Exception {
+    public void handle(AgentContext context, IntentResult route) throws Exception {
+        handle(context.replyChannel(), context.principalId(), route);
+    }
+
+    public void handle(ReplyChannel client, String userId, IntentResult route) throws Exception {
         String goal = route.dietGoal().isBlank() ? "均衡饮食" : route.dietGoal();
         sessions.set(userId, new DietPlanSessionStore.DietPlanDraft(goal, "preferences"));
         replySender.sendReply(client, userId, "可以。为了按你的情况选外卖，先告诉我两件事：\n"
@@ -48,7 +53,11 @@ public final class HealthDietWorkflow {
     }
 
     /** 用户后续回答口味、预算或同步确认时无需再次调用路由模型。 */
-    public void handlePending(ILinkClient client, String userId, String text) throws Exception {
+    public void handlePending(AgentContext context, String text) throws Exception {
+        handlePending(context.replyChannel(), context.principalId(), text);
+    }
+
+    public void handlePending(ReplyChannel client, String userId, String text) throws Exception {
         DietPlanSessionStore.DietPlanDraft draft = sessions.get(userId);
         if ("preferences".equals(draft.stage())) {
             JsonObject arguments = new JsonObject();

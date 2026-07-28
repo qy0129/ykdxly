@@ -1,15 +1,16 @@
-package com.example.ilink.capabilities.food;
+package com.example.ilink.application.workflow.food;
 
-import com.example.ilink.adapter.outbound.wechat.ReplySender;
+import com.example.ilink.application.messaging.ReplyChannel;
+import com.example.ilink.application.messaging.ReplySender;
 
 import com.example.ilink.application.conversation.UserSessionStore;
+import com.example.ilink.application.messaging.AgentContext;
 import com.example.ilink.application.routing.IntentResult;
 import com.example.ilink.platform.persistence.MySqlStore;
 import com.example.ilink.application.tooling.ToolContext;
 import com.example.ilink.application.tooling.ToolManager;
 import com.example.ilink.application.tooling.ToolResult;
 import com.example.ilink.capabilities.food.NearbyFoodTool;
-import com.github.wechat.ilink.sdk.ILinkClient;
 import com.google.gson.JsonObject;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
@@ -56,7 +57,11 @@ public final class NearbyFoodWorkflow {
     }
 
     /** 根据模型给出的地点和动作决定仅记住位置，还是立即搜索附近餐饮。 */
-    public void handle(ILinkClient client, String userId, IntentResult route) throws Exception {
+    public void handle(AgentContext context, IntentResult route) throws Exception {
+        handle(context.replyChannel(), context.principalId(), route);
+    }
+
+    public void handle(ReplyChannel client, String userId, IntentResult route) throws Exception {
         String name = route.nearbyLocation().trim();
         if (!name.isBlank()) {
             sessions.setCurrentLocation(userId, name);
@@ -75,7 +80,11 @@ public final class NearbyFoodWorkflow {
     }
 
     /** 同名地点时必须由用户确认序号，不能把附近店铺搜索到错误城市。 */
-    public void handleLocationSelection(ILinkClient client, String userId, String text) throws Exception {
+    public void handleLocationSelection(AgentContext context, String text) throws Exception {
+        handleLocationSelection(context.replyChannel(), context.principalId(), text);
+    }
+
+    public void handleLocationSelection(ReplyChannel client, String userId, String text) throws Exception {
         if ("取消".equals(text.trim())) {
             clearPendingSearch(userId);
             replySender.sendReply(client, userId, "已取消附近餐饮搜索。");
@@ -108,8 +117,8 @@ public final class NearbyFoodWorkflow {
         }
     }
 
-    /** 先发送一张地点汇总图，再发送对应的 Markdown 表格。 */
-    private void searchAndReply(ILinkClient client, String userId, String location,
+    /** 先连续发送地图图片，再发送对应的 Markdown 表格。 */
+    private void searchAndReply(ReplyChannel client, String userId, String location,
                                 String longitude, String latitude, String keyword) throws Exception {
         JsonObject arguments = new JsonObject();
         arguments.addProperty("location", location);

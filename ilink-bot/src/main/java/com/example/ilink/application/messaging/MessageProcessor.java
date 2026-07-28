@@ -1,6 +1,5 @@
 package com.example.ilink.application.messaging;
 
-import com.example.ilink.adapter.outbound.wechat.ReplySender;
 import com.example.ilink.application.conversation.AudioHistoryStore;
 import com.example.ilink.application.conversation.ChatHistoryStore;
 import com.example.ilink.application.conversation.DocumentSessionStore;
@@ -14,8 +13,6 @@ import com.example.ilink.capabilities.image.GeneratedImage;
 import com.example.ilink.capabilities.image.ImageService;
 import com.example.ilink.capabilities.memory.MemoryService;
 import com.example.ilink.platform.media.MediaStore;
-import com.github.wechat.ilink.sdk.ILinkClient;
-import com.github.wechat.ilink.sdk.core.model.MessageItem;
 
 import java.nio.file.Path;
 import java.util.Base64;
@@ -56,43 +53,46 @@ public final class MessageProcessor {
         this.capabilityDispatcher = capabilityDispatcher;
     }
 
-    public void process(ILinkClient client, IncomingMessage message) {
-        String userId = message.userId();
+    public void process(AgentContext context, IncomingMessage message) {
+        ReplyChannel client = context.replyChannel();
+        String userId = context.principalId();
         try {
             client.startTyping(userId);
-            List<MessageItem> items = message.items();
-            if (items.isEmpty()) return;
+            List<MessagePart> parts = message.parts();
+            if (parts.isEmpty()) return;
 
-            MessageItem first = items.get(0);
-            MessageItem textMessage = items.stream()
-                    .filter(item -> item.getText_item() != null)
+            MessagePart first = parts.get(0);
+            MessagePart.Text textMessage = parts.stream()
+                    .filter(MessagePart.Text.class::isInstance)
+                    .map(MessagePart.Text.class::cast)
                     .findFirst().orElse(null);
-            MessageItem imageMessage = items.stream()
-                    .filter(item -> item.getImage_item() != null)
+            MessagePart.Image imageMessage = parts.stream()
+                    .filter(MessagePart.Image.class::isInstance)
+                    .map(MessagePart.Image.class::cast)
                     .findFirst().orElse(null);
 
             if (imageMessage != null) {
-                processImage(client, userId, imageMessage);
+                processImage(context, imageMessage);
                 return;
             }
 
-            if (first.getVoice_item() != null) {
-                processVoice(client, userId, first);
+            if (first instanceof MessagePart.Voice voice) {
+                processVoice(context, voice);
                 return;
             }
 
-            if (first.getFile_item() != null) {
-                processFile(client, userId, first);
+            if (first instanceof MessagePart.File file) {
+                processFile(context, file);
                 return;
             }
 
-            if (first.getVideo_item() != null) {
-                processVideo(client, userId, first);
+            if (first instanceof MessagePart.Video video) {
+                processVideo(context, video);
                 return;
             }
 
             if (textMessage != null) {
-                processText(client, userId, textMessage.getText_item().getText());
+                processText(context, textMessage.text());
                 return;
             }
 
@@ -106,8 +106,10 @@ public final class MessageProcessor {
         }
     }
 
-    private void processImage(ILinkClient client, String userId, MessageItem item) throws Exception {
-        byte[] image = client.downloadImageFromMessageItem(item);
+    private void processImage(AgentContext context, MessagePart.Image item) throws Exception {
+        ReplyChannel client = context.replyChannel();
+        String userId = context.principalId();
+        byte[] image = item.content();
         if (image == null || image.length == 0) {
             replySender.sendReply(client, userId, "图片下载失败");
             return;
@@ -141,15 +143,17 @@ public final class MessageProcessor {
         }
     }
 
-    private void processVoice(ILinkClient client, String userId, MessageItem item) throws Exception {
-        byte[] voice = client.downloadVoiceFromMessageItem(item);
+    private void processVoice(AgentContext context, MessagePart.Voice item) throws Exception {
+        ReplyChannel client = context.replyChannel();
+        String userId = context.principalId();
+        byte[] voice = item.content();
         if (voice == null || voice.length == 0) {
             replySender.sendReply(client, userId, "语音下载失败，请再发一次");
             return;
         }
 
         Path saved = audioService.saveOriginal(userId, voice);
-        String text = item.getVoice_item().getText();
+        String text = item.transcript();
         if (text == null || text.isBlank() || !Config.AUDIO_ANALYSIS_ONLY_WHEN_REQUESTED) {
             try {
                 String modelText = audioService.transcribe(saved);
@@ -165,12 +169,14 @@ public final class MessageProcessor {
             return;
         }
         chatHistory.addMedia(userId, "语音", saved.toString(), text);
-        processText(client, userId, text);
+        processText(context, text);
     }
 
-    private void processFile(ILinkClient client, String userId, MessageItem item) throws Exception {
-        String fileName = item.getFile_item().getFile_name();
-        byte[] file = client.downloadFileFromMessageItem(item);
+    private void processFile(AgentContext context, MessagePart.File item) throws Exception {
+        ReplyChannel client = context.replyChannel();
+        String userId = context.principalId();
+        String fileName = item.fileName();
+        byte[] file = item.content();
         if (file == null || file.length == 0) {
             replySender.sendReply(client, userId, "文件下载失败");
             return;
@@ -200,8 +206,10 @@ public final class MessageProcessor {
         }
     }
 
-    private void processVideo(ILinkClient client, String userId, MessageItem item) throws Exception {
-        byte[] video = client.downloadVideoFromMessageItem(item);
+    private void processVideo(AgentContext context, MessagePart.Video item) throws Exception {
+        ReplyChannel client = context.replyChannel();
+        String userId = context.principalId();
+        byte[] video = item.content();
         if (video == null || video.length == 0) {
             replySender.sendReply(client, userId, "视频下载失败");
             return;
@@ -211,12 +219,13 @@ public final class MessageProcessor {
         replySender.sendReply(client, userId, "视频已保存，暂时还没有接入视频内容解析");
     }
 
-    private void processText(ILinkClient client, String userId, String text) throws Exception {
+    private void processText(AgentContext context, String text) throws Exception {
         if (text == null || text.isBlank()) return;
+        String userId = context.principalId();
         System.out.println("[" + userId + "] " + text);
         chatHistory.addUserMessage(userId, text);
         memoryService.observe(userId, text);
-        capabilityDispatcher.dispatch(client, userId, text);
+        capabilityDispatcher.dispatch(context, text);
     }
 
     private static String imageAnalysisPreview(String analysis) {

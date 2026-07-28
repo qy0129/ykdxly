@@ -1,11 +1,12 @@
-package com.example.ilink.capabilities.travel;
+package com.example.ilink.application.workflow.travel;
 
-import com.example.ilink.adapter.outbound.wechat.ReplySender;
+import com.example.ilink.application.messaging.ReplyChannel;
+import com.example.ilink.application.messaging.ReplySender;
+import com.example.ilink.application.messaging.AgentContext;
 
 import com.example.ilink.capabilities.travel.DidiMcpClient;
 import com.example.ilink.application.routing.IntentResult;
 import com.example.ilink.platform.persistence.MySqlStore;
-import com.github.wechat.ilink.sdk.ILinkClient;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 
@@ -42,7 +43,7 @@ public final class TaxiWorkflow {
         PendingTaxi pending = pendingTaxi(userId);
         if (pending == null) return false;
         return switch (pending.stage()) {
-            case CITY -> !value.isBlank();
+            case CITY -> isCityReply(value);
             case ORIGIN_SELECTION, DESTINATION_SELECTION -> value.matches("\\d+");
             case CONFIRM_ORDER -> value.matches("\\d+") || value.matches("(确认|下单|叫车).*" );
             case CONFIRM_CANCEL -> "确认取消".equals(value);
@@ -52,7 +53,11 @@ public final class TaxiWorkflow {
 
     public void clearPending(String userId) { clear(userId); }
 
-    public void handle(ILinkClient client, String userId, IntentResult route, String requestText) throws Exception {
+    public void handle(AgentContext context, IntentResult route, String requestText) throws Exception {
+        handle(context.replyChannel(), context.principalId(), route, requestText);
+    }
+
+    public void handle(ReplyChannel client, String userId, IntentResult route, String requestText) throws Exception {
         if (!didi.isConfigured()) {
             replySender.sendReply(client, userId, "尚未配置滴滴 MCP Key。请在启动环境设置 DIDI_MCP_KEY 后重试。");
             return;
@@ -66,7 +71,11 @@ public final class TaxiWorkflow {
         handleOrderCommand(client, userId, requestText);
     }
 
-    public void handlePending(ILinkClient client, String userId, String text) throws Exception {
+    public void handlePending(AgentContext context, String text) throws Exception {
+        handlePending(context.replyChannel(), context.principalId(), text);
+    }
+
+    public void handlePending(ReplyChannel client, String userId, String text) throws Exception {
         PendingTaxi pending = pendingTaxi(userId);
         if (pending == null) return;
         String answer = trim(text);
@@ -75,17 +84,31 @@ public final class TaxiWorkflow {
             replySender.sendReply(client, userId, "已取消本次滴滴叫车流程。");
             return;
         }
-        switch (pending.stage()) {
-            case CITY -> start(client, userId, pending.origin(), pending.destination(), answer, answer);
-            case ORIGIN_SELECTION -> selectOrigin(client, userId, pending, answer);
-            case DESTINATION_SELECTION -> selectDestination(client, userId, pending, answer);
-            case CONFIRM_ORDER -> createOrder(client, userId, pending, answer);
-            case CONFIRM_CANCEL -> cancelOrder(client, userId, pending, answer);
-            case ACTIVE_ORDER -> handleOrderCommand(client, userId, answer);
+        try {
+            switch (pending.stage()) {
+                case CITY -> start(client, userId, pending.origin(), pending.destination(), answer, answer);
+                case ORIGIN_SELECTION -> selectOrigin(client, userId, pending, answer);
+                case DESTINATION_SELECTION -> selectDestination(client, userId, pending, answer);
+                case CONFIRM_ORDER -> createOrder(client, userId, pending, answer);
+                case CONFIRM_CANCEL -> cancelOrder(client, userId, pending, answer);
+                case ACTIVE_ORDER -> handleOrderCommand(client, userId, answer);
+            }
+        } catch (Exception error) {
+            System.err.println("[Taxi] Pending workflow failed: " + error.getMessage());
+            replySender.sendReply(client, userId,
+                    "叫车服务暂时无法识别这次补充。请重新发送完整的出发地和目的地，或回复“取消”。");
         }
     }
 
-    private void start(ILinkClient client, String userId, String origin, String destination,
+    static boolean isCityReply(String value) {
+        if (value == null || value.isBlank() || value.length() > 30) return false;
+        if (value.matches("(?i)^(你好|您好|嗨|哈喽|hi|hello|在吗|谢谢|再见|你是谁|帮助|help)[！!。,.， ]*$")) {
+            return false;
+        }
+        return !value.matches(".*(天气|快递|物流|待办|新闻|路线|导航|日历|提醒|计划|查询|搜索|画图|图片|文件|外卖).*" );
+    }
+
+    private void start(ReplyChannel client, String userId, String origin, String destination,
                        String originCity, String destinationCity) throws Exception {
         String fromCity = city(originCity);
         String toCity = city(destinationCity);
@@ -110,14 +133,14 @@ public final class TaxiWorkflow {
         replySender.sendReply(client, userId, choices("出发地", candidates));
     }
 
-    private void selectOrigin(ILinkClient client, String userId, PendingTaxi pending, String text) throws Exception {
+    private void selectOrigin(ReplyChannel client, String userId, PendingTaxi pending, String text) throws Exception {
         int choice = choice(text, pending.candidates().size());
         if (choice < 0) { replySender.sendReply(client, userId, "请回复出发地序号，或回复“取消”。"); return; }
         resolveDestination(client, userId, pending.origin(), pending.destination(), pending.originCity(),
                 pending.destinationCity(), pending.candidates().get(choice));
     }
 
-    private void resolveDestination(ILinkClient client, String userId, String origin, String destination,
+    private void resolveDestination(ReplyChannel client, String userId, String origin, String destination,
                                     String originCity, String destinationCity, DidiMcpClient.Place from) throws Exception {
         List<DidiMcpClient.Place> candidates = didi.textSearch(destination, destinationCity);
         if (candidates.isEmpty()) {
@@ -130,13 +153,13 @@ public final class TaxiWorkflow {
         replySender.sendReply(client, userId, choices("目的地", candidates));
     }
 
-    private void selectDestination(ILinkClient client, String userId, PendingTaxi pending, String text) throws Exception {
+    private void selectDestination(ReplyChannel client, String userId, PendingTaxi pending, String text) throws Exception {
         int choice = choice(text, pending.candidates().size());
         if (choice < 0) { replySender.sendReply(client, userId, "请回复目的地序号，或回复“取消”。"); return; }
         estimate(client, userId, pending.from(), pending.candidates().get(choice));
     }
 
-    private void estimate(ILinkClient client, String userId, DidiMcpClient.Place from, DidiMcpClient.Place to) throws Exception {
+    private void estimate(ReplyChannel client, String userId, DidiMcpClient.Place from, DidiMcpClient.Place to) throws Exception {
         DidiMcpClient.Estimate estimate = didi.estimate(from, to);
         if (estimate.traceId().isBlank() || estimate.items().isEmpty()) {
             clear(userId);
@@ -156,7 +179,7 @@ public final class TaxiWorkflow {
         replySender.sendReply(client, userId, reply.toString());
     }
 
-    private void createOrder(ILinkClient client, String userId, PendingTaxi pending, String text) throws Exception {
+    private void createOrder(ReplyChannel client, String userId, PendingTaxi pending, String text) throws Exception {
         int choice = confirmedChoice(text, pending.items().size());
         if (choice < 0) choice = choice(text, pending.items().size());
         if (choice < 0) { replySender.sendReply(client, userId, "请回复车型序号，例如“1”。"); return; }
@@ -177,7 +200,7 @@ public final class TaxiWorkflow {
                 + "\n请任选一个入口继续。在滴滴内确认下单并支付后，订单才会出现在历史订单中。");
     }
 
-    private void handleOrderCommand(ILinkClient client, String userId, String text) throws Exception {
+    private void handleOrderCommand(ReplyChannel client, String userId, String text) throws Exception {
         PendingTaxi active = pendingTaxi(userId);
         if (active == null || active.stage() != Stage.ACTIVE_ORDER) {
             replySender.sendReply(client, userId, "请告诉我起点和终点，例如“从杭州西站打车到西湖”。");
@@ -211,7 +234,7 @@ public final class TaxiWorkflow {
         }
     }
 
-    private void cancelOrder(ILinkClient client, String userId, PendingTaxi pending, String text) throws Exception {
+    private void cancelOrder(ReplyChannel client, String userId, PendingTaxi pending, String text) throws Exception {
         if (!"确认取消".equals(trim(text))) { replySender.sendReply(client, userId, "请回复“确认取消”，或回复“取消”保留订单。"); return; }
         boolean success = didi.cancelOrder(pending.orderId(), "用户取消");
         clear(userId);

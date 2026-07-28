@@ -2,11 +2,13 @@ package com.example.ilink.adapter.inbound.wechat;
 
 import com.github.wechat.ilink.sdk.core.model.MessageItem;
 import com.github.wechat.ilink.sdk.core.model.WeixinMessage;
+import com.example.ilink.application.messaging.MessagePart;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 class WechatMessageAdapterTest {
 
@@ -18,7 +20,8 @@ class WechatMessageAdapterTest {
 
         var result = new WechatMessageAdapter().adapt(source);
 
-        assertEquals("user-1", result.userId());
-        assertEquals("hello", result.items().get(0).getText_item().getText());
+        assertEquals("user-1", result.principalId());
+        MessagePart.Text text = assertInstanceOf(MessagePart.Text.class, result.parts().get(0));
+        assertEquals("hello", text.text());
     }
 }

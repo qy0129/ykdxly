@@ -1,13 +1,17 @@
 package com.example.ilink.application.messaging;
 
-import com.github.wechat.ilink.sdk.core.model.MessageItem;
-
 import java.util.List;
+import java.util.Objects;
 
-/** 应用层使用的入站消息。 */
-public record IncomingMessage(String userId, List<MessageItem> items) {
+/** Channel-neutral inbound message consumed by the application layer. */
+public record IncomingMessage(AgentIdentity identity, List<MessagePart> parts) {
 
     public IncomingMessage {
-        items = items == null ? List.of() : List.copyOf(items);
+        Objects.requireNonNull(identity, "identity");
+        parts = parts == null ? List.of() : List.copyOf(parts);
+    }
+
+    public String principalId() {
+        return identity.principalId();
     }
 }

@@ -1,13 +1,14 @@
-package com.example.ilink.capabilities.food;
+package com.example.ilink.application.workflow.food;
 
-import com.example.ilink.adapter.outbound.wechat.ReplySender;
+import com.example.ilink.application.messaging.ReplyChannel;
+import com.example.ilink.application.messaging.ReplySender;
 
 import com.example.ilink.application.conversation.UserSessionStore;
+import com.example.ilink.application.messaging.AgentContext;
 import com.example.ilink.capabilities.food.FoodOrderService;
 import com.example.ilink.capabilities.travel.AmapService;
 import com.example.ilink.application.routing.IntentResult;
 import com.example.ilink.platform.persistence.MySqlStore;
-import com.github.wechat.ilink.sdk.ILinkClient;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 
@@ -55,7 +56,11 @@ public final class FoodOrderWorkflow {
         clearPendingOrder(userId);
     }
 
-    public void handle(ILinkClient client, String userId, IntentResult route) throws Exception {
+    public void handle(AgentContext context, IntentResult route) throws Exception {
+        handle(context.replyChannel(), context.principalId(), route);
+    }
+
+    public void handle(ReplyChannel client, String userId, IntentResult route) throws Exception {
         String query = firstRestaurant(route.foodOrderRestaurants());
         if (query.isBlank()) {
             replySender.sendReply(client, userId, "请告诉我你想点哪个餐厅，例如“帮我点外婆家”。");
@@ -73,7 +78,11 @@ public final class FoodOrderWorkflow {
         findLocation(client, userId, query, location);
     }
 
-    public void handlePending(ILinkClient client, String userId, String text) throws Exception {
+    public void handlePending(AgentContext context, String text) throws Exception {
+        handlePending(context.replyChannel(), context.principalId(), text);
+    }
+
+    public void handlePending(ReplyChannel client, String userId, String text) throws Exception {
         PendingOrder pending = pendingOrder(userId);
         if (pending == null) return;
         String answer = text.trim();
@@ -98,7 +107,7 @@ public final class FoodOrderWorkflow {
         }
     }
 
-    private void findLocation(ILinkClient client, String userId, String query, String location) throws Exception {
+    private void findLocation(ReplyChannel client, String userId, String query, String location) throws Exception {
         if (!amapService.isConfigured()) {
             clearPendingOrder(userId);
             replySender.sendReply(client, userId,
@@ -119,7 +128,7 @@ public final class FoodOrderWorkflow {
         findStores(client, userId, query, locations.getFirst());
     }
 
-    private void selectLocation(ILinkClient client, String userId,
+    private void selectLocation(ReplyChannel client, String userId,
                                 PendingOrder pending, String answer) throws Exception {
         int choice = choice(answer, pending.locations().size());
         if (choice < 0) {
@@ -131,7 +140,7 @@ public final class FoodOrderWorkflow {
         findStores(client, userId, pending.query(), selected);
     }
 
-    private void findStores(ILinkClient client, String userId, String query,
+    private void findStores(ReplyChannel client, String userId, String query,
                             AmapService.Place center) throws Exception {
         List<AmapService.Restaurant> stores = amapService.nearbyRestaurants(center, query);
         if (stores.isEmpty()) {
@@ -149,7 +158,7 @@ public final class FoodOrderWorkflow {
         replySender.sendReply(client, userId, storeChoices(query, stores));
     }
 
-    private void selectStore(ILinkClient client, String userId,
+    private void selectStore(ReplyChannel client, String userId,
                              PendingOrder pending, String answer) throws Exception {
         int choice = choice(answer, pending.stores().size());
         if (choice < 0) {
@@ -159,7 +168,7 @@ public final class FoodOrderWorkflow {
         sendStoreLinks(client, userId, pending.stores().get(choice));
     }
 
-    private void sendStoreLinks(ILinkClient client, String userId,
+    private void sendStoreLinks(ReplyChannel client, String userId,
                                 AmapService.Restaurant store) throws Exception {
         clearPendingOrder(userId);
         FoodOrderService.ResolvedStoreLinks links = foodOrderService.resolveStore(store);
