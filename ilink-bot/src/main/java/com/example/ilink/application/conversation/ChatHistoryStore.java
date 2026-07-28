@@ -20,6 +20,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 对话历史和摘要存储。
@@ -27,7 +31,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>保存用户与机器人的最近消息，并在历史过长时调用模型压缩成摘要，
  * 以控制后续请求的上下文长度。</p>
  */
-public final class ChatHistoryStore {
+public final class ChatHistoryStore implements AutoCloseable {
 
     /** 60 轮对话，每轮包含一条用户消息和一条助手回复。 */
     private static final int MAX_HISTORY = 120;
@@ -37,9 +41,12 @@ public final class ChatHistoryStore {
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
     private final MySqlStore database;
+    private final ChatHistoryAsyncWriter asyncWriter;
+    private final ExecutorService compressionExecutor;
     private final Map<String, List<JsonObject>> chatHistory = new ConcurrentHashMap<>();
     private final Map<String, String> conversationSummary = new ConcurrentHashMap<>();
     private final Set<String> loadedUsers = ConcurrentHashMap.newKeySet();
+    private final Set<String> compressingUsers = ConcurrentHashMap.newKeySet();
 
     /** 创建历史存储器，并注入用于摘要压缩的 HTTP 客户端。 */
     public ChatHistoryStore(HttpClient httpClient) {
@@ -49,6 +56,12 @@ public final class ChatHistoryStore {
     ChatHistoryStore(HttpClient httpClient, MySqlStore database) {
         this.httpClient = httpClient;
         this.database = database;
+        this.asyncWriter = database == null ? null : new ChatHistoryAsyncWriter();
+        this.compressionExecutor = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "chat-history-compressor");
+            thread.setDaemon(true);
+            return thread;
+        });
     }
     /** 把图片、音频或文档等媒体事件加入对话历史。 */
     public void addMedia(String userId, String type, String path, String summary) {
@@ -74,6 +87,7 @@ public final class ChatHistoryStore {
         ensureLoaded(userId);
         List<JsonObject> history = chatHistory.computeIfAbsent(
                 userId, ignored -> Collections.synchronizedList(new LinkedList<>()));
+        boolean shouldCompress;
         synchronized (history) {
             if (!history.isEmpty()) {
                 JsonObject last = history.getLast();
@@ -85,9 +99,10 @@ public final class ChatHistoryStore {
             message.addProperty("content", content);
             message.addProperty("created_at", LocalDateTime.now().format(TIMESTAMP_FORMAT));
             history.add(message);
+            shouldCompress = history.size() >= MAX_HISTORY;
         }
-        if (database != null) database.saveMessage(userId, role, content);
-        if (history.size() >= MAX_HISTORY) compress(userId);
+        if (asyncWriter != null) asyncWriter.submit(() -> database.saveMessage(userId, role, content));
+        if (shouldCompress) scheduleCompression(userId);
     }
 
     /** 将当前用户的摘要和最近消息复制到模型请求数组。 */
@@ -172,14 +187,29 @@ public final class ChatHistoryStore {
     }
 
     /** 压缩过长的历史，保留最近消息并更新摘要。 */
+    private void scheduleCompression(String userId) {
+        if (!compressingUsers.add(userId)) return;
+        try {
+            compressionExecutor.execute(() -> {
+                try {
+                    compress(userId);
+                } finally {
+                    compressingUsers.remove(userId);
+                }
+            });
+        } catch (RejectedExecutionException ignored) {
+            compressingUsers.remove(userId);
+        }
+    }
+
     private void compress(String userId) {
         List<JsonObject> history = chatHistory.get(userId);
         if (history == null || history.size() < COMPRESS_BATCH) return;
 
         StringBuilder toSummarize = new StringBuilder();
         synchronized (history) {
-            for (int i = 0; i < COMPRESS_BATCH && !history.isEmpty(); i++) {
-                JsonObject msg = history.removeFirst();
+            for (int i = 0; i < COMPRESS_BATCH; i++) {
+                JsonObject msg = history.get(i);
                 String role = msg.get("role").getAsString();
                 String content = msg.get("content").getAsString();
                 toSummarize.append("user".equals(role) ? "用户: " : "助手: ").append(content).append("\n");
@@ -189,10 +219,30 @@ public final class ChatHistoryStore {
         try {
             String summary = callSummary(toSummarize.toString());
             if (summary == null || summary.isBlank()) return;
+            synchronized (history) {
+                for (int i = 0; i < COMPRESS_BATCH; i++) history.removeFirst();
+            }
             String mergedSummary = conversationSummary.merge(
                     userId, summary, (old, val) -> old + "\n" + val);
-            if (database != null) database.saveSummaryAndDeleteOldest(userId, mergedSummary, COMPRESS_BATCH);
+            if (asyncWriter != null) {
+                asyncWriter.submit(() -> database.saveSummaryAndDeleteOldest(
+                        userId, mergedSummary, COMPRESS_BATCH));
+            }
         } catch (Exception ignored) {}
+    }
+
+    @Override
+    public void close() {
+        compressionExecutor.shutdown();
+        try {
+            if (!compressionExecutor.awaitTermination(30, TimeUnit.SECONDS)) {
+                compressionExecutor.shutdownNow();
+            }
+        } catch (InterruptedException error) {
+            compressionExecutor.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+        if (asyncWriter != null) asyncWriter.close();
     }
 
     /** 用户首次访问时从 MySQL 恢复摘要和最近消息。 */

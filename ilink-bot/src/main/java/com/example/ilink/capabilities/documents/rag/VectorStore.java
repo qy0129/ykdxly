@@ -3,6 +3,7 @@ package com.example.ilink.capabilities.documents.rag;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class VectorStore {
@@ -20,16 +21,24 @@ public final class VectorStore {
 
     public List<ScoredChunk> search(String userId, List<Float> queryVector, int topK) {
         List<ChunkWithVector> chunks = userVectors.get(userId);
-        if (chunks == null || chunks.isEmpty()) return List.of();
+        if (chunks == null || chunks.isEmpty() || topK <= 0) return List.of();
 
-        List<ScoredChunk> scored = new ArrayList<>();
+        PriorityQueue<ScoredChunk> topResults = new PriorityQueue<>(
+                topK, (a, b) -> Double.compare(a.score, b.score));
         for (ChunkWithVector cwv : chunks) {
             double score = cosineSimilarity(queryVector, cwv.vector);
-            scored.add(new ScoredChunk(cwv.chunk, score));
+            ScoredChunk candidate = new ScoredChunk(cwv.chunk, score);
+            if (topResults.size() < topK) {
+                topResults.offer(candidate);
+            } else if (score > topResults.peek().score) {
+                topResults.poll();
+                topResults.offer(candidate);
+            }
         }
 
+        List<ScoredChunk> scored = new ArrayList<>(topResults);
         scored.sort((a, b) -> Double.compare(b.score, a.score));
-        return scored.subList(0, Math.min(topK, scored.size()));
+        return scored;
     }
 
     private double cosineSimilarity(List<Float> a, List<Float> b) {
