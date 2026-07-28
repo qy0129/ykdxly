@@ -1,5 +1,7 @@
 package com.example.ilink.capabilities.memory;
 
+import com.example.ilink.application.extractor.MemoryExtractor;
+
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -26,10 +28,11 @@ class MemoryServiceTest {
     @Test
     void automaticallyKeepsStableFactsButNotTemporaryLocation() {
         MemoryService service = new MemoryService();
+        MemoryExtractor extractor = new MemoryExtractor(service);
 
-        service.observe("automatic-memory-user", "我叫李雷");
-        service.observe("automatic-memory-user", "我住在杭州市西湖区");
-        service.observe("automatic-memory-user", "我现在在西湖边");
+        extractor.extract("automatic-memory-user", "我叫李雷");
+        extractor.extract("automatic-memory-user", "我住在杭州市西湖区");
+        extractor.extract("automatic-memory-user", "我现在在西湖边");
 
         assertEquals("李雷", service.value("automatic-memory-user", "user_name"));
         assertEquals("杭州市西湖区", service.value("automatic-memory-user", "home_location"));

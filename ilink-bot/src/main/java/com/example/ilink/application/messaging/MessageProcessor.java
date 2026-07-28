@@ -1,9 +1,13 @@
 package com.example.ilink.application.messaging;
 
+import com.example.ilink.application.command.CommandHandler;
+import com.example.ilink.application.command.CommandRouter;
+import com.example.ilink.application.command.CommandType;
 import com.example.ilink.application.conversation.AudioHistoryStore;
 import com.example.ilink.application.conversation.ChatHistoryStore;
 import com.example.ilink.application.conversation.DocumentSessionStore;
 import com.example.ilink.application.conversation.UserSessionStore;
+import com.example.ilink.application.extractor.MemoryExtractor;
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.capabilities.audio.AudioService;
 import com.example.ilink.capabilities.audio.AudioSource;
@@ -33,13 +37,18 @@ public final class MessageProcessor {
     private final MediaStore mediaStore;
     private final ReplySender replySender;
     private final CapabilityDispatcher capabilityDispatcher;
+    private final CommandRouter commandRouter;
+    private final CommandHandler commandHandler;
+    private final MemoryExtractor memoryExtractor;
 
     public MessageProcessor(ChatHistoryStore chatHistory, UserSessionStore sessions,
                             AudioHistoryStore audioHistory, DocumentSessionStore documentSessions,
                             AudioService audioService, ImageService imageService,
                             DocumentService documentService, MemoryService memoryService,
-                            MediaStore mediaStore, ReplySender replySender,
-                            CapabilityDispatcher capabilityDispatcher) {
+                             MediaStore mediaStore, ReplySender replySender,
+                             CapabilityDispatcher capabilityDispatcher,
+                             CommandRouter commandRouter, CommandHandler commandHandler,
+                             MemoryExtractor memoryExtractor) {
         this.chatHistory = chatHistory;
         this.sessions = sessions;
         this.audioHistory = audioHistory;
@@ -51,6 +60,9 @@ public final class MessageProcessor {
         this.mediaStore = mediaStore;
         this.replySender = replySender;
         this.capabilityDispatcher = capabilityDispatcher;
+        this.commandRouter = commandRouter;
+        this.commandHandler = commandHandler;
+        this.memoryExtractor = memoryExtractor;
     }
 
     public void process(AgentContext context, IncomingMessage message) {
@@ -223,8 +235,13 @@ public final class MessageProcessor {
         if (text == null || text.isBlank()) return;
         String userId = context.principalId();
         System.out.println("[" + userId + "] " + text);
+        CommandType commandType = commandRouter.route(text);
+        if (commandType != CommandType.NONE) {
+            commandHandler.handle(context.replyChannel(), userId, commandType);
+            return;
+        }
         chatHistory.addUserMessage(userId, text);
-        memoryService.observe(userId, text);
+        memoryExtractor.extract(userId, text);
         capabilityDispatcher.dispatch(context, text);
     }
 
