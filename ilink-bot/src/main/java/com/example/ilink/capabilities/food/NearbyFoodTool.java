@@ -103,11 +103,8 @@ public final class NearbyFoodTool implements Tool {
     }
 
     private List<byte[]> candidateMapImages(List<AmapService.Place> candidates) throws Exception {
-        List<byte[]> images = new java.util.ArrayList<>();
-        for (int index = 0; index < Math.min(5, candidates.size()); index++) {
-            images.add(amapService.candidateStaticMap(candidates.get(index), index + 1));
-        }
-        return List.copyOf(images);
+        byte[] image = amapService.candidateStaticMap(candidates);
+        return image == null ? List.of() : List.of(image);
     }
 
     static String formatRestaurantTable(String location, String keyword,

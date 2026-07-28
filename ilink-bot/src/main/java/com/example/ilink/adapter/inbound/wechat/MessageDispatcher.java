@@ -120,9 +120,6 @@ public final class MessageDispatcher implements AutoCloseable {
         AgentContext context = AgentContext.wechat(userId, new WechatReplyChannel(client));
         activeUserId = userId;
         dailyDashboardServer.useUser(userId);
-        if (Config.LOGIN_BRIEFING_ENABLED) {
-            briefingScheduler.execute(() -> sendLoginBriefing(client));
-        }
         long startedAtMillis = System.currentTimeMillis();
         boolean voiceOnly = replySender.isVoiceOnly();
         ScheduledFuture<?> progressTask = progressScheduler.schedule(() -> {
@@ -139,6 +136,9 @@ public final class MessageDispatcher implements AutoCloseable {
             messageProcessor.process(context, message);
         } finally {
             progressTask.cancel(false);
+            if (Config.LOGIN_BRIEFING_ENABLED) {
+                briefingScheduler.execute(() -> sendLoginBriefing(client));
+            }
         }
     }
 

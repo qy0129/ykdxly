@@ -1,0 +1,12 @@
+# Local configuration and secrets
+/config.properties
+/**/config.properties
+*.env
+*.secret
+*.key
+
+# Runtime data, login sessions, media and generated files
+/data/
+/**/data/
+**/target/
+*.log

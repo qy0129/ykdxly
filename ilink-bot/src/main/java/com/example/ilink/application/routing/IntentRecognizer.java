@@ -345,6 +345,15 @@ public final class IntentRecognizer {
         }
 
         String resolvedIntent = string(action, "intent");
+        if ("nearby_food".equals(resolvedIntent)
+                && !isNearbyDiningRequest(requestText)
+                && !isExplicitLocationRememberRequest(requestText)) {
+            action.addProperty("intent", "chat");
+            action.addProperty("nearby_location", "");
+            action.addProperty("nearby_action", "search");
+            action.addProperty("meal_keyword", "");
+            return;
+        }
         if ("food_order".equals(resolvedIntent) && isNearbyDiningRequest(requestText)) {
             action.addProperty("intent", "nearby_food");
             action.addProperty("nearby_action", "search");
@@ -580,6 +589,12 @@ public final class IntentRecognizer {
     /** 从模型文本中提取 JSON 对象，处理代码块和多余说明文字。 */
     private JsonObject parseJsonObject(String content) {
         return responseParser.parseObject(content);
+    }
+
+    private static boolean isExplicitLocationRememberRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        return text.matches(".*(我现在在|我在|当前位置|我的位置|记住.*位置).*" )
+                && !text.matches(".*(想吃|想喝|找|有没有|哪里有|附近有|有什么好吃|有啥好吃|吃什么|餐厅|美食).*" );
     }
 
     /** 读取可选字符串字段，模型省略时返回空字符串。 */
