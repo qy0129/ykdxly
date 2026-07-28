@@ -1,8 +1,10 @@
-package com.example.ilink.capabilities.calendar;
+package com.example.ilink.application.workflow.calendar;
 
-import com.example.ilink.adapter.outbound.wechat.ReplySender;
+import com.example.ilink.application.messaging.ReplyChannel;
+import com.example.ilink.application.messaging.ReplySender;
 
 import com.example.ilink.application.conversation.CalendarSessionStore;
+import com.example.ilink.application.messaging.AgentContext;
 import com.example.ilink.capabilities.calendar.CalendarDraft;
 import com.example.ilink.capabilities.calendar.CalendarService;
 import com.example.ilink.capabilities.calendar.CalendarTimeResolver;
@@ -10,7 +12,6 @@ import com.example.ilink.capabilities.calendar.CalendarTimeResolver.ResolvedCale
 import com.example.ilink.capabilities.calendar.CalendarEvent;
 import com.example.ilink.application.routing.IntentResult;
 import com.example.ilink.capabilities.planning.DateTimeParser;
-import com.github.wechat.ilink.sdk.ILinkClient;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -44,7 +45,11 @@ public final class CalendarWorkflow {
     }
 
     /** 执行模型已经识别出的日历动作。 */
-    public void handle(ILinkClient client, String userId, String text, IntentResult route) throws Exception {
+    public void handle(AgentContext context, String text, IntentResult route) throws Exception {
+        handle(context.replyChannel(), context.principalId(), text, route);
+    }
+
+    public void handle(ReplyChannel client, String userId, String text, IntentResult route) throws Exception {
         switch (route.calendarAction()) {
             case "list" -> {
                 LocalDateTime time = DateTimeParser.parse(route.calendarTime());
@@ -57,7 +62,11 @@ public final class CalendarWorkflow {
     }
 
     /** 合并模型补充字段与用户原话；模型不可用时仍由本地统一解析器兜底。 */
-    public void completePending(ILinkClient client, String userId, String text, IntentResult route) throws Exception {
+    public void completePending(AgentContext context, String text, IntentResult route) throws Exception {
+        completePending(context.replyChannel(), context.principalId(), text, route);
+    }
+
+    public void completePending(ReplyChannel client, String userId, String text, IntentResult route) throws Exception {
         CalendarSessionStore.PendingOperation operation = sessions.getPendingOperation(userId);
         if (operation != null) {
             completePendingOperation(client, userId, text, operation, route);
@@ -83,7 +92,7 @@ public final class CalendarWorkflow {
         saveAndReply(client, userId, merged, resolved, route);
     }
 
-    private void handleOperation(ILinkClient client, String userId, String requestText,
+    private void handleOperation(ReplyChannel client, String userId, String requestText,
                                  IntentResult route) throws Exception {
         String action = route.calendarAction();
         int minutes = snoozeMinutes(route);
@@ -130,7 +139,7 @@ public final class CalendarWorkflow {
         replySender.sendReply(client, userId, prompt.toString(), route.replyMode(), route.voiceStyle());
     }
 
-    private void completePendingOperation(ILinkClient client, String userId, String text,
+    private void completePendingOperation(ReplyChannel client, String userId, String text,
                                           CalendarSessionStore.PendingOperation operation,
                                           IntentResult route) throws Exception {
         if ("取消".equals(text.trim())) {
@@ -177,7 +186,7 @@ public final class CalendarWorkflow {
         return (int) Math.min(Integer.MAX_VALUE, minutes);
     }
 
-    private void createEvent(ILinkClient client, String userId, String text, IntentResult route) throws Exception {
+    private void createEvent(ReplyChannel client, String userId, String text, IntentResult route) throws Exception {
         String title = route.calendarTitle() == null ? "" : route.calendarTitle().trim();
         if (title.isBlank()) title = "日历提醒";
         String recurrence = normalizeRecurrence(route.calendarRecurrence());
@@ -232,7 +241,7 @@ public final class CalendarWorkflow {
                 timeType, amount, unit, leadSeconds);
     }
 
-    private void saveAndReply(ILinkClient client, String userId, CalendarDraft draft,
+    private void saveAndReply(ReplyChannel client, String userId, CalendarDraft draft,
                               ResolvedCalendarTime resolved, IntentResult route) throws Exception {
         CalendarEvent event = calendarService.create(userId, draft.title(), draft.type(),
                 resolved.eventAt(), resolved.remindAt(), draft.recurrence());
@@ -254,7 +263,7 @@ public final class CalendarWorkflow {
         }
     }
 
-    private void sendMissingTimeReply(ILinkClient client, String userId, IntentResult route) throws Exception {
+    private void sendMissingTimeReply(ReplyChannel client, String userId, IntentResult route) throws Exception {
         String message = "这个时间我还没完全确定。你可以直接说“30秒后”“四点三十三分”或“明天早上八点”；回复“取消”也可以。";
         if (route == null) replySender.sendReply(client, userId, message);
         else replySender.sendReply(client, userId, message, route.replyMode(), route.voiceStyle());

@@ -1,8 +1,10 @@
-package com.example.ilink.capabilities.visual;
+package com.example.ilink.application.workflow.visual;
 
+import com.example.ilink.application.messaging.ReplyChannel;
 import com.example.ilink.bootstrap.Config;
+import com.example.ilink.capabilities.visual.VisualCard;
+import com.example.ilink.capabilities.visual.VisualCardRenderer;
 import com.example.ilink.capabilities.web.TextLinkFormatter;
-import com.github.wechat.ilink.sdk.ILinkClient;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -31,14 +33,14 @@ public final class VisualDeckSender {
     }
 
     /** 发送不需要用户选择的普通文字，并同步更新回复状态。 */
-    public void sendText(ILinkClient client, String userId, String text) throws Exception {
+    public void sendText(ReplyChannel client, String userId, String text) throws Exception {
         String displayText = TextLinkFormatter.format(text);
         client.sendText(userId, displayText);
         sentMarker.run();
         textRecorder.accept(userId, displayText);
     }
 
-    public void send(ILinkClient client, String userId, List<VisualCard> cards,
+    public void send(ReplyChannel client, String userId, List<VisualCard> cards,
                      String textFallback) throws Exception {
         if (!Config.VISUAL_CARDS_ENABLED || "text".equalsIgnoreCase(Config.VISUAL_CARDS_MODE)) {
             sendText(client, userId, textFallback);

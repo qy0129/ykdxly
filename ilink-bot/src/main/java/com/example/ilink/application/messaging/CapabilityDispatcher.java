@@ -1,7 +1,5 @@
 package com.example.ilink.application.messaging;
 
-import com.github.wechat.ilink.sdk.ILinkClient;
-
 /** 将文本请求交给业务能力处理器。 */
 public final class CapabilityDispatcher {
 
@@ -11,7 +9,7 @@ public final class CapabilityDispatcher {
         this.requestHandler = requestHandler;
     }
 
-    public void dispatch(ILinkClient client, String userId, String text) throws Exception {
-        requestHandler.handle(client, userId, text);
+    public void dispatch(AgentContext context, String text) throws Exception {
+        requestHandler.handle(context, text);
     }
 }

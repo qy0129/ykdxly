@@ -1,4 +1,7 @@
-package com.example.ilink.capabilities.visual;
+package com.example.ilink.application.workflow.visual;
+
+import com.example.ilink.application.messaging.ReplyChannel;
+import com.example.ilink.application.messaging.AgentContext;
 
 import com.example.ilink.application.conversation.PlanSessionStore;
 import com.example.ilink.capabilities.calendar.CalendarService;
@@ -14,7 +17,6 @@ import com.example.ilink.capabilities.visual.FunInteractionService;
 import com.example.ilink.capabilities.visual.PlanSpreadsheetService;
 import com.example.ilink.capabilities.visual.VisualCard;
 import com.example.ilink.capabilities.visual.VisualCardFactory;
-import com.example.ilink.capabilities.visual.VisualDeckSender;
 import com.example.ilink.capabilities.web.BilibiliSearchService;
 import com.example.ilink.capabilities.web.NewsSearchService;
 import com.example.ilink.capabilities.calendar.CalendarEvent;
@@ -26,7 +28,6 @@ import com.example.ilink.application.tooling.ToolContext;
 import com.example.ilink.application.tooling.ToolManager;
 import com.example.ilink.application.tooling.ToolResult;
 import com.example.ilink.capabilities.express.ExpressTool;
-import com.github.wechat.ilink.sdk.ILinkClient;
 import com.google.gson.JsonObject;
 
 import java.awt.Color;
@@ -79,7 +80,11 @@ public final class VisualCardWorkflow {
         return fun.hasPending(userId);
     }
 
-    public boolean handle(ILinkClient client, String userId, String rawText) throws Exception {
+    public boolean handle(AgentContext context, String rawText) throws Exception {
+        return handle(context.replyChannel(), context.principalId(), rawText);
+    }
+
+    public boolean handle(ReplyChannel client, String userId, String rawText) throws Exception {
         String text = rawText == null ? "" : rawText.trim();
         FunInteractionService.Response interaction = fun.handle(userId, text);
         if (interaction != null) {
@@ -142,12 +147,22 @@ public final class VisualCardWorkflow {
         return false;
     }
 
-    public void sendTextResult(ILinkClient client, String userId, String title,
+    public void sendTextResult(AgentContext context, String title,
+                               String subtitle, String text) throws Exception {
+        sendTextResult(context.replyChannel(), context.principalId(), title, subtitle, text);
+    }
+
+    public void sendTextResult(ReplyChannel client, String userId, String title,
                                String subtitle, String body) throws Exception {
         sender.sendText(client, userId, body);
     }
 
-    public void sendSearchResults(ILinkClient client, String userId, String title,
+    public void sendSearchResults(AgentContext context, String title,
+                                  List<SearchResult> results, String textFallback) throws Exception {
+        sendSearchResults(context.replyChannel(), context.principalId(), title, results, textFallback);
+    }
+
+    public void sendSearchResults(ReplyChannel client, String userId, String title,
                                   List<SearchResult> results, String textFallback) throws Exception {
         if (results == null || results.isEmpty()) {
             sender.sendText(client, userId, textFallback);
@@ -166,7 +181,13 @@ public final class VisualCardWorkflow {
         sender.send(client, userId, deck, textFallback);
     }
 
-    public void sendBilibiliResults(ILinkClient client, String userId,
+    public void sendBilibiliResults(AgentContext context,
+                                    List<SearchResult> results,
+                                    String textFallback) throws Exception {
+        sendBilibiliResults(context.replyChannel(), context.principalId(), results, textFallback);
+    }
+
+    public void sendBilibiliResults(ReplyChannel client, String userId,
                                      List<SearchResult> results, String textFallback) throws Exception {
         if (results == null || results.size() <= 1) {
             sender.sendText(client, userId, textFallback);
@@ -180,7 +201,15 @@ public final class VisualCardWorkflow {
         sender.send(client, userId, deck, textFallback);
     }
 
-    public void sendMediaResults(ILinkClient client, String userId, String title,
+    public void sendMediaResults(AgentContext context, String title,
+                                 String description,
+                                 List<SearchResult> videos,
+                                 String textFallback) throws Exception {
+        sendMediaResults(context.replyChannel(), context.principalId(), title,
+                description, videos, textFallback);
+    }
+
+    public void sendMediaResults(ReplyChannel client, String userId, String title,
                                  String knowledgeText, List<SearchResult> videos,
                                  String textFallback) throws Exception {
         if (videos == null || videos.size() <= 1) {
@@ -197,7 +226,12 @@ public final class VisualCardWorkflow {
         sender.send(client, userId, deck, textFallback);
     }
 
-    public void sendFoodOrder(ILinkClient client, String userId, String restaurants,
+    public void sendFoodOrder(AgentContext context, String restaurants,
+                              String textFallback) throws Exception {
+        sendFoodOrder(context.replyChannel(), context.principalId(), restaurants, textFallback);
+    }
+
+    public void sendFoodOrder(ReplyChannel client, String userId, String restaurants,
                               String textFallback) throws Exception {
         List<String> names = List.of(restaurants.split("[,，、]")).stream().map(String::trim)
                 .filter(value -> !value.isBlank()).limit(2).toList();
@@ -211,7 +245,7 @@ public final class VisualCardWorkflow {
         sender.send(client, userId, deck, textFallback);
     }
 
-    private void sendMenu(ILinkClient client, String userId) throws Exception {
+    private void sendMenu(ReplyChannel client, String userId) throws Exception {
         List<VisualCard> deck = List.of(
                 VisualCard.of("生活卡片", "日常信息一眼看清",
                         "今日安排卡片\n生成本月月历\n快递卡片 + 单号\n邮箱卡片\n新闻卡片 + 主题"),
@@ -222,7 +256,7 @@ public final class VisualCardWorkflow {
         sender.send(client, userId, deck, "卡片菜单：\n今日安排、月历、计划、快递、邮箱、新闻、媒体、导航、外卖、计划导出和互动游戏。");
     }
 
-    private void sendToday(ILinkClient client, String userId) throws Exception {
+    private void sendToday(ReplyChannel client, String userId) throws Exception {
         LocalDate today = LocalDate.now();
         StringBuilder body = new StringBuilder();
         List<CalendarEvent> events = calendarService.eventsForDay(userId, today);
@@ -250,7 +284,7 @@ public final class VisualCardWorkflow {
         sendTextDeck(client, userId, "今日安排", today.toString(), body.toString());
     }
 
-    private void sendMonth(ILinkClient client, String userId) throws Exception {
+    private void sendMonth(ReplyChannel client, String userId) throws Exception {
         YearMonth month = YearMonth.now();
         List<CalendarEvent> events = calendarService.eventsBetween(userId, month.atDay(1), month.atEndOfMonth());
         StringBuilder body = new StringBuilder("本月共有 ").append(events.size()).append(" 项日历安排。\n\n");
@@ -267,7 +301,7 @@ public final class VisualCardWorkflow {
         sendTextDeck(client, userId, "本月月历", month.toString(), body.toString());
     }
 
-    private void sendPlan(ILinkClient client, String userId) throws Exception {
+    private void sendPlan(ReplyChannel client, String userId) throws Exception {
         TaskPlan plan = plans.get(userId);
         if (plan == null) {
             sendTextDeck(client, userId, "计划进度", "尚未创建计划", "先告诉我一个想完成的目标和预计时间，我会帮你拆成计划。 ");
@@ -277,7 +311,7 @@ public final class VisualCardWorkflow {
         sendTextDeck(client, userId, "计划进度", progress(plan), body);
     }
 
-    private void exportPlan(ILinkClient client, String userId) throws Exception {
+    private void exportPlan(ReplyChannel client, String userId) throws Exception {
         TaskPlan plan = plans.get(userId);
         if (plan == null) {
             client.sendText(userId, "你还没有可以导出的计划。 ");
@@ -287,7 +321,7 @@ public final class VisualCardWorkflow {
         client.sendFile(userId, bytes, "我的计划.xlsx", "计划 Excel 表格");
     }
 
-    private void sendCertificate(ILinkClient client, String userId) throws Exception {
+    private void sendCertificate(ReplyChannel client, String userId) throws Exception {
         TaskPlan plan = plans.get(userId);
         if (plan == null) {
             sendTextDeck(client, userId, "完成证书", "还没有计划", "完成一份计划后，我会为你生成专属图片证书。 ");
@@ -301,7 +335,7 @@ public final class VisualCardWorkflow {
         sendTextDeck(client, userId, done ? "计划完成证书" : "计划进度证明", progress(plan), body);
     }
 
-    private void sendExpress(ILinkClient client, String userId, String text) throws Exception {
+    private void sendExpress(ReplyChannel client, String userId, String text) throws Exception {
         String trackingNo = ExpressService.extractTrackingNo(text);
         if (trackingNo.isBlank()) {
             sendTextDeck(client, userId, "快递卡片", "缺少单号", "请在“快递卡片”后面加上快递单号。 ");
@@ -313,13 +347,13 @@ public final class VisualCardWorkflow {
         sendTextDeck(client, userId, "物流进度", trackingNo, result.output());
     }
 
-    private void sendMail(ILinkClient client, String userId, String text) throws Exception {
+    private void sendMail(ReplyChannel client, String userId, String text) throws Exception {
         String action = text.contains("重要") ? "important" : "unread";
         String result = mailService.query(userId, action, "");
         sendTextDeck(client, userId, "QQ 邮箱", "近期邮件摘要", result);
     }
 
-    private void sendNews(ILinkClient client, String userId, String text) throws Exception {
+    private void sendNews(ReplyChannel client, String userId, String text) throws Exception {
         String query = text.replaceAll("(新闻|资讯)卡片", "").replaceAll("^[：:，, ]+", "").trim();
         if (query.isBlank()) query = "今日最新新闻";
         List<SearchResult> results = newsService.search(query + " when:1d", 3);
@@ -339,7 +373,7 @@ public final class VisualCardWorkflow {
         sender.send(client, userId, deck, newsText(results));
     }
 
-    private void sendMedia(ILinkClient client, String userId, String text) throws Exception {
+    private void sendMedia(ReplyChannel client, String userId, String text) throws Exception {
         String category = text.matches(".*(动漫|动画|番剧).*" ) ? "anime"
                 : text.contains("歌词") ? "lyrics" : "music";
         String query = text.replaceAll("(影视|动漫|音乐|歌曲|歌词|哔哩哔哩|B站)卡片", "")
@@ -361,7 +395,7 @@ public final class VisualCardWorkflow {
         sender.send(client, userId, deck, fallback);
     }
 
-    private void sendFood(ILinkClient client, String userId, String text) throws Exception {
+    private void sendFood(ReplyChannel client, String userId, String text) throws Exception {
         String query = text.replaceAll("(外卖|点餐)卡片", "").replaceAll("^[：:，, ]+", "").trim();
         if (query.isBlank()) {
             sendTextDeck(client, userId, "外卖卡片", "缺少餐厅", "请告诉我餐厅或菜品名称，例如：外卖卡片 外婆家。 ");
@@ -370,7 +404,7 @@ public final class VisualCardWorkflow {
         sendFoodOrder(client, userId, query, foodOrderService.generateLinks(query));
     }
 
-    private void sendNavigation(ILinkClient client, String userId, String text) throws Exception {
+    private void sendNavigation(ReplyChannel client, String userId, String text) throws Exception {
         String route = text.replace("导航卡片", "").replaceAll("^[：:，, ]+", "").trim();
         int fromIndex = route.indexOf('从');
         int toIndex = route.lastIndexOf('到');
@@ -403,7 +437,7 @@ public final class VisualCardWorkflow {
         sender.sendText(client, userId, body + "\n" + url);
     }
 
-    private void sendTextDeck(ILinkClient client, String userId, String title,
+    private void sendTextDeck(ReplyChannel client, String userId, String title,
                               String subtitle, String body) throws Exception {
         sender.sendText(client, userId, body);
     }

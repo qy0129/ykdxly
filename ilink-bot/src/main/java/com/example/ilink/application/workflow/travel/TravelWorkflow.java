@@ -1,6 +1,8 @@
-package com.example.ilink.capabilities.travel;
+package com.example.ilink.application.workflow.travel;
 
-import com.example.ilink.adapter.outbound.wechat.ReplySender;
+import com.example.ilink.application.messaging.ReplyChannel;
+import com.example.ilink.application.messaging.ReplySender;
+import com.example.ilink.application.messaging.AgentContext;
 
 import com.example.ilink.capabilities.calendar.CalendarService;
 import com.example.ilink.capabilities.travel.AmapService;
@@ -8,7 +10,6 @@ import com.example.ilink.capabilities.travel.RouteMealPlanner;
 import com.example.ilink.application.routing.IntentResult;
 import com.example.ilink.platform.persistence.MySqlStore;
 import com.example.ilink.capabilities.planning.DateTimeParser;
-import com.github.wechat.ilink.sdk.ILinkClient;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 
@@ -47,7 +48,11 @@ public final class TravelWorkflow {
     }
 
     /** 把模型提取的起点、途经点和终点组成有序地点链并开始逐个确认。 */
-    public void handle(ILinkClient client, String userId, IntentResult route) throws Exception {
+    public void handle(AgentContext context, IntentResult route) throws Exception {
+        handle(context.replyChannel(), context.principalId(), route);
+    }
+
+    public void handle(ReplyChannel client, String userId, IntentResult route) throws Exception {
         String origin = route.travelOrigin().trim();
         String destination = route.travelDestination().trim();
         if (origin.isBlank() || destination.isBlank()) {
@@ -84,7 +89,11 @@ public final class TravelWorkflow {
     }
 
     /** 处理用户对当前地点候选项的序号选择。 */
-    public void handleLocationSelection(ILinkClient client, String userId, String text) throws Exception {
+    public void handleLocationSelection(AgentContext context, String text) throws Exception {
+        handleLocationSelection(context.replyChannel(), context.principalId(), text);
+    }
+
+    public void handleLocationSelection(ReplyChannel client, String userId, String text) throws Exception {
         PendingTravel pending = pendingTravel(userId);
         if (pending == null) return;
         if ("取消".equals(text.trim())) {
@@ -115,7 +124,7 @@ public final class TravelWorkflow {
     }
 
     /** 搜索当前待确认地点；唯一结果自动确认，多条结果必须让用户选择。 */
-    private void askForCurrentLocation(ILinkClient client, String userId, PendingTravel travel) throws Exception {
+    private void askForCurrentLocation(ReplyChannel client, String userId, PendingTravel travel) throws Exception {
         String locationName = travel.currentLocationName();
         List<AmapService.Place> candidates = locationCandidates(locationName, travel.cityForCurrentLocation());
         if (candidates.isEmpty()) {
@@ -147,7 +156,7 @@ public final class TravelWorkflow {
     }
 
     /** 保存一个已确认地点；全部地点确认后开始生成多段路线。 */
-    private void continueWithLocation(ILinkClient client, String userId, PendingTravel travel,
+    private void continueWithLocation(ReplyChannel client, String userId, PendingTravel travel,
                                       AmapService.Place selected) throws Exception {
         PendingTravel next = travel.withConfirmedLocation(selected);
         if (!next.isComplete()) {
@@ -173,7 +182,7 @@ public final class TravelWorkflow {
     }
 
     /** 为地点链的每两个相邻地点生成一段路线，并汇总全程结果。 */
-    private void createTravelReply(ILinkClient client, String userId,
+    private void createTravelReply(ReplyChannel client, String userId,
                                    List<AmapService.Place> itinerary, PendingTravel pending) throws Exception {
         try {
             List<AmapService.Route> legRoutes = new ArrayList<>();
@@ -271,7 +280,7 @@ public final class TravelWorkflow {
     }
 
     /** 用户提供出发时间时，把完整地点链写入日历并设置提前提醒。 */
-    private void appendCalendar(ILinkClient client, String userId, StringBuilder reply,
+    private void appendCalendar(ReplyChannel client, String userId, StringBuilder reply,
                                 List<AmapService.Place> itinerary, String departureText,
                                 String navigationUrl) throws Exception {
         if (departureText.isBlank()) {
@@ -291,7 +300,7 @@ public final class TravelWorkflow {
     }
 
     /** 发送标记全部行程地点的静态地图；图片失败不影响文字导航。 */
-    private void sendRouteMap(ILinkClient client, String userId,
+    private void sendRouteMap(ReplyChannel client, String userId,
                               List<AmapService.Place> itinerary) {
         try {
             byte[] image = amapService.staticMap(itinerary);
