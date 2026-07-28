@@ -98,7 +98,7 @@
                 <configuration>
                     <archive>
                         <manifest>
-                            <mainClass>com.example.ilink.app.ILinkBot</mainClass>
+                            <mainClass>com.example.ilink.bootstrap.ILinkBot</mainClass>
                         </manifest>
                     </archive>
                 </configuration>
