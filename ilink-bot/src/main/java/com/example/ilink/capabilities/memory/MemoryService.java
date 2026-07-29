@@ -112,6 +112,10 @@ public final class MemoryService {
         return cache.computeIfAbsent(userId, database::loadMemories);
     }
 
+    private void save(String userId, MemoryValue memoryValue, String source, double confidence) {
+        save(userId, memoryValue, source, confidence, 5);
+    }
+
     private void save(String userId, MemoryValue memoryValue, String source, double confidence, int importance) {
         List<UserMemory> existing = new ArrayList<>(load(userId));
         UserMemory previous = existing.stream().filter(memory -> memory.key().equals(memoryValue.key()))

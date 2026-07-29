@@ -78,6 +78,9 @@ public class Config {
     /** 是否使用滴滴 MCP 调试环境；生产环境默认关闭。 */
     public static final boolean DIDI_MCP_SANDBOX =
             Boolean.parseBoolean(loadProperty("didi.mcp.sandbox", "false"));
+    /** 通用 MCP 服务地址；留空时只保留已有的专用 MCP 适配器。 */
+    public static final String MCP_SERVER_URL = loadProperty("mcp.server.url", "");
+    public static final String MCP_SERVER_AUTH = loadSecretProperty("MCP_SERVER_AUTH", "mcp.server.auth");
     /** 快递 H5 页面服务端口。 */
     public static final int EXPRESS_PORT = Integer.parseInt(loadProperty("express.port", "8089"));
     /** 快递 H5 页面公网地址；为空时使用本机地址。 */
@@ -111,6 +114,13 @@ public class Config {
             loadProperty("dashboard.tunnel.command", "data/tools/cloudflared.exe");
     public static final Duration DAILY_DASHBOARD_TUNNEL_TIMEOUT = Duration.ofSeconds(
             Long.parseLong(loadProperty("dashboard.tunnel.timeout.seconds", "25")));
+    /** 仅本机使用的会话管理页面。 */
+    public static final boolean SESSION_MANAGEMENT_ENABLED =
+            Boolean.parseBoolean(loadProperty("session.management.enabled", "true"));
+    public static final String SESSION_MANAGEMENT_BIND_ADDRESS =
+            loadProperty("session.management.bind.address", "127.0.0.1");
+    public static final int SESSION_MANAGEMENT_PORT =
+            Integer.parseInt(loadProperty("session.management.port", "8791"));
     public static final boolean VISUAL_CARDS_ENABLED =
             Boolean.parseBoolean(loadProperty("visual.cards.enabled", "true"));
     public static final String VISUAL_CARDS_MODE = loadProperty("visual.cards.mode", "image");

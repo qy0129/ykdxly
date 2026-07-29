@@ -175,15 +175,20 @@ public class ILinkBot {
                     public void onMessages(List<WeixinMessage> messages) {
                         resumeContextStore.save(ILinkBot.this.client.exportResumeContext());
                         for (WeixinMessage message : messages) {
-                            messageExecutor.execute(() -> {
-                                try {
-                                    IncomingMessage incoming = messageAdapter.adapt(ILinkBot.this.client, message);
+                            try {
+                                IncomingMessage incoming = messageAdapter.adapt(ILinkBot.this.client, message);
+                                messageExecutor.execute(incoming.principalId(), () -> {
+                                    try {
                                     dispatcher.handleMessage(ILinkBot.this.client, incoming);
-                                } catch (Exception error) {
-                                    System.err.println("[Message adapter] Failed to read WeChat message: "
+                                    } catch (Exception error) {
+                                        System.err.println("[Message dispatch] Failed to handle message: "
                                             + rootMessage(error));
-                                }
-                            });
+                                    }
+                                });
+                            } catch (Exception error) {
+                                System.err.println("[Message adapter] Failed to read WeChat message: "
+                                        + rootMessage(error));
+                            }
                         }
                     }
                 });

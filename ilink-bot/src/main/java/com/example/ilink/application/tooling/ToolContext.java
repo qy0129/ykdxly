@@ -8,7 +8,11 @@ import java.util.Objects;
  * <p>用户 ID 已经由微信消息提供，因此不应该让模型再次填写。后续需要增加
  * 当前会话、权限等信息时，可以继续扩展本记录。</p>
  */
-public record ToolContext(String userId) {
+public record ToolContext(String userId, String sessionId) {
+
+    public ToolContext(String userId) {
+        this(userId, null);
+    }
 
     /** 校验工具调用必须归属于一个用户。 */
     public ToolContext {

@@ -14,21 +14,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class MessageSerialExecutorTest {
 
     @Test
-    void keepsMessagesInSubmissionOrder() throws Exception {
-        List<Integer> order = Collections.synchronizedList(new ArrayList<>());
-        CountDownLatch finished = new CountDownLatch(3);
-
+    void preservesOrderForSameUser() throws Exception {
+        List<Integer> values = Collections.synchronizedList(new ArrayList<>());
+        CountDownLatch completed = new CountDownLatch(2);
         try (MessageSerialExecutor executor = new MessageSerialExecutor()) {
-            for (int index = 1; index <= 3; index++) {
-                int value = index;
-                executor.execute(() -> {
-                    order.add(value);
-                    finished.countDown();
-                });
-            }
-            assertTrue(finished.await(3, TimeUnit.SECONDS));
+            executor.execute("user-a", () -> {
+                values.add(1);
+                completed.countDown();
+            });
+            executor.execute("user-a", () -> {
+                values.add(2);
+                completed.countDown();
+            });
+            assertTrue(completed.await(2, TimeUnit.SECONDS));
         }
-
-        assertEquals(List.of(1, 2, 3), order);
+        assertEquals(List.of(1, 2), values);
     }
 }
