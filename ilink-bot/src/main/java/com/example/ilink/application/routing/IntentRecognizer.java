@@ -29,19 +29,29 @@ public final class IntentRecognizer {
     private final HttpClient httpClient;
     private final RouteClient routeClient;
     private final Gson gson = new Gson();
-    private final CapabilityRegistry capabilities = CapabilityRegistry.defaults();
-    private final RoutePromptBuilder promptBuilder = new RoutePromptBuilder(capabilities);
+    private final CapabilityRegistry capabilities;
+    private final RoutePromptBuilder promptBuilder;
     private final RouteResponseParser responseParser = new RouteResponseParser();
-    private final IntentNormalizer normalizer = new IntentNormalizer(capabilities);
+    private final IntentNormalizer normalizer;
 
     public IntentRecognizer(HttpClient httpClient) {
+        this(httpClient, CapabilityRegistry.defaults());
+    }
+
+    public IntentRecognizer(HttpClient httpClient, CapabilityRegistry capabilities) {
         this.httpClient = httpClient;
         this.routeClient = this::sendRoute;
+        this.capabilities = capabilities;
+        this.promptBuilder = new RoutePromptBuilder(capabilities);
+        this.normalizer = new IntentNormalizer(capabilities);
     }
 
     IntentRecognizer(RouteClient routeClient) {
         this.httpClient = null;
         this.routeClient = routeClient;
+        this.capabilities = CapabilityRegistry.defaults();
+        this.promptBuilder = new RoutePromptBuilder(capabilities);
+        this.normalizer = new IntentNormalizer(capabilities);
     }
 
     /** 保留旧注入签名；完整上下文现在由调用方一次性传入。 */

@@ -1,0 +1,18 @@
+{
+  "name": "life",
+  "description": "计划、待办、日历和生活管理",
+  "version": "1.0.0",
+  "enabled": true,
+  "requiresApproval": false,
+  "toolNames": ["create_task_plan", "adjust_task_plan", "get_plan_progress", "break_down_task", "resolve_date", "deadline_countdown"],
+  "capabilities": [
+    {"name":"task_plan","description":"制定学习、工作或生活任务计划","parameterHint":"plan_goal, plan_deadline, plan_available_time","interactive":true},
+    {"name":"plan_adjust","description":"调整当前计划","parameterHint":"action_text","interactive":true},
+    {"name":"plan_progress","description":"查询当前计划进度","parameterHint":"action_text","interactive":false},
+    {"name":"deadline_countdown","description":"计算距离截止时间还有多久","parameterHint":"plan_deadline","interactive":false},
+    {"name":"calendar_event","description":"创建、查询、完成、取消或延后提醒","parameterHint":"calendar_action, calendar_title, calendar_time, recurrence","interactive":true},
+    {"name":"todo","description":"创建、查看、完成或删除待办","parameterHint":"action_text","interactive":false},
+    {"name":"planning_capabilities","description":"介绍可用的规划能力","parameterHint":"","interactive":false},
+    {"name":"diet_plan","description":"营养、减脂、增肌等饮食规划","parameterHint":"diet_goal","interactive":true}
+  ]
+}

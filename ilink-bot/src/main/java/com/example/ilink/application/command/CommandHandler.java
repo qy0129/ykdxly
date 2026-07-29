@@ -1,28 +1,19 @@
 package com.example.ilink.application.command;
 
+import com.example.ilink.application.conversation.PlanSessionStore;
 import com.example.ilink.application.conversation.SessionService;
+import com.example.ilink.application.conversation.UserSessionStore;
 import com.example.ilink.application.messaging.ReplyChannel;
 import com.example.ilink.application.messaging.ReplySender;
 import com.example.ilink.capabilities.memory.MemoryService;
+import com.example.ilink.capabilities.planning.TaskPlan;
 import com.example.ilink.capabilities.planning.TodoService;
-import com.example.ilink.application.conversation.PlanSessionStore;
 import com.example.ilink.platform.persistence.MySqlStore;
 
 /** 系统命令的回复处理。 */
 public final class CommandHandler {
     private final SessionService sessionService;
     private final MemoryService memoryService;
-<<<<<<< Updated upstream
-    private final WelcomeHandler welcomeHandler;
-    private final ReplySender replySender;
-
-    public CommandHandler(SessionService sessionService, Object ignoredSessions, MemoryService memoryService,
-                          TodoService ignoredTodoService, PlanSessionStore ignoredPlanSessions,
-                          WelcomeHandler welcomeHandler, ReplySender replySender) {
-        this.sessionService = sessionService;
-        this.memoryService = memoryService;
-        this.welcomeHandler = welcomeHandler;
-=======
     private final TodoService todoService;
     private final PlanSessionStore planSessions;
     private final ReplySender replySender;
@@ -37,7 +28,6 @@ public final class CommandHandler {
         this.memoryService = memoryService;
         this.todoService = todoService;
         this.planSessions = planSessions;
->>>>>>> Stashed changes
         this.replySender = replySender;
     }
 
@@ -48,18 +38,13 @@ public final class CommandHandler {
                 replySender.sendReply(client, userId, "已开启新会话。你的长期记忆、人格和常用地点仍会保留。");
             }
             case SHOW_MEMORY -> replySender.sendReply(client, userId, memoryService.describe(userId));
-<<<<<<< Updated upstream
-            case LIST_SESSIONS -> replySender.sendReply(client, userId, listSessions(userId));
-            case MENU -> welcomeHandler.sendMenu(client, userId);
-=======
             case SHOW_TASK -> replySender.sendReply(client, userId, todoService.list(userId));
             case SHOW_PLAN -> {
                 TaskPlan plan = planSessions.get(userId);
                 replySender.sendReply(client, userId,
                         plan == null ? "你目前还没有制定计划。" : plan.toDisplayText());
             }
-            case LIST_SESSIONS -> handleListSessions(client, userId);
->>>>>>> Stashed changes
+            case LIST_SESSIONS -> replySender.sendReply(client, userId, listSessions(userId));
             case NONE -> { }
         }
     }

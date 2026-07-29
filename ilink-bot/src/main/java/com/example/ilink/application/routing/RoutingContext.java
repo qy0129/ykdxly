@@ -12,6 +12,7 @@ public record RoutingContext(
         String memories,
         String conversationSummary,
         List<MySqlStore.ChatEntry> recentMessages,
+        String knowledgeContext,
         String currentLocation,
         String currentCity,
         ZonedDateTime currentTime,
@@ -23,6 +24,7 @@ public record RoutingContext(
         memories = text(memories);
         conversationSummary = text(conversationSummary);
         recentMessages = recentMessages == null ? List.of() : List.copyOf(recentMessages);
+        knowledgeContext = text(knowledgeContext);
         currentLocation = text(currentLocation);
         currentCity = text(currentCity);
         currentTime = currentTime == null ? ZonedDateTime.now() : currentTime;
@@ -32,7 +34,17 @@ public record RoutingContext(
     }
 
     public static RoutingContext minimal(IntentContext context) {
-        return new RoutingContext("", "", "", List.of(), "", "", ZonedDateTime.now(), context, Map.of());
+        return new RoutingContext("", "", "", List.of(), "", "", "",
+                ZonedDateTime.now(), context, Map.of());
+    }
+
+    /** 兼容未接入知识库上下文的旧调用方。 */
+    public RoutingContext(String persona, String memories, String conversationSummary,
+                          List<MySqlStore.ChatEntry> recentMessages, String currentLocation,
+                          String currentCity, ZonedDateTime currentTime, IntentContext mediaContext,
+                          Map<String, Boolean> pendingStates) {
+        this(persona, memories, conversationSummary, recentMessages, "", currentLocation,
+                currentCity, currentTime, mediaContext, pendingStates);
     }
 
     private static String text(String value) {

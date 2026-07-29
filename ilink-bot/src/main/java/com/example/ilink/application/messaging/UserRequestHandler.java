@@ -31,6 +31,7 @@ import com.example.ilink.capabilities.web.NewsSearchService;
 import com.example.ilink.capabilities.web.BilibiliSearchService;
 import com.example.ilink.capabilities.web.WebSearchService;
 import com.example.ilink.capabilities.documents.DocumentRecord;
+import com.example.ilink.capabilities.documents.rag.RagContextService;
 import com.example.ilink.capabilities.web.SearchResult;
 import com.example.ilink.application.routing.IntentContext;
 import com.example.ilink.application.routing.IntentAction;
@@ -115,6 +116,7 @@ public final class UserRequestHandler {
     private final MediaKnowledgeService mediaKnowledgeService;
     private final QqMailService qqMailService;
     private final VisualCardWorkflow visualCardWorkflow;
+    private final RagContextService ragContextService;
     private final ActionPlanExecutor actionPlanExecutor = new ActionPlanExecutor();
     private final CapabilityContractValidator capabilityValidator = new CapabilityContractValidator();
 
@@ -135,7 +137,7 @@ public final class UserRequestHandler {
                               WebSearchService webSearchService, NewsSearchService newsSearchService,
                               BilibiliSearchService bilibiliSearchService,
                               MediaKnowledgeService mediaKnowledgeService, QqMailService qqMailService,
-                              VisualCardWorkflow visualCardWorkflow) {
+                              VisualCardWorkflow visualCardWorkflow, RagContextService ragContextService) {
         this.chatHistory = chatHistory;
         this.sessions = sessions;
         this.documentSessions = documentSessions;
@@ -163,6 +165,7 @@ public final class UserRequestHandler {
         this.mediaKnowledgeService = mediaKnowledgeService;
         this.qqMailService = qqMailService;
         this.visualCardWorkflow = visualCardWorkflow;
+        this.ragContextService = ragContextService;
     }
     /** 识别用户意图并调用对应功能处理器。 */
     public void handle(AgentContext agentContext, String text) throws Exception {
@@ -245,7 +248,7 @@ public final class UserRequestHandler {
                         documentSessions.get(userId) != null,
                         true);
                 IntentPlan pendingPlan = intentRecognizer.recognize(userId, text,
-                        buildRoutingContext(userId, pendingContext));
+                        buildRoutingContext(userId, pendingContext, text));
                 if (pendingPlan != null) {
                     pendingRoute = pendingPlan.actions().stream()
                             .map(IntentAction::route)
@@ -292,7 +295,7 @@ public final class UserRequestHandler {
                 documentSessions.get(userId) != null,
                 false);
         IntentPlan plan = intentRecognizer.recognize(userId, text,
-                buildRoutingContext(userId, intentContext));
+                buildRoutingContext(userId, intentContext, text));
         if (plan == null || plan.isEmpty()) {
             replySender.sendReply(client, userId, "网络波动了，请再发一次～");
             return;
@@ -744,7 +747,7 @@ public final class UserRequestHandler {
     }
 
     /** 把会话、位置、时间和所有等待状态合并成一次路由快照。 */
-    private RoutingContext buildRoutingContext(String userId, IntentContext mediaContext) {
+    private RoutingContext buildRoutingContext(String userId, IntentContext mediaContext, String query) {
         ContextManager.ContextData conversation = contextManager.buildContext(userId);
         Map<String, Boolean> pending = new LinkedHashMap<>();
         pending.put("draw_size", sessions.getPendingDraw(userId) != null);
@@ -762,7 +765,8 @@ public final class UserRequestHandler {
         pending.put("file_export", sessions.hasPendingFileExport(userId));
         return new RoutingContext(
                 conversation.persona(), conversation.memories(), conversation.summary(),
-                conversation.recentMessages(), sessions.getCurrentLocation(userId),
+                conversation.recentMessages(), ragContextService.retrieve(userId, query).prompt(),
+                sessions.getCurrentLocation(userId),
                 sessions.getCurrentCity(userId), ZonedDateTime.now(ZoneId.systemDefault()),
                 mediaContext, pending);
     }
