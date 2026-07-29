@@ -13,7 +13,9 @@ import com.example.ilink.application.workflow.visual.VisualCardWorkflow;
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.application.conversation.ChatHistoryStore;
 import com.example.ilink.application.conversation.ContextManager;
+import com.example.ilink.application.conversation.ConversationContext;
 import com.example.ilink.application.conversation.DocumentSessionStore;
+import com.example.ilink.application.conversation.KnowledgeContext;
 import com.example.ilink.application.conversation.UserSessionStore;
 import com.example.ilink.capabilities.chat.ChatService;
 import com.example.ilink.capabilities.calculator.CalculatorService;
@@ -31,7 +33,6 @@ import com.example.ilink.capabilities.web.NewsSearchService;
 import com.example.ilink.capabilities.web.BilibiliSearchService;
 import com.example.ilink.capabilities.web.WebSearchService;
 import com.example.ilink.capabilities.documents.DocumentRecord;
-import com.example.ilink.capabilities.documents.rag.RagContextService;
 import com.example.ilink.capabilities.web.SearchResult;
 import com.example.ilink.application.routing.IntentContext;
 import com.example.ilink.application.routing.IntentAction;
@@ -116,7 +117,6 @@ public final class UserRequestHandler {
     private final MediaKnowledgeService mediaKnowledgeService;
     private final QqMailService qqMailService;
     private final VisualCardWorkflow visualCardWorkflow;
-    private final RagContextService ragContextService;
     private final ActionPlanExecutor actionPlanExecutor = new ActionPlanExecutor();
     private final CapabilityContractValidator capabilityValidator = new CapabilityContractValidator();
 
@@ -137,7 +137,7 @@ public final class UserRequestHandler {
                               WebSearchService webSearchService, NewsSearchService newsSearchService,
                               BilibiliSearchService bilibiliSearchService,
                               MediaKnowledgeService mediaKnowledgeService, QqMailService qqMailService,
-                              VisualCardWorkflow visualCardWorkflow, RagContextService ragContextService) {
+                               VisualCardWorkflow visualCardWorkflow) {
         this.chatHistory = chatHistory;
         this.sessions = sessions;
         this.documentSessions = documentSessions;
@@ -165,7 +165,6 @@ public final class UserRequestHandler {
         this.mediaKnowledgeService = mediaKnowledgeService;
         this.qqMailService = qqMailService;
         this.visualCardWorkflow = visualCardWorkflow;
-        this.ragContextService = ragContextService;
     }
     /** 识别用户意图并调用对应功能处理器。 */
     public void handle(AgentContext agentContext, String text) throws Exception {
@@ -748,7 +747,8 @@ public final class UserRequestHandler {
 
     /** 把会话、位置、时间和所有等待状态合并成一次路由快照。 */
     private RoutingContext buildRoutingContext(String userId, IntentContext mediaContext, String query) {
-        ContextManager.ContextData conversation = contextManager.buildContext(userId);
+        ConversationContext conv = contextManager.buildConversation(userId);
+        KnowledgeContext kn = contextManager.buildKnowledge(userId, query);
         Map<String, Boolean> pending = new LinkedHashMap<>();
         pending.put("draw_size", sessions.getPendingDraw(userId) != null);
         pending.put("express", sessions.hasPendingExpress(userId));
@@ -764,8 +764,8 @@ public final class UserRequestHandler {
         pending.put("visual_card", visualCardWorkflow.hasPending(userId));
         pending.put("file_export", sessions.hasPendingFileExport(userId));
         return new RoutingContext(
-                conversation.persona(), conversation.memories(), conversation.summary(),
-                conversation.recentMessages(), ragContextService.retrieve(userId, query).prompt(),
+                conv.persona(), contextManager.buildMemory(userId).prompt(), conv.summary(),
+                conv.recentMessages(), kn.prompt(),
                 sessions.getCurrentLocation(userId),
                 sessions.getCurrentCity(userId), ZonedDateTime.now(ZoneId.systemDefault()),
                 mediaContext, pending);
