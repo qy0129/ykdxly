@@ -2,6 +2,7 @@ package com.example.ilink.adapter.inbound.wechat;
 
 import com.example.ilink.adapter.inbound.http.DailyDashboardServer;
 import com.example.ilink.adapter.inbound.http.ExpressHttpServer;
+import com.example.ilink.adapter.inbound.http.SessionManagementServer;
 import com.example.ilink.adapter.outbound.wechat.WechatReplyChannel;
 import com.example.ilink.application.briefing.LoginBriefingService;
 import com.example.ilink.application.messaging.AgentContext;
@@ -48,6 +49,7 @@ public final class MessageDispatcher implements AutoCloseable {
     private final LoginBriefingService loginBriefingService;
     private final WelcomeHandler welcomeHandler;
     private final DailyDashboardServer dailyDashboardServer;
+    private final SessionManagementServer sessionManagementServer;
     private final ExpressHttpServer expressHttpServer;
     private final ExpressPageService expressPageService;
     private final ScheduledExecutorService progressScheduler = Executors.newScheduledThreadPool(1);
@@ -64,7 +66,8 @@ public final class MessageDispatcher implements AutoCloseable {
                              ChatService chatService, CalendarService calendarService,
                              VisualDeckSender visualDeckSender, LoginBriefingService loginBriefingService,
                              WelcomeHandler welcomeHandler,
-                             DailyDashboardServer dailyDashboardServer, ExpressHttpServer expressHttpServer,
+                             DailyDashboardServer dailyDashboardServer, SessionManagementServer sessionManagementServer,
+                             ExpressHttpServer expressHttpServer,
                              ExpressPageService expressPageService) {
         this.messageProcessor = messageProcessor;
         this.replySender = replySender;
@@ -74,6 +77,7 @@ public final class MessageDispatcher implements AutoCloseable {
         this.loginBriefingService = loginBriefingService;
         this.welcomeHandler = welcomeHandler;
         this.dailyDashboardServer = dailyDashboardServer;
+        this.sessionManagementServer = sessionManagementServer;
         this.expressHttpServer = expressHttpServer;
         this.expressPageService = expressPageService;
         dailyDashboardServer.start();
@@ -120,6 +124,7 @@ public final class MessageDispatcher implements AutoCloseable {
         AgentContext context = AgentContext.wechat(userId, new WechatReplyChannel(client));
         activeUserId = userId;
         dailyDashboardServer.useUser(userId);
+        sessionManagementServer.useUser(userId);
         long startedAtMillis = System.currentTimeMillis();
         boolean voiceOnly = replySender.isVoiceOnly();
         ScheduledFuture<?> progressTask = progressScheduler.schedule(() -> {
@@ -250,6 +255,7 @@ public final class MessageDispatcher implements AutoCloseable {
         if (!found.isBlank()) {
             activeUserId = found;
             dailyDashboardServer.useUser(found);
+            sessionManagementServer.useUser(found);
         }
         return found;
     }

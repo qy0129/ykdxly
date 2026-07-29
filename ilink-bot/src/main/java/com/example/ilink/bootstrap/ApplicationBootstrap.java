@@ -2,10 +2,12 @@ package com.example.ilink.bootstrap;
 
 import com.example.ilink.adapter.inbound.http.DailyDashboardServer;
 import com.example.ilink.adapter.inbound.http.ExpressHttpServer;
+import com.example.ilink.adapter.inbound.http.SessionManagementServer;
 import com.example.ilink.adapter.inbound.wechat.LoginQrPage;
 import com.example.ilink.adapter.inbound.wechat.MessageDispatcher;
 import com.example.ilink.adapter.inbound.wechat.WechatMessageAdapter;
 import com.example.ilink.application.briefing.LoginBriefingService;
+import com.example.ilink.application.agent.AgentLoop;
 import com.example.ilink.application.command.CommandHandler;
 import com.example.ilink.application.command.CommandRouter;
 import com.example.ilink.application.conversation.AudioHistoryStore;
@@ -26,7 +28,11 @@ import com.example.ilink.application.messaging.MessageSerialExecutor;
 import com.example.ilink.application.messaging.ReplySender;
 import com.example.ilink.application.messaging.UserRequestHandler;
 import com.example.ilink.application.routing.IntentRecognizer;
+import com.example.ilink.application.routing.RoutePlanReviewer;
+import com.example.ilink.application.routing.SkillRegistry;
 import com.example.ilink.application.tooling.ToolManager;
+import com.example.ilink.application.tooling.mcp.HttpMcpClient;
+import com.example.ilink.application.tooling.mcp.McpServerRegistry;
 import com.example.ilink.capabilities.audio.AudioService;
 import com.example.ilink.capabilities.audio.AudioTranscribeTool;
 import com.example.ilink.capabilities.audio.SpeechTool;
@@ -119,6 +125,7 @@ import com.example.ilink.platform.persistence.UserRepository;
 import com.example.ilink.platform.sdk.SdkResumeContextStore;
 
 import java.net.http.HttpClient;
+import java.net.URI;
 import java.time.Duration;
 
 /** 创建应用服务、工具、路由和外部适配器。 */
@@ -131,6 +138,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
     private final SdkResumeContextStore resumeContextStore;
     private final ChatHistoryStore chatHistory;
     private final MySqlStore database;
+    private final SessionManagementServer sessionManagementServer;
 
     private ApplicationBootstrap(MessageDispatcher messageDispatcher,
                                  WechatMessageAdapter messageAdapter,
@@ -138,7 +146,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
                                  LoginQrPage loginQrPage,
                                  SdkResumeContextStore resumeContextStore,
                                  ChatHistoryStore chatHistory,
-                                 MySqlStore database) {
+                                 MySqlStore database,
+                                 SessionManagementServer sessionManagementServer) {
         this.messageDispatcher = messageDispatcher;
         this.messageAdapter = messageAdapter;
         this.messageExecutor = messageExecutor;
@@ -146,6 +155,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         this.resumeContextStore = resumeContextStore;
         this.chatHistory = chatHistory;
         this.database = database;
+        this.sessionManagementServer = sessionManagementServer;
     }
 
     public static ApplicationBootstrap create() {
@@ -225,6 +235,10 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 .register(new RelationTool())
                 .register(new ExpressTool(expressService, expressPageService));
 
+        SkillRegistry skillRegistry = SkillRegistry.defaults();
+        installConfiguredMcpTools(httpClient, toolManager);
+        AgentLoop agentLoop = new AgentLoop(httpClient, toolManager, skillRegistry);
+
         ReplySender replySender = new ReplySender(
                 audioService, mediaStore, audioHistory, toolManager, sessions, chatHistory);
         VisualCardFactory visualCardFactory = new VisualCardFactory();
@@ -259,7 +273,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         UserRequestHandler requestHandler = new UserRequestHandler(
                 chatHistory, sessions, documentSessions,
                 intentRecognizer, chatService, weatherService,
-                mediaStore, replySender, toolManager, contextManager, planWorkflow,
+                mediaStore, replySender, toolManager, agentLoop, new RoutePlanReviewer(), contextManager, planWorkflow,
                 new CalculatorService(httpClient, toolManager), calendarWorkflow,
                 healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, foodOrderWorkflow,
                 taxiWorkflow, memoryService, todoService,
@@ -277,18 +291,33 @@ public final class ApplicationBootstrap implements AutoCloseable {
         DailyDashboardService dashboardService = new DailyDashboardService(
                 todoService, calendarService, planSessions, weatherService, sessions, memoryService);
 
+        SessionManagementServer sessionManagementServer = new SessionManagementServer(
+                sessionService, sessions, MySqlStore.getInstance());
         MessageDispatcher dispatcher = new MessageDispatcher(
                 messageProcessor, replySender, chatService, calendarService,
                 visualDeckSender, loginBriefingService, welcomeHandler,
-                new DailyDashboardServer(dashboardService), expressHttpServer, expressPageService);
+                new DailyDashboardServer(dashboardService), sessionManagementServer,
+                expressHttpServer, expressPageService);
+        sessionManagementServer.start();
         return new ApplicationBootstrap(
                 dispatcher, new WechatMessageAdapter(), new MessageSerialExecutor(),
                 new LoginQrPage(), new SdkResumeContextStore(), chatHistory,
-                MySqlStore.getInstance());
+                MySqlStore.getInstance(), sessionManagementServer);
     }
 
     public MessageDispatcher messageDispatcher() {
         return messageDispatcher;
+    }
+
+    private static void installConfiguredMcpTools(HttpClient httpClient, ToolManager toolManager) {
+        if (Config.MCP_SERVER_URL.isBlank()) return;
+        try {
+            McpServerRegistry servers = new McpServerRegistry().register("default",
+                    new HttpMcpClient(httpClient, URI.create(Config.MCP_SERVER_URL), Config.MCP_SERVER_AUTH));
+            servers.installTools(toolManager);
+        } catch (Exception error) {
+            System.err.println("[MCP] 工具发现失败，继续使用本地能力：" + error.getMessage());
+        }
     }
 
     public WechatMessageAdapter messageAdapter() {
@@ -309,6 +338,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
 
     @Override
     public void close() {
+        sessionManagementServer.close();
         messageExecutor.close();
         messageDispatcher.close();
         loginQrPage.cleanup();

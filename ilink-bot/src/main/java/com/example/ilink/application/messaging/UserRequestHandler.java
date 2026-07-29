@@ -11,6 +11,7 @@ import com.example.ilink.application.workflow.travel.TravelWorkflow;
 import com.example.ilink.application.workflow.visual.VisualCardWorkflow;
 
 import com.example.ilink.bootstrap.Config;
+import com.example.ilink.application.agent.AgentLoop;
 import com.example.ilink.application.conversation.ChatHistoryStore;
 import com.example.ilink.application.conversation.ContextManager;
 import com.example.ilink.application.conversation.DocumentSessionStore;
@@ -38,6 +39,7 @@ import com.example.ilink.application.routing.IntentPlan;
 import com.example.ilink.application.routing.IntentPolicy;
 import com.example.ilink.application.routing.IntentRecognizer;
 import com.example.ilink.application.routing.IntentResult;
+import com.example.ilink.application.routing.RoutePlanReviewer;
 import com.example.ilink.application.routing.CapabilityContractValidator;
 import com.example.ilink.application.routing.DrawSizeParser;
 import com.example.ilink.platform.media.MediaStore;
@@ -78,6 +80,9 @@ import java.util.Locale;
  */
 public final class UserRequestHandler {
 
+    private static final java.util.regex.Pattern WEATHER_CURRENT_LOCATION = java.util.regex.Pattern.compile(
+            "^\\s*我(?:现在|目前|当前)?在\\s*([^，,。！？?、]{2,40})");
+
     private final ChatHistoryStore chatHistory;
     private final UserSessionStore sessions;
     private final DocumentSessionStore documentSessions;
@@ -87,6 +92,8 @@ public final class UserRequestHandler {
     private final MediaStore mediaStore;
     private final ReplySender replySender;
     private final ToolManager toolManager;
+    private final AgentLoop agentLoop;
+    private final RoutePlanReviewer routePlanReviewer;
     private final ContextManager contextManager;
     private final PlanWorkflow planWorkflow;
     private final CalculatorService calculatorService;
@@ -113,6 +120,7 @@ public final class UserRequestHandler {
                               IntentRecognizer intentRecognizer, ChatService chatService,
                               WeatherService weatherService, MediaStore mediaStore,
                               ReplySender replySender, ToolManager toolManager,
+                              AgentLoop agentLoop, RoutePlanReviewer routePlanReviewer,
                               ContextManager contextManager,
                               PlanWorkflow planWorkflow, CalculatorService calculatorService,
                                CalendarWorkflow calendarWorkflow, HealthDietWorkflow healthDietWorkflow,
@@ -133,6 +141,8 @@ public final class UserRequestHandler {
         this.mediaStore = mediaStore;
         this.replySender = replySender;
         this.toolManager = toolManager;
+        this.agentLoop = agentLoop;
+        this.routePlanReviewer = routePlanReviewer;
         this.contextManager = contextManager;
         this.planWorkflow = planWorkflow;
         this.calculatorService = calculatorService;
@@ -275,11 +285,22 @@ public final class UserRequestHandler {
                 sessions.peekPendingDraw(userId) != null,
                 documentSessions.get(userId) != null,
                 false);
+        AgentLoop.Outcome agentOutcome = agentLoop.run(agentContext, text);
+        if (agentOutcome.handled() && !isAgentControlSignal(agentOutcome.reply())) {
+            replySender.sendReply(client, userId, agentOutcome.reply());
+            return;
+        }
         IntentPlan plan = intentRecognizer.recognize(userId, text, intentContext);
         if (plan == null || plan.isEmpty()) {
             replySender.sendReply(client, userId, "网络波动了，请再发一次～");
             return;
         }
+        RoutePlanReviewer.Review review = routePlanReviewer.review(plan, intentContext);
+        if (review.needsInput()) {
+            replySender.sendReply(client, userId, review.prompt());
+            return;
+        }
+        plan = review.plan();
 
         System.out.println("[意图识别] 共识别 " + plan.actions().size() + " 个动作："
                 + plan.actions().stream().map(action -> intentName(action.route().intent())).toList());
@@ -294,6 +315,10 @@ public final class UserRequestHandler {
                 action -> executeAction(client, userId, action),
                 () -> hasBlockingPending(userId),
                 (action, error) -> handleActionFailure(client, userId, action, error));
+    }
+
+    private boolean isAgentControlSignal(String reply) {
+        return reply != null && "DELEGATE".equalsIgnoreCase(reply.trim());
     }
 
     /** 重发上一条回复，不调用大模型，避免被误识别为邮箱查询。 */
@@ -685,7 +710,14 @@ public final class UserRequestHandler {
         sendWeatherReply(client, userId, text, selected, dayToken, "keep", "default");
     }
 
-    private String extractWeatherLocation(String text) {
+    static String extractWeatherLocation(String text) {
+        if (text == null || text.isBlank()) return "";
+        java.util.regex.Matcher currentLocation = WEATHER_CURRENT_LOCATION.matcher(text);
+        if (currentLocation.find()) {
+            return currentLocation.group(1)
+                    .replaceFirst("(?:今天|明天|后天|天气|气温|温度|会不会下雨).*", "")
+                    .trim();
+        }
         return text.replaceFirst("^(请)?(帮我)?(查|查询|看看|看一下)?", "")
                 .replaceAll("(今天|今日|明天|明日|后天|未来七天|未来7天)", "")
                 .replaceAll("(?:(?:\\d{4})年)?\\d{1,2}月\\d{1,2}(?:日|号)?", "")
@@ -1066,7 +1098,8 @@ public final class UserRequestHandler {
     /** 查询天气；同名地点时保存候选项并等待用户选择。 */
     private void handleWeather(ReplyChannel client, String userId, String userText,
                                IntentResult route) throws Exception {
-        String locationName = route.weatherLocation();
+        String locationName = extractWeatherLocation(route.weatherLocation());
+        if (locationName.isBlank()) locationName = extractWeatherLocation(userText);
         if (locationName == null || locationName.isBlank()) {
             replySender.sendReply(client, userId, "请告诉我要查询哪个城市、区县或乡镇的天气。",
                     route.replyMode(), route.voiceStyle());

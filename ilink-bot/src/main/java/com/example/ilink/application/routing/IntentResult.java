@@ -60,4 +60,11 @@ public record IntentResult(
         String emailAction,
         String emailKeyword,
         String foodOrderRestaurants) {
+
+    public static IntentResult chat() {
+        return new IntentResult("chat", "", "", "none", "keep", "default", "", "none", "", "none", 0,
+                "none", "none", "", "today", "", "", "", "", "", "", "", "", "", "", "",
+                List.of(), "", "", "", 0, "", "", "", "", "none", "", "", "none", 0, "auto", 0,
+                "none", 0, "", "", "", "", "", "", "");
+    }
 }

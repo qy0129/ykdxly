@@ -66,8 +66,13 @@ public final class ChatHistoryStore implements AutoCloseable {
     }
     /** 绑定用户当前活跃的 sessionId，后续消息写入会带上 session_id。 */
     public void setUserSessionId(String userId, String sessionId) {
-        if (userId != null && sessionId != null) {
-            userSessionIds.put(userId, sessionId);
+        if (userId == null || sessionId == null) return;
+        String previous = userSessionIds.put(userId, sessionId);
+        if (previous != null && !previous.equals(sessionId)) {
+            chatHistory.remove(userId);
+            conversationSummary.remove(userId);
+            loadedUsers.remove(userId);
+            compressingUsers.remove(userId);
         }
     }
 

@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>会话管理</title>
+  <link rel="stylesheet" href="/static/css/session-management.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div><p class="eyebrow">LOCAL CONVERSATION CONSOLE</p><h1>会话管理</h1></div>
+      <p class="topbar-note">自动显示当前 Bot 对话记录</p>
+    </header>
+
+    <section id="empty-state" class="empty-state">
+      <h2>等待识别当前对话</h2>
+      <p>先向 Bot 发送一条消息，再刷新此页面。</p>
+    </section>
+
+    <section id="workspace" class="workspace" hidden>
+      <aside class="sidebar">
+        <div class="sidebar-header"><h2>会话</h2><button id="create-session" type="button">新建</button></div>
+        <div id="session-list" class="session-list"></div>
+      </aside>
+
+      <section class="conversation-panel">
+        <header class="conversation-header">
+          <div><p id="conversation-meta">选择一个会话</p><h2 id="conversation-title">聊天记录</h2></div>
+          <button id="activate-session" type="button" disabled>切换到此会话</button>
+        </header>
+        <div id="message-list" class="message-list"><p class="placeholder">从左侧选择会话查看消息。</p></div>
+      </section>
+
+      <aside class="profile-panel">
+        <section><p class="section-label">长期资料</p><dl id="profile-list" class="profile-list"></dl></section>
+        <section><p class="section-label">长期记忆</p><div id="memory-list" class="memory-list"></div></section>
+        <section><p class="section-label">我的文件</p><div id="file-list" class="file-list"></div></section>
+        <p id="storage-note" class="storage-note"></p>
+      </aside>
+    </section>
+  </main>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/static/js/session-management.js"></script>
+</body>
+</html>

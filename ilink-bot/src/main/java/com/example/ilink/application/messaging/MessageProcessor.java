@@ -68,7 +68,9 @@ public final class MessageProcessor {
     public void process(AgentContext context, IncomingMessage message) {
         ReplyChannel client = context.replyChannel();
         String userId = context.principalId();
+        long startedAt = System.nanoTime();
         try {
+            chatHistory.setUserSessionId(userId, sessions.getCurrentSession(userId).sessionId());
             client.startTyping(userId);
             List<MessagePart> parts = message.parts();
             if (parts.isEmpty()) return;
@@ -114,6 +116,11 @@ public final class MessageProcessor {
             try {
                 replySender.sendReply(client, userId, "网络波动了，请再发一次～");
             } catch (Exception ignored) {
+            }
+        } finally {
+            long elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000;
+            if (elapsedMillis >= 1_000) {
+                System.out.println("[Performance] user=" + userId + ", message_ms=" + elapsedMillis);
             }
         }
     }
@@ -235,15 +242,14 @@ public final class MessageProcessor {
         if (text == null || text.isBlank()) return;
         String userId = context.principalId();
         System.out.println("[" + userId + "] " + text);
+        if (commandHandler.trySwitchSession(context.replyChannel(), userId, text)) return;
         CommandType commandType = commandRouter.route(text);
         if (commandType != CommandType.NONE) {
             commandHandler.handle(context.replyChannel(), userId, commandType);
             return;
         }
-        String sessionId = sessions.getActiveSessionId(userId);
-        if (sessionId != null) {
-            chatHistory.setUserSessionId(userId, sessionId);
-        }
+        String sessionId = sessions.getCurrentSession(userId).sessionId();
+        chatHistory.setUserSessionId(userId, sessionId);
         chatHistory.addUserMessage(userId, text);
         memoryExtractor.extract(userId, text);
         capabilityDispatcher.dispatch(context, text);

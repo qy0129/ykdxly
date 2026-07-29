@@ -17,7 +17,18 @@ public final class SkillRegistry {
     }
 
     public Set<String> names() {
-        return skills.keySet();
+        return skills.values().stream().filter(BotSkill::enabled).map(BotSkill::name)
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
+    public List<BotSkill> enabledSkills() {
+        return skills.values().stream().filter(BotSkill::enabled).toList();
+    }
+
+    public boolean allowsTool(String skillName, String toolName) {
+        BotSkill skill = skills.get(skillName);
+        return skill != null && skill.enabled()
+                && (skill.toolNames().isEmpty() || skill.toolNames().contains(toolName));
     }
 
     public static SkillRegistry defaults() {
@@ -33,6 +44,6 @@ public final class SkillRegistry {
     }
 
     private static BotSkill skill(String name) {
-        return new BotSkill(name, name);
+        return new BotSkill(name, name, Set.of(), true);
     }
 }
