@@ -1,6 +1,7 @@
 package com.example.ilink.bootstrap;
 
 import com.example.ilink.adapter.inbound.http.DailyDashboardServer;
+import com.example.ilink.adapter.inbound.http.AutomationConsoleServer;
 import com.example.ilink.adapter.inbound.http.ExpressHttpServer;
 import com.example.ilink.adapter.inbound.http.SessionManagementServer;
 import com.example.ilink.adapter.inbound.wechat.LoginQrPage;
@@ -19,6 +20,16 @@ import com.example.ilink.application.conversation.DietPlanSessionStore;
 import com.example.ilink.application.conversation.DocumentSessionStore;
 import com.example.ilink.application.conversation.PlanSessionStore;
 import com.example.ilink.application.conversation.UserSessionStore;
+import com.example.ilink.application.executive.ApprovalService;
+import com.example.ilink.application.executive.DefaultResultVerifier;
+import com.example.ilink.application.executive.ExecutionLogService;
+import com.example.ilink.application.executive.ExecutiveEngine;
+import com.example.ilink.application.executive.ExecutiveRuntime;
+import com.example.ilink.application.executive.ExecutiveScheduler;
+import com.example.ilink.application.executive.ExecutiveTaskService;
+import com.example.ilink.application.executive.ExecutiveTaskStore;
+import com.example.ilink.application.executive.NotificationOutbox;
+import com.example.ilink.application.executive.ToolCapabilityExecutor;
 import com.example.ilink.capabilities.memory.MemoryExtractor;
 import com.example.ilink.application.conversation.SessionService;
 import com.example.ilink.application.messaging.CapabilityDispatcher;
@@ -35,6 +46,20 @@ import com.example.ilink.application.tooling.mcp.McpServerRegistry;
 import com.example.ilink.capabilities.audio.AudioService;
 import com.example.ilink.capabilities.audio.AudioTranscribeTool;
 import com.example.ilink.capabilities.audio.SpeechTool;
+import com.example.ilink.capabilities.automation.AutomationAnalysisService;
+import com.example.ilink.capabilities.automation.AutomationPlanBuilder;
+import com.example.ilink.capabilities.automation.AutomationReportTool;
+import com.example.ilink.capabilities.automation.AutomationRequestParser;
+import com.example.ilink.capabilities.automation.AutomationWebSearchTool;
+import com.example.ilink.capabilities.automation.AutomationWorkflow;
+import com.example.ilink.capabilities.automation.JdAnalysisTool;
+import com.example.ilink.capabilities.automation.JobSearchTool;
+import com.example.ilink.capabilities.automation.JobPageFetchTool;
+import com.example.ilink.capabilities.automation.JobAnalysisTool;
+import com.example.ilink.capabilities.automation.JobReportTool;
+import com.example.ilink.capabilities.automation.ResumeMatchTool;
+import com.example.ilink.capabilities.automation.ResearchAnalysisTool;
+import com.example.ilink.capabilities.automation.WebPageFetchTool;
 import com.example.ilink.capabilities.calculator.AreaTool;
 import com.example.ilink.capabilities.calculator.BMITool;
 import com.example.ilink.capabilities.calculator.BaseConversionTool;
@@ -127,6 +152,7 @@ import com.example.ilink.platform.sdk.SdkResumeContextStore;
 import java.net.http.HttpClient;
 import java.net.URI;
 import java.time.Duration;
+import java.util.UUID;
 
 /** 创建应用服务、工具、路由和外部适配器。 */
 public final class ApplicationBootstrap implements AutoCloseable {
@@ -139,6 +165,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
     private final ChatHistoryStore chatHistory;
     private final MySqlStore database;
     private final SessionManagementServer sessionManagementServer;
+    private final ExecutiveRuntime executiveRuntime;
+    private final AutomationConsoleServer automationConsoleServer;
 
     private ApplicationBootstrap(MessageDispatcher messageDispatcher,
                                  WechatMessageAdapter messageAdapter,
@@ -147,7 +175,9 @@ public final class ApplicationBootstrap implements AutoCloseable {
                                  SdkResumeContextStore resumeContextStore,
                                  ChatHistoryStore chatHistory,
                                  MySqlStore database,
-                                 SessionManagementServer sessionManagementServer) {
+                                 SessionManagementServer sessionManagementServer,
+                                 ExecutiveRuntime executiveRuntime,
+                                 AutomationConsoleServer automationConsoleServer) {
         this.messageDispatcher = messageDispatcher;
         this.messageAdapter = messageAdapter;
         this.messageExecutor = messageExecutor;
@@ -156,6 +186,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
         this.chatHistory = chatHistory;
         this.database = database;
         this.sessionManagementServer = sessionManagementServer;
+        this.executiveRuntime = executiveRuntime;
+        this.automationConsoleServer = automationConsoleServer;
     }
 
     public static ApplicationBootstrap create() {
@@ -196,6 +228,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         AmapService amapService = new AmapService(httpClient);
         ExpressPageService expressPageService = new ExpressPageService();
         ExpressHttpServer expressHttpServer = new ExpressHttpServer(expressPageService);
+        AutomationAnalysisService automationAnalysis = new AutomationAnalysisService(httpClient);
 
         ToolManager toolManager = new ToolManager()
                 .register(new WeatherTool(weatherService))
@@ -234,9 +267,34 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 .register(new MortgageTool())
                 .register(new ChineseMoneyTool())
                 .register(new RelationTool())
-                .register(new ExpressTool(expressService, expressPageService));
+                .register(new ExpressTool(expressService, expressPageService))
+                .register(new AutomationWebSearchTool(webSearchService))
+                .register(new WebPageFetchTool(httpClient))
+                .register(new JobSearchTool(webSearchService))
+                .register(new JobPageFetchTool(httpClient))
+                .register(new JobAnalysisTool())
+                .register(new JobReportTool())
+                .register(new JdAnalysisTool(automationAnalysis))
+                .register(new ResumeMatchTool(automationAnalysis))
+                .register(new ResearchAnalysisTool(automationAnalysis))
+                .register(new AutomationReportTool());
 
         installConfiguredMcpTools(httpClient, toolManager);
+        ExecutiveTaskStore executiveStore = new ExecutiveTaskStore();
+        ExecutionLogService executionLogs = new ExecutionLogService(executiveStore);
+        NotificationOutbox notificationOutbox = new NotificationOutbox(executiveStore);
+        ApprovalService approvalService = new ApprovalService(executiveStore);
+        ExecutiveTaskService executiveTasks = new ExecutiveTaskService(
+                executiveStore, executionLogs, notificationOutbox);
+        ExecutiveEngine executiveEngine = new ExecutiveEngine(
+                Config.DATABASE_BOT_ID + "-" + UUID.randomUUID().toString().substring(0, 8),
+                executiveStore, new ToolCapabilityExecutor(toolManager), new DefaultResultVerifier(),
+                approvalService, executionLogs, notificationOutbox);
+        ExecutiveRuntime executiveRuntime = new ExecutiveRuntime(
+                executiveStore, executiveTasks, approvalService, executionLogs, notificationOutbox,
+                new ExecutiveScheduler(executiveEngine));
+        AutomationWorkflow automationWorkflow = new AutomationWorkflow(
+                executiveRuntime, new AutomationRequestParser(), new AutomationPlanBuilder());
         SkillManager skillManager = SkillManager.loadDefault(toolManager);
         IntentRecognizer intentRecognizer = new IntentRecognizer(
                 httpClient, skillManager.capabilityRegistry());
@@ -280,7 +338,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, foodOrderWorkflow,
                 taxiWorkflow, memoryService, todoService,
                 webSearchService, newsSearchService, bilibiliSearchService, mediaKnowledgeService,
-                qqMailService, visualCardWorkflow, ragContextService);
+                qqMailService, visualCardWorkflow, ragContextService, executiveRuntime, automationWorkflow);
         MessageProcessor messageProcessor = new MessageProcessor(
                 chatHistory, sessions, audioHistory, documentSessions,
                 audioService, imageService, documentService, memoryService,
@@ -299,12 +357,15 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 messageProcessor, replySender, chatService, calendarService,
                 visualDeckSender, loginBriefingService, welcomeHandler,
                 new DailyDashboardServer(dashboardService), sessionManagementServer,
-                expressHttpServer, expressPageService);
+                expressHttpServer, expressPageService, executiveRuntime);
+        AutomationConsoleServer automationConsoleServer = new AutomationConsoleServer(executiveRuntime);
         sessionManagementServer.start();
+        automationConsoleServer.start();
+        executiveRuntime.start();
         return new ApplicationBootstrap(
                 dispatcher, new WechatMessageAdapter(), new MessageSerialExecutor(),
                 new LoginQrPage(), new SdkResumeContextStore(), chatHistory,
-                MySqlStore.getInstance(), sessionManagementServer);
+                MySqlStore.getInstance(), sessionManagementServer, executiveRuntime, automationConsoleServer);
     }
 
     public MessageDispatcher messageDispatcher() {
@@ -340,6 +401,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
 
     @Override
     public void close() {
+        automationConsoleServer.close();
+        executiveRuntime.close();
         sessionManagementServer.close();
         messageExecutor.close();
         messageDispatcher.close();
