@@ -12,6 +12,9 @@ import com.example.ilink.application.command.CommandHandler;
 import com.example.ilink.application.command.CommandRouter;
 import com.example.ilink.application.conversation.AudioHistoryStore;
 import com.example.ilink.application.conversation.ContextManager;
+import com.example.ilink.application.conversation.ConversationContextProvider;
+import com.example.ilink.application.conversation.KnowledgeContextProvider;
+import com.example.ilink.application.conversation.MemoryContextProvider;
 import com.example.ilink.application.conversation.NewSessionService;
 import com.example.ilink.application.welcome.WelcomeHandler;
 import com.example.ilink.application.conversation.CalendarSessionStore;
@@ -115,6 +118,8 @@ import com.example.ilink.capabilities.media.BangumiService;
 import com.example.ilink.capabilities.media.LrcLibService;
 import com.example.ilink.capabilities.media.MediaKnowledgeService;
 import com.example.ilink.capabilities.media.MusicBrainzService;
+import com.example.ilink.capabilities.knowledge.KnowledgeQueryService;
+import com.example.ilink.capabilities.knowledge.tool.KnowledgeQueryTool;
 import com.example.ilink.capabilities.memory.MemoryService;
 import com.example.ilink.capabilities.persona.PersonaSwitchTool;
 import com.example.ilink.capabilities.planning.DateTimeTool;
@@ -204,9 +209,12 @@ public final class ApplicationBootstrap implements AutoCloseable {
         DocumentAiService documentAiService = new DocumentAiService(httpClient, chatHistory, retriever);
         MemoryService memoryService = new MemoryService();
         MemoryExtractor memoryExtractor = new MemoryExtractor(memoryService, httpClient);
-        ContextManager contextManager = new ContextManager(sessions, memoryService);
+        ConversationContextProvider conversationProvider = new ConversationContextProvider(sessions);
+        MemoryContextProvider memoryProvider = new MemoryContextProvider(memoryService);
+        KnowledgeContextProvider knowledgeProvider = new KnowledgeContextProvider(ragContextService);
+        ContextManager contextManager = new ContextManager(conversationProvider, memoryProvider, knowledgeProvider);
         ChatService chatService = new ChatService(
-                httpClient, chatHistory, sessions, memoryService, ragContextService);
+                httpClient, chatHistory, sessions, contextManager);
 
         AudioService audioService = new AudioService(httpClient);
         DocumentService documentService = new DocumentService(new VisionService(httpClient));
@@ -279,6 +287,9 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 .register(new ResearchAnalysisTool(automationAnalysis))
                 .register(new AutomationReportTool());
 
+        KnowledgeQueryService knowledgeQueryService = new KnowledgeQueryService(retriever);
+        toolManager.register(new KnowledgeQueryTool(knowledgeQueryService));
+
         installConfiguredMcpTools(httpClient, toolManager);
         ExecutiveTaskStore executiveStore = new ExecutiveTaskStore();
         ExecutionLogService executionLogs = new ExecutionLogService(executiveStore);
@@ -339,6 +350,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 taxiWorkflow, memoryService, todoService,
                 webSearchService, newsSearchService, bilibiliSearchService, mediaKnowledgeService,
                 qqMailService, visualCardWorkflow, ragContextService, executiveRuntime, automationWorkflow);
+                qqMailService, visualCardWorkflow);
         MessageProcessor messageProcessor = new MessageProcessor(
                 chatHistory, sessions, audioHistory, documentSessions,
                 audioService, imageService, documentService, memoryService,

@@ -1,33 +1,48 @@
 package com.example.ilink.application.conversation;
 
-import com.example.ilink.capabilities.memory.MemoryService;
-import com.example.ilink.platform.persistence.MySqlStore;
-
 import java.util.List;
 
 /**
  * 统一触发用户级上下文加载。
- * ChatService 和路由层各自按需读取这些资料，避免把旧会话文本混入新会话。
+ * 通过三个 Provider 分别构建会话上下文、记忆上下文和知识上下文，
+ * ChatService 和路由层各自按需读取，避免直接依赖底层服务。
  */
 public final class ContextManager {
 
-    private final UserSessionStore sessions;
-    private final MemoryService memoryService;
-    private final MySqlStore database;
+    private final ConversationContextProvider conversationProvider;
+    private final MemoryContextProvider memoryProvider;
+    private final KnowledgeContextProvider knowledgeProvider;
 
-    public ContextManager(UserSessionStore sessions, MemoryService memoryService) {
-        this.sessions = sessions;
-        this.memoryService = memoryService;
-        this.database = MySqlStore.getInstance();
+    public ContextManager(ConversationContextProvider conversationProvider,
+                          MemoryContextProvider memoryProvider,
+                          KnowledgeContextProvider knowledgeProvider) {
+        this.conversationProvider = conversationProvider;
+        this.memoryProvider = memoryProvider;
+        this.knowledgeProvider = knowledgeProvider;
     }
 
+    public ConversationContext buildConversation(String userId) {
+        return conversationProvider.build(userId);
+    }
+
+    public MemoryContext buildMemory(String userId) {
+        return memoryProvider.build(userId);
+    }
+
+    public KnowledgeContext buildKnowledge(String userId, String query) {
+        return knowledgeProvider.build(userId, query);
+    }
+
+    /** @deprecated 迁移期兼容，新代码请使用各 build* 方法。 */
+    @Deprecated
     public ContextData buildContext(String userId) {
-        ConversationSession session = sessions.getCurrentSession(userId);
-        String sessionId = session.sessionId();
-        return new ContextData(sessionId, sessions.getPersonaPrompt(userId), memoryService.prompt(userId),
-                database.loadSessionSummary(sessionId), database.loadSessionMessages(sessionId, 20));
+        ConversationContext conv = buildConversation(userId);
+        MemoryContext mem = buildMemory(userId);
+        return new ContextData(conv.sessionId(), conv.persona(), mem.memories(),
+                conv.summary(), conv.recentMessages());
     }
 
+    @Deprecated
     public record ContextData(String sessionId, String persona, String memories, String summary,
-                              List<MySqlStore.ChatEntry> recentMessages) { }
+                              List<com.example.ilink.platform.persistence.MySqlStore.ChatEntry> recentMessages) { }
 }
