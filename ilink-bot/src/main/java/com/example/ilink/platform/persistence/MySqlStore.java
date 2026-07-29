@@ -8,6 +8,9 @@ import com.example.ilink.capabilities.calendar.ReminderDelivery;
 import com.example.ilink.capabilities.planning.TaskPlan;
 import com.example.ilink.capabilities.planning.TodoItem;
 import com.example.ilink.capabilities.memory.UserMemory;
+import com.google.gson.Gson;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -31,6 +34,7 @@ public final class MySqlStore implements AutoCloseable {
     private final boolean enabled;
     private volatile boolean available;
     private DatabaseConnectionPool connectionPool;
+    private final Gson gson = new Gson();
 
     private MySqlStore() {
         enabled = Config.DATABASE_ENABLED;
@@ -932,7 +936,96 @@ public final class MySqlStore implements AutoCloseable {
         }
     }
 
-    /** 创建一个绑定到当前 bot 的自定义扫码二维码。 */
+    /** 判断当前用户是否已经索引过相同内容。 */
+    public boolean hasKnowledgeDocument(String userId, String contentHash) {
+        if (!isAvailable()) return false;
+        String sql = "SELECT 1 FROM knowledge_documents WHERE bot_id = ? AND user_id = ? AND content_hash = ?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, userId);
+            statement.setString(3, contentHash);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next();
+            }
+        } catch (SQLException error) {
+            logFailure("检查知识文档", error);
+            return false;
+        }
+    }
+
+    /** 原子保存文档元数据和全部向量片段，避免只落下一半索引。 */
+    public void saveKnowledgeDocument(String userId, String documentId, String fileName,
+                                      String contentHash, List<KnowledgeChunkRow> chunks) {
+        if (!isAvailable()) return;
+        String documentSql = "INSERT INTO knowledge_documents "
+                + "(id, bot_id, user_id, file_name, content_hash) VALUES (?, ?, ?, ?, ?)";
+        String chunkSql = "INSERT INTO knowledge_chunks "
+                + "(id, document_id, bot_id, user_id, file_name, chunk_index, content, embedding) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+        try (Connection connection = openConnection()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement document = connection.prepareStatement(documentSql);
+                 PreparedStatement chunk = connection.prepareStatement(chunkSql)) {
+                document.setString(1, documentId);
+                document.setString(2, Config.DATABASE_BOT_ID);
+                document.setString(3, userId);
+                document.setString(4, fileName);
+                document.setString(5, contentHash);
+                document.executeUpdate();
+                for (KnowledgeChunkRow row : chunks) {
+                    chunk.setString(1, row.id());
+                    chunk.setString(2, documentId);
+                    chunk.setString(3, Config.DATABASE_BOT_ID);
+                    chunk.setString(4, userId);
+                    chunk.setString(5, row.fileName());
+                    chunk.setInt(6, row.chunkIndex());
+                    chunk.setString(7, row.content());
+                    chunk.setString(8, gson.toJson(row.embedding()));
+                    chunk.addBatch();
+                }
+                chunk.executeBatch();
+                connection.commit();
+            } catch (SQLException error) {
+                connection.rollback();
+                throw error;
+            }
+        } catch (SQLException error) {
+            logFailure("保存知识索引", error);
+        }
+    }
+
+    /** 加载指定用户的全部知识片段，查询条件同时包含 bot_id 和 user_id。 */
+    public List<KnowledgeChunkRow> loadKnowledgeChunks(String userId) {
+        if (!isAvailable()) return List.of();
+        String sql = "SELECT c.id, c.document_id, d.content_hash, c.file_name, c.chunk_index, "
+                + "c.content, c.embedding FROM knowledge_chunks c "
+                + "JOIN knowledge_documents d ON d.id = c.document_id AND d.bot_id = c.bot_id "
+                + "WHERE c.bot_id = ? AND c.user_id = ? ORDER BY c.document_id, c.chunk_index";
+        List<KnowledgeChunkRow> chunks = new ArrayList<>();
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, userId);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    List<Float> vector = new ArrayList<>();
+                    for (JsonElement value : JsonParser.parseString(result.getString("embedding")).getAsJsonArray()) {
+                        vector.add(value.getAsFloat());
+                    }
+                    chunks.add(new KnowledgeChunkRow(result.getString("id"),
+                            result.getString("document_id"), result.getString("content_hash"),
+                            result.getString("file_name"), result.getInt("chunk_index"),
+                            result.getString("content"), vector));
+                }
+            }
+        } catch (Exception error) {
+            logFailure("加载知识索引", error);
+        }
+        return chunks;
+    }
+
+    /** 创建应用所需的数据表。 */
     private void initializeTables() throws SQLException {
         try (Connection connection = openConnection();
              Statement statement = connection.createStatement()) {
@@ -1079,6 +1172,29 @@ public final class MySqlStore implements AutoCloseable {
                     + "UNIQUE KEY uk_user_memory_key (bot_id, user_id, memory_key),"
                     + "INDEX idx_user_memories (bot_id, user_id, status, updated_at)"
                     + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS knowledge_documents ("
+                    + "id VARCHAR(64) PRIMARY KEY,"
+                    + "bot_id VARCHAR(128) NOT NULL,"
+                    + "user_id VARCHAR(255) NOT NULL,"
+                    + "file_name VARCHAR(500) NOT NULL,"
+                    + "content_hash CHAR(64) NOT NULL,"
+                    + "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+                    + "UNIQUE KEY uk_knowledge_document (bot_id, user_id, content_hash),"
+                    + "INDEX idx_knowledge_user (bot_id, user_id, created_at)"
+                    + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS knowledge_chunks ("
+                    + "id VARCHAR(128) PRIMARY KEY,"
+                    + "document_id VARCHAR(64) NOT NULL,"
+                    + "bot_id VARCHAR(128) NOT NULL,"
+                    + "user_id VARCHAR(255) NOT NULL,"
+                    + "file_name VARCHAR(500) NOT NULL,"
+                    + "chunk_index INT NOT NULL,"
+                    + "content LONGTEXT NOT NULL,"
+                    + "embedding LONGTEXT NOT NULL,"
+                    + "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+                    + "INDEX idx_knowledge_chunks_user (bot_id, user_id, document_id),"
+                    + "UNIQUE KEY uk_knowledge_chunk (document_id, chunk_index)"
+                    + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
 
             // ========== v2.0 新增表 ==========
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS user ("
@@ -1170,5 +1286,9 @@ public final class MySqlStore implements AutoCloseable {
     public record SessionRow(String sessionId, String wechatId, String title, String status,
                              LocalDateTime lastActiveTime, LocalDateTime createdTime) {
     }
+
+    public record KnowledgeChunkRow(String id, String documentId, String contentHash,
+                                    String fileName, int chunkIndex, String content,
+                                    List<Float> embedding) { }
 
 }

@@ -574,7 +574,6 @@ public final class DocumentAiService {
             String contextText;
             if (retriever != null) {
                 try {
-                    retriever.indexDocument(userId, fileName, documentText);
                     String ragContext = retriever.buildContext(userId, userMessage, 3);
                     contextText = ragContext.isEmpty() ? documentText : ragContext;
                 } catch (Exception e) {

@@ -28,6 +28,7 @@ import com.example.ilink.application.messaging.ReplySender;
 import com.example.ilink.application.messaging.UserRequestHandler;
 import com.example.ilink.application.routing.IntentRecognizer;
 import com.example.ilink.application.routing.RoutePlanReviewer;
+import com.example.ilink.application.skill.SkillManager;
 import com.example.ilink.application.tooling.ToolManager;
 import com.example.ilink.application.tooling.mcp.HttpMcpClient;
 import com.example.ilink.application.tooling.mcp.McpServerRegistry;
@@ -64,6 +65,7 @@ import com.example.ilink.capabilities.documents.DocumentService;
 import com.example.ilink.capabilities.documents.PlanDocumentTool;
 import com.example.ilink.capabilities.documents.rag.EmbeddingService;
 import com.example.ilink.capabilities.documents.rag.Retriever;
+import com.example.ilink.capabilities.documents.rag.RagContextService;
 import com.example.ilink.capabilities.documents.rag.VectorStore;
 import com.example.ilink.capabilities.express.ExpressPageService;
 import com.example.ilink.capabilities.express.ExpressService;
@@ -166,12 +168,13 @@ public final class ApplicationBootstrap implements AutoCloseable {
         PlanSessionStore planSessions = new PlanSessionStore();
 
         Retriever retriever = new Retriever(new EmbeddingService(httpClient), new VectorStore());
+        RagContextService ragContextService = new RagContextService(retriever);
         DocumentAiService documentAiService = new DocumentAiService(httpClient, chatHistory, retriever);
         MemoryService memoryService = new MemoryService();
         MemoryExtractor memoryExtractor = new MemoryExtractor(memoryService, httpClient);
         ContextManager contextManager = new ContextManager(sessions, memoryService);
-        IntentRecognizer intentRecognizer = new IntentRecognizer(httpClient, chatHistory, memoryService, sessions);
-        ChatService chatService = new ChatService(httpClient, chatHistory, sessions, memoryService);
+        ChatService chatService = new ChatService(
+                httpClient, chatHistory, sessions, memoryService, ragContextService);
 
         AudioService audioService = new AudioService(httpClient);
         DocumentService documentService = new DocumentService(new VisionService(httpClient));
@@ -234,6 +237,9 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 .register(new ExpressTool(expressService, expressPageService));
 
         installConfiguredMcpTools(httpClient, toolManager);
+        SkillManager skillManager = SkillManager.loadDefault(toolManager);
+        IntentRecognizer intentRecognizer = new IntentRecognizer(
+                httpClient, skillManager.capabilityRegistry());
 
         ReplySender replySender = new ReplySender(
                 audioService, mediaStore, audioHistory, toolManager, sessions, chatHistory);
@@ -274,12 +280,12 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, foodOrderWorkflow,
                 taxiWorkflow, memoryService, todoService,
                 webSearchService, newsSearchService, bilibiliSearchService, mediaKnowledgeService,
-                qqMailService, visualCardWorkflow);
+                qqMailService, visualCardWorkflow, ragContextService);
         MessageProcessor messageProcessor = new MessageProcessor(
                 chatHistory, sessions, audioHistory, documentSessions,
                 audioService, imageService, documentService, memoryService,
                 mediaStore, replySender, new CapabilityDispatcher(requestHandler),
-                commandRouter, commandHandler, memoryExtractor);
+                commandRouter, commandHandler, memoryExtractor, ragContextService);
 
         LoginBriefingService loginBriefingService = new LoginBriefingService(
                 weatherService, calendarService, todoService, planSessions, sessions,

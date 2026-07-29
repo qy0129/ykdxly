@@ -1,0 +1,16 @@
+{
+  "name": "web",
+  "description": "联网检索、媒体资料和消息查询",
+  "version": "1.0.0",
+  "enabled": true,
+  "requiresApproval": false,
+  "toolNames": ["query_express"],
+  "capabilities": [
+    {"name":"bilibili_search","description":"搜索视频、课程、音乐或剧集","parameterHint":"bilibili_query, bilibili_category","interactive":false},
+    {"name":"media_lookup","description":"查询动漫、剧集、歌手、专辑或歌词资料","parameterHint":"media_query, media_category","interactive":false},
+    {"name":"email_query","description":"查询QQ邮箱","parameterHint":"email_action, email_keyword","interactive":false},
+    {"name":"express_query","description":"查询快递、物流或运单","parameterHint":"action_text","interactive":true},
+    {"name":"news_search","description":"查询最新新闻、资讯或热搜","parameterHint":"action_text","interactive":false},
+    {"name":"web_search","description":"联网搜索网页或实时信息","parameterHint":"action_text","interactive":false}
+  ]
+}

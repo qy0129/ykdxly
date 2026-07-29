@@ -1,0 +1,15 @@
+{
+  "name": "travel-food",
+  "description": "出行、地点和餐饮服务",
+  "version": "1.0.0",
+  "enabled": true,
+  "requiresApproval": false,
+  "toolNames": ["get_weather", "nearby_food_search", "food_order", "food_delivery_recommendation"],
+  "capabilities": [
+    {"name":"weather","description":"查询指定地点和时段的天气","parameterHint":"weather_location, weather_day","interactive":false},
+    {"name":"travel_plan","description":"路线、导航和多站点出行安排","parameterHint":"travel_origin, travel_destination, travel_stops, travel_departure_time","interactive":true},
+    {"name":"taxi_trip","description":"打车、叫车、打车报价及订单操作","parameterHint":"travel_origin, travel_destination, origin_city, destination_city","interactive":true},
+    {"name":"nearby_food","description":"搜索某地点附近餐厅或食物","parameterHint":"nearby_location, meal_keyword, nearby_action","interactive":true},
+    {"name":"food_order","description":"指定餐厅或品牌点外卖","parameterHint":"food_order_restaurants, nearby_location","interactive":true}
+  ]
+}

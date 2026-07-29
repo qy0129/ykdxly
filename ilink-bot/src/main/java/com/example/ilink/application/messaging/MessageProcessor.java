@@ -13,6 +13,8 @@ import com.example.ilink.capabilities.audio.AudioService;
 import com.example.ilink.capabilities.audio.AudioSource;
 import com.example.ilink.capabilities.documents.DocumentRecord;
 import com.example.ilink.capabilities.documents.DocumentService;
+import com.example.ilink.capabilities.documents.rag.RagContextService;
+import com.example.ilink.capabilities.documents.rag.Retriever;
 import com.example.ilink.capabilities.image.GeneratedImage;
 import com.example.ilink.capabilities.image.ImageService;
 import com.example.ilink.capabilities.memory.MemoryService;
@@ -40,6 +42,7 @@ public final class MessageProcessor {
     private final CommandRouter commandRouter;
     private final CommandHandler commandHandler;
     private final MemoryExtractor memoryExtractor;
+    private final RagContextService ragContextService;
 
     public MessageProcessor(ChatHistoryStore chatHistory, UserSessionStore sessions,
                             AudioHistoryStore audioHistory, DocumentSessionStore documentSessions,
@@ -48,7 +51,7 @@ public final class MessageProcessor {
                              MediaStore mediaStore, ReplySender replySender,
                              CapabilityDispatcher capabilityDispatcher,
                              CommandRouter commandRouter, CommandHandler commandHandler,
-                             MemoryExtractor memoryExtractor) {
+                             MemoryExtractor memoryExtractor, RagContextService ragContextService) {
         this.chatHistory = chatHistory;
         this.sessions = sessions;
         this.audioHistory = audioHistory;
@@ -63,6 +66,7 @@ public final class MessageProcessor {
         this.commandRouter = commandRouter;
         this.commandHandler = commandHandler;
         this.memoryExtractor = memoryExtractor;
+        this.ragContextService = ragContextService;
     }
 
     public void process(AgentContext context, IncomingMessage message) {
@@ -216,6 +220,15 @@ public final class MessageProcessor {
             DocumentService.ParsedDocument parsed = documentService.parse(saved, fileName);
             documentSessions.set(userId, new DocumentRecord(
                     parsed.fileName(), parsed.extension(), saved.toString(), parsed.text()));
+            try {
+                Retriever.IndexResult index = ragContextService.indexDocument(
+                        userId, parsed.fileName(), parsed.text());
+                System.out.println(index.indexed()
+                        ? "[RAG] 已索引文件：" + fileName + "，片段数=" + index.chunkCount()
+                        : "[RAG] 文件内容已存在，跳过重复索引：" + fileName);
+            } catch (Exception error) {
+                System.err.println("[RAG] 文件索引失败，文件问答继续使用全文模式: " + error.getMessage());
+            }
             chatHistory.addMedia(userId, "文件 " + fileName, saved.toString(), "文件已解析，可进行总结或问答");
             replySender.sendReply(client, userId, "已收到并解析文件：" + fileName
                     + "。你可以让我总结文件，或直接提问文件内容。");

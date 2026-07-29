@@ -14,7 +14,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
-public final class EmbeddingService {
+public class EmbeddingService {
 
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
