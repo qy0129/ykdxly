@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
 import java.net.http.HttpClient;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -12,8 +14,15 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 class IntentRecognizerJsonTest {
 
     @Test
-    void explicitReminderUsesLocalCalendarRouteWithoutCallingTheModel() {
-        IntentRecognizer recognizer = new IntentRecognizer(HttpClient.newHttpClient());
+    void reminderIsSplitAndAssignedThroughTheSameRoutePipeline() {
+        List<String> responses = List.of(
+                "{\"requirements\":[{\"id\":\"r1\",\"text\":\"明天15点提醒喝水\",\"depends_on\":[]}]}",
+                "{\"actions\":[{\"requirement_id\":\"r1\",\"intent\":\"calendar_event\","
+                        + "\"calendar_action\":\"create\",\"calendar_title\":\"喝水\","
+                        + "\"calendar_time\":\"明天 15 点\"}]}"
+        );
+        AtomicInteger index = new AtomicInteger();
+        IntentRecognizer recognizer = new IntentRecognizer(body -> responses.get(index.getAndIncrement()));
 
         IntentPlan plan = recognizer.recognize("user", "明天 15 点提醒我该喝水了",
                 new IntentContext(false, false, false, false, false));
@@ -22,7 +31,8 @@ class IntentRecognizerJsonTest {
         assertEquals("calendar_event", plan.actions().getFirst().route().intent());
         assertEquals("create", plan.actions().getFirst().route().calendarAction());
         assertEquals("喝水", plan.actions().getFirst().route().calendarTitle());
-        assertEquals("明天 15 点提醒我该喝水了", plan.actions().getFirst().route().calendarTime());
+        assertEquals("明天 15 点", plan.actions().getFirst().route().calendarTime());
+        assertEquals(2, index.get());
     }
 
     @Test

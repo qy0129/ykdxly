@@ -11,7 +11,6 @@ import com.example.ilink.application.workflow.travel.TravelWorkflow;
 import com.example.ilink.application.workflow.visual.VisualCardWorkflow;
 
 import com.example.ilink.bootstrap.Config;
-import com.example.ilink.application.agent.AgentLoop;
 import com.example.ilink.application.conversation.ChatHistoryStore;
 import com.example.ilink.application.conversation.ContextManager;
 import com.example.ilink.application.conversation.DocumentSessionStore;
@@ -40,6 +39,7 @@ import com.example.ilink.application.routing.IntentPolicy;
 import com.example.ilink.application.routing.IntentRecognizer;
 import com.example.ilink.application.routing.IntentResult;
 import com.example.ilink.application.routing.RoutePlanReviewer;
+import com.example.ilink.application.routing.RoutingContext;
 import com.example.ilink.application.routing.CapabilityContractValidator;
 import com.example.ilink.application.routing.DrawSizeParser;
 import com.example.ilink.platform.media.MediaStore;
@@ -65,11 +65,14 @@ import com.google.gson.JsonObject;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * 用户文本请求处理器。
@@ -82,6 +85,8 @@ public final class UserRequestHandler {
 
     private static final java.util.regex.Pattern WEATHER_CURRENT_LOCATION = java.util.regex.Pattern.compile(
             "^\\s*我(?:现在|目前|当前)?在\\s*([^，,。！？?、]{2,40})");
+    private static final java.util.regex.Pattern WEATHER_MARKER = java.util.regex.Pattern.compile(
+            "(天气预报|天气怎么样|天气如何|查天气|查询天气|气温多少|温度多少|会不会下雨|天气|气温|温度)");
 
     private final ChatHistoryStore chatHistory;
     private final UserSessionStore sessions;
@@ -92,7 +97,6 @@ public final class UserRequestHandler {
     private final MediaStore mediaStore;
     private final ReplySender replySender;
     private final ToolManager toolManager;
-    private final AgentLoop agentLoop;
     private final RoutePlanReviewer routePlanReviewer;
     private final ContextManager contextManager;
     private final PlanWorkflow planWorkflow;
@@ -120,7 +124,7 @@ public final class UserRequestHandler {
                               IntentRecognizer intentRecognizer, ChatService chatService,
                               WeatherService weatherService, MediaStore mediaStore,
                               ReplySender replySender, ToolManager toolManager,
-                              AgentLoop agentLoop, RoutePlanReviewer routePlanReviewer,
+                              RoutePlanReviewer routePlanReviewer,
                               ContextManager contextManager,
                               PlanWorkflow planWorkflow, CalculatorService calculatorService,
                                CalendarWorkflow calendarWorkflow, HealthDietWorkflow healthDietWorkflow,
@@ -141,7 +145,6 @@ public final class UserRequestHandler {
         this.mediaStore = mediaStore;
         this.replySender = replySender;
         this.toolManager = toolManager;
-        this.agentLoop = agentLoop;
         this.routePlanReviewer = routePlanReviewer;
         this.contextManager = contextManager;
         this.planWorkflow = planWorkflow;
@@ -165,8 +168,7 @@ public final class UserRequestHandler {
     public void handle(AgentContext agentContext, String text) throws Exception {
         ReplyChannel client = agentContext.replyChannel();
         String userId = agentContext.principalId();
-        contextManager.buildContext(userId);
-        if (handleFailedActionRetry(client, userId, text)) return;
+        if (handleFailedActionRetry(agentContext, text)) return;
 
         UserSessionStore.PendingFileExport pendingFileExport = sessions.getPendingFileExport(userId);
         if (pendingFileExport != null) {
@@ -174,7 +176,7 @@ public final class UserRequestHandler {
                 sessions.clearPendingFileExport(userId);
                 handleDocumentAction(client, userId, pendingFileExport.userText(),
                         pendingFileExport.route(), IntentPolicy.explicitOutputFileType(text));
-                resumeActionPlan(client, userId);
+                resumeActionPlan(agentContext);
                 return;
             }
             if ("取消".equals(text.trim())) {
@@ -185,24 +187,27 @@ public final class UserRequestHandler {
             }
         }
 
-        if (handlePendingDrawContinuation(client, userId, text)) return;
+        if (handlePendingDrawContinuation(agentContext, text)) return;
 
         if (hasBlockingPending(userId) && !acceptsBlockingReply(userId, text)) {
             clearBlockingPending(userId);
             actionPlanExecutor.cancel(userId);
         }
 
-        if (handleMemoryCommand(client, userId, text)) return;
         if (handleRepeatCommand(client, userId, text)) return;
         if (IntentPolicy.isCasualGreeting(text)) {
             nearbyFoodWorkflow.clearPending(userId);
             replySender.sendReply(client, userId, "你好，我在。有什么想让我帮你处理的？");
             return;
         }
-        if (visualCardWorkflow.hasPending(userId) && visualCardWorkflow.handle(agentContext, text)) return;
-        if (visualCardWorkflow.handle(agentContext, text)) return;
-        if (handlePendingExpress(client, userId, text)) return;
-        if (handleDirectCommand(client, userId, text)) return;
+        if (visualCardWorkflow.hasPending(userId) && visualCardWorkflow.handle(agentContext, text)) {
+            resumeActionPlan(agentContext);
+            return;
+        }
+        if (handlePendingExpress(client, userId, text)) {
+            resumeActionPlan(agentContext);
+            return;
+        }
         if (IntentPolicy.isExplicitImageEdit(text) && !hasCurrentImage(userId)) {
             replySender.sendReply(client, userId,
                     "请先发送需要修改的图片。发送后直接告诉我怎么改，例如“把头发改成白色”。");
@@ -217,17 +222,17 @@ public final class UserRequestHandler {
         // 只对未完成会话使用本地状态机；所有新请求都必须先经过大模型语义路由。
         if (sessions.hasPendingWeatherLocations(userId)) {
             handleWeatherLocationSelection(client, userId, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(agentContext);
             return;
         }
         if (planWorkflow.hasPendingPlan(userId)) {
             planWorkflow.completePendingPlan(agentContext, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(agentContext);
             return;
         }
         if (planWorkflow.hasPendingCalendarSync(userId)) {
             planWorkflow.completeCalendarSync(agentContext, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(agentContext);
             return;
         }
         if (calendarWorkflow.hasPending(userId)) {
@@ -239,7 +244,8 @@ public final class UserRequestHandler {
                         sessions.peekPendingDraw(userId) != null,
                         documentSessions.get(userId) != null,
                         true);
-                IntentPlan pendingPlan = intentRecognizer.recognize(userId, text, pendingContext);
+                IntentPlan pendingPlan = intentRecognizer.recognize(userId, text,
+                        buildRoutingContext(userId, pendingContext));
                 if (pendingPlan != null) {
                     pendingRoute = pendingPlan.actions().stream()
                             .map(IntentAction::route)
@@ -249,32 +255,32 @@ public final class UserRequestHandler {
                 }
             }
             calendarWorkflow.completePending(agentContext, text, pendingRoute);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(agentContext);
             return;
         }
         if (healthDietWorkflow.hasPending(userId)) {
             healthDietWorkflow.handlePending(agentContext, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(agentContext);
             return;
         }
         if (travelWorkflow.hasPendingLocation(userId)) {
             travelWorkflow.handleLocationSelection(agentContext, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(agentContext);
             return;
         }
         if (nearbyFoodWorkflow.hasPendingLocation(userId)) {
             nearbyFoodWorkflow.handleLocationSelection(agentContext, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(agentContext);
             return;
         }
         if (foodOrderWorkflow.hasPending(userId)) {
             foodOrderWorkflow.handlePending(agentContext, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(agentContext);
             return;
         }
         if (taxiWorkflow.hasPending(userId)) {
             taxiWorkflow.handlePending(agentContext, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(agentContext);
             return;
         }
 
@@ -285,12 +291,8 @@ public final class UserRequestHandler {
                 sessions.peekPendingDraw(userId) != null,
                 documentSessions.get(userId) != null,
                 false);
-        AgentLoop.Outcome agentOutcome = agentLoop.run(agentContext, text);
-        if (agentOutcome.handled() && !isAgentControlSignal(agentOutcome.reply())) {
-            replySender.sendReply(client, userId, agentOutcome.reply());
-            return;
-        }
-        IntentPlan plan = intentRecognizer.recognize(userId, text, intentContext);
+        IntentPlan plan = intentRecognizer.recognize(userId, text,
+                buildRoutingContext(userId, intentContext));
         if (plan == null || plan.isEmpty()) {
             replySender.sendReply(client, userId, "网络波动了，请再发一次～");
             return;
@@ -312,13 +314,9 @@ public final class UserRequestHandler {
                     + " 项要求：" + actionNames + "。现在依次处理。");
         }
         actionPlanExecutor.start(userId, plan,
-                action -> executeAction(client, userId, action),
+                action -> executeAction(agentContext, action),
                 () -> hasBlockingPending(userId),
                 (action, error) -> handleActionFailure(client, userId, action, error));
-    }
-
-    private boolean isAgentControlSignal(String reply) {
-        return reply != null && "DELEGATE".equalsIgnoreCase(reply.trim());
     }
 
     /** 重发上一条回复，不调用大模型，避免被误识别为邮箱查询。 */
@@ -337,8 +335,9 @@ public final class UserRequestHandler {
     }
 
     /** 待选尺寸属于封闭状态，直接本地续办，不再请求路由模型。 */
-    private boolean handlePendingDrawContinuation(ReplyChannel client, String userId,
-                                                  String text) throws Exception {
+    private boolean handlePendingDrawContinuation(AgentContext context, String text) throws Exception {
+        ReplyChannel client = context.replyChannel();
+        String userId = context.principalId();
         UserSessionStore.PendingDrawRequest pending = sessions.getPendingDraw(userId);
         if (pending == null) return false;
 
@@ -346,7 +345,7 @@ public final class UserRequestHandler {
         if (!"none".equals(imageSize)) {
             sessions.clearPendingDraw(userId);
             generatePendingImage(client, userId, pending, imageSize);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(context);
             return true;
         }
         if (DrawSizeParser.isCancel(text)) {
@@ -367,7 +366,7 @@ public final class UserRequestHandler {
         return reference != null && !reference.path().isBlank() && Files.isRegularFile(Path.of(reference.path()));
     }
 
-    /** 高确定性的记忆指令直接执行，避免继续扩大通用路由模型负担。 */
+    /** 执行已经由统一路由识别出的长期记忆动作。 */
     private boolean handleMemoryCommand(ReplyChannel client, String userId, String text) throws Exception {
         String normalized = text.trim();
         if (normalized.matches("^(请)?(帮我)?记住.*") || normalized.startsWith("以后记得")) {
@@ -426,48 +425,33 @@ public final class UserRequestHandler {
         }
     }
 
-    /** 待办、新闻、联网搜索和天气使用高确定性本地路由，避免被通用模型误分流。 */
-    private boolean handleDirectCommand(ReplyChannel client, String userId, String text) throws Exception {
+    /** 执行已经由统一路由识别出的待办动作。 */
+    private void handleTodoAction(ReplyChannel client, String userId, String text) throws Exception {
         String normalized = text == null ? "" : text.trim();
-        if (normalized.isBlank()) return false;
+        if (normalized.isBlank()) {
+            replySender.sendReply(client, userId, "请告诉我要创建、查看、完成还是删除待办。");
+            return;
+        }
 
         if (normalized.matches("^(查看|查询|列出|打开)?(我的)?待办(事项|列表)?$|^我还有什么待办.*")) {
             replySender.sendReply(client, userId, todoService.list(userId));
-            return true;
+            return;
         }
         if (normalized.matches("^(完成|办完|搞定)(这个|最后一个|最新的)?待办.*")) {
             String keyword = normalized.replaceFirst("^(完成|办完|搞定)(这个|最后一个|最新的)?待办[：:，, ]*", "").trim();
             replySender.sendReply(client, userId, todoService.complete(userId, keyword));
-            return true;
+            return;
         }
         if (normalized.matches("^(取消|删除)(这个|最后一个|最新的)?待办.*")) {
             String keyword = normalized.replaceFirst("^(取消|删除)(这个|最后一个|最新的)?待办[：:，, ]*", "").trim();
             replySender.sendReply(client, userId, todoService.cancel(userId, keyword));
-            return true;
+            return;
         }
         if (normalized.matches("^(请)?(帮我)?(添加|新增|创建|记)(一个|个)?待办.*|^待办[：:].*")) {
             createTodo(client, userId, normalized);
-            return true;
+            return;
         }
-
-        if (isExpressCommand(normalized)) {
-            queryExpress(client, userId, normalized);
-            return true;
-        }
-
-        if (isNewsCommand(normalized)) {
-            searchNews(client, userId, normalized);
-            return true;
-        }
-        if (normalized.matches("^(请)?(帮我)?(联网搜索|联网查|上网查|网页搜索|实时搜索).*")) {
-            searchWeb(client, userId, normalized);
-            return true;
-        }
-        if (isWeatherCommand(normalized)) {
-            queryWeatherDirect(client, userId, normalized);
-            return true;
-        }
-        return false;
+        replySender.sendReply(client, userId, "请明确要创建、查看、完成还是删除待办。");
     }
 
     private boolean isExpressCommand(String text) {
@@ -613,10 +597,6 @@ public final class UserRequestHandler {
         replySender.sendReply(client, userId, "好，已经记到待办里了：" + todo.title() + dueText + "。");
     }
 
-    private boolean isNewsCommand(String text) {
-        return text.matches("^(请)?(帮我)?(查|查询|搜索|看看|获取)?(一下)?(今天|今日|最新|实时)?的?.*(新闻|资讯|热搜).*");
-    }
-
     private void searchNews(ReplyChannel client, String userId, String text) throws Exception {
         String query = text.replaceFirst("^(请)?(帮我)?(查|查询|搜索|看看|获取)?(一下)?", "")
                 .replaceAll("(今天|今日|最新|实时)?的?(新闻|资讯|热搜)", "").trim();
@@ -667,50 +647,7 @@ public final class UserRequestHandler {
         return value.length() <= maxLength ? value : value.substring(0, maxLength) + "…";
     }
 
-    private boolean isWeatherCommand(String text) {
-        return text.matches(".*(天气预报|天气怎么样|天气如何|查天气|查询天气|气温多少|温度多少|会不会下雨).*" )
-                || text.matches("^[\\p{IsHan}A-Za-z· ]{2,30}(今天|明天|后天)?(的)?(天气|气温|温度)$");
-    }
-
-    private void queryWeatherDirect(ReplyChannel client, String userId, String text) throws Exception {
-        LocalDateTime parsedDateTime = DateTimeParser.parse(text);
-        LocalDate targetDate = parsedDateTime == null ? LocalDate.now() : parsedDateTime.toLocalDate();
-        long dayOffset = java.time.temporal.ChronoUnit.DAYS.between(LocalDate.now(), targetDate);
-        if (dayOffset < 0 || dayOffset > 6) {
-            replySender.sendReply(client, userId, "目前可以查询今天起未来七天内的天气。");
-            return;
-        }
-        String period = text.contains("上午") ? "morning"
-                : text.contains("下午") ? "afternoon"
-                : text.matches(".*(晚上|今晚).*" ) ? "evening" : "day";
-        String locationName = extractWeatherLocation(text);
-        if (locationName.isBlank()) locationName = memoryService.value(userId, "home_location");
-        if (locationName.isBlank()) {
-            String currentLocation = sessions.getCurrentLocation(userId);
-            locationName = currentLocation == null ? "" : currentLocation;
-        }
-        if (locationName.isBlank()) {
-            replySender.sendReply(client, userId, "请告诉我要查询哪个城市；你也可以让我记住常住城市。");
-            return;
-        }
-        List<WeatherLocation> locations = weatherService.searchLocations(locationName);
-        if (locations.isEmpty()) {
-            replySender.sendReply(client, userId, "没有找到地点“" + locationName + "”，请补充省、市或国家。");
-            return;
-        }
-        String dayToken = targetDate + "_" + period;
-        WeatherLocation selected = WeatherService.clearlyPrimary(locations);
-        if (locations.size() > 1 && selected == null) {
-            sessions.setPendingWeatherLocations(userId, locations, dayToken);
-            replySender.sendReply(client, userId, buildWeatherLocationChoices(locations));
-            return;
-        }
-        if (selected == null) selected = locations.getFirst();
-        sessions.setCurrentLocation(userId, locationName);
-        sendWeatherReply(client, userId, text, selected, dayToken, "keep", "default");
-    }
-
-    static String extractWeatherLocation(String text) {
+    public static String extractWeatherLocation(String text) {
         if (text == null || text.isBlank()) return "";
         java.util.regex.Matcher currentLocation = WEATHER_CURRENT_LOCATION.matcher(text);
         if (currentLocation.find()) {
@@ -718,16 +655,22 @@ public final class UserRequestHandler {
                     .replaceFirst("(?:今天|明天|后天|天气|气温|温度|会不会下雨).*", "")
                     .trim();
         }
-        return text.replaceFirst("^(请)?(帮我)?(查|查询|看看|看一下)?", "")
+        java.util.regex.Matcher weatherMarker = WEATHER_MARKER.matcher(text);
+        String locationText = weatherMarker.find() ? text.substring(0, weatherMarker.start()) : text;
+        return locationText.replaceFirst("^(请)?(帮我)?(查|查询|看看|看一下)?", "")
+                .replaceFirst("^(我(?:现在|目前|当前)?在|当前位置是|我的位置是)\\s*", "")
                 .replaceAll("(今天|今日|明天|明日|后天|未来七天|未来7天)", "")
                 .replaceAll("(?:(?:\\d{4})年)?\\d{1,2}月\\d{1,2}(?:日|号)?", "")
                 .replaceAll("(上午|中午|下午|傍晚|晚上|今晚)", "")
-                .replaceAll("(的)?(天气预报|天气怎么样|天气如何|天气|气温多少|气温|温度多少|温度|会不会下雨|情况)", "")
-                .replaceAll("[？?，,。 ]+", "").trim();
+                .replaceAll("[？?，,。；;、 ]+", "")
+                .replaceFirst("的$", "")
+                .trim();
     }
 
     /** 调用一个动作对应的原有业务处理器，动作之间由统一执行器负责排序。 */
-    private void executeAction(ReplyChannel client, String userId, IntentAction action) throws Exception {
+    private void executeAction(AgentContext context, IntentAction action) throws Exception {
+        ReplyChannel client = context.replyChannel();
+        String userId = context.principalId();
         IntentResult route = action.route();
         String actionText = action.requestText();
         CapabilityContractValidator.Validation validation = capabilityValidator.validate(
@@ -738,7 +681,7 @@ public final class UserRequestHandler {
         if (!validation.allowed()) {
             System.out.println("[能力校验] 拒绝意图=" + route.intent() + "，要求=" + actionText);
             if (validation.decision() == CapabilityContractValidator.Decision.FALLBACK_CHAT) {
-                sendChatReply(client, userId, actionText, route);
+                executeChatAction(context, actionText, route);
             } else {
                 replySender.sendReply(client, userId, validation.message());
             }
@@ -749,6 +692,7 @@ public final class UserRequestHandler {
                 + "，回复方式=" + replyModeName(route.replyMode())
                 + "，音色=" + voiceStyleName(route.voiceStyle()));
         switch (route.intent()) {
+            case "chat" -> executeChatAction(context, actionText, route);
             case "draw" -> handleDraw(client, userId, actionText, route);
             case "draw_size" -> handleDrawSize(client, userId, route);
             case "persona_switch" -> handlePersonaSwitch(client, userId, actionText, route);
@@ -764,6 +708,16 @@ public final class UserRequestHandler {
             case "bilibili_search" -> searchBilibili(client, userId, route);
             case "media_lookup" -> lookupMedia(client, userId, actionText, route);
             case "email_query" -> queryEmail(client, userId, route);
+            case "todo" -> handleTodoAction(client, userId, actionText);
+            case "express_query" -> queryExpress(client, userId, actionText);
+            case "news_search" -> searchNews(client, userId, actionText);
+            case "web_search" -> searchWeb(client, userId, actionText);
+            case "memory" -> {
+                if (!handleMemoryCommand(client, userId, actionText)) executeChatAction(context, actionText, route);
+            }
+            case "visual_card" -> {
+                if (!visualCardWorkflow.handle(context, actionText)) executeChatAction(context, actionText, route);
+            }
             case "planning_capabilities" -> replySender.sendReply(client, userId, planningCapabilitiesText(),
                     route.replyMode(), route.voiceStyle());
             case "plan_adjust" -> planWorkflow.adjustPlan(client, userId, actionText, route);
@@ -785,6 +739,34 @@ public final class UserRequestHandler {
         }
     }
 
+    private void executeChatAction(AgentContext context, String text, IntentResult route) throws Exception {
+        sendChatReply(context.replyChannel(), context.principalId(), text, route);
+    }
+
+    /** 把会话、位置、时间和所有等待状态合并成一次路由快照。 */
+    private RoutingContext buildRoutingContext(String userId, IntentContext mediaContext) {
+        ContextManager.ContextData conversation = contextManager.buildContext(userId);
+        Map<String, Boolean> pending = new LinkedHashMap<>();
+        pending.put("draw_size", sessions.getPendingDraw(userId) != null);
+        pending.put("express", sessions.hasPendingExpress(userId));
+        pending.put("weather_location", sessions.hasPendingWeatherLocations(userId));
+        pending.put("task_plan", planWorkflow.hasPendingPlan(userId));
+        pending.put("calendar_sync", planWorkflow.hasPendingCalendarSync(userId));
+        pending.put("calendar", calendarWorkflow.hasPending(userId));
+        pending.put("diet", healthDietWorkflow.hasPending(userId));
+        pending.put("travel_location", travelWorkflow.hasPendingLocation(userId));
+        pending.put("nearby_food_location", nearbyFoodWorkflow.hasPendingLocation(userId));
+        pending.put("food_order", foodOrderWorkflow.hasPending(userId));
+        pending.put("taxi", taxiWorkflow.hasPending(userId));
+        pending.put("visual_card", visualCardWorkflow.hasPending(userId));
+        pending.put("file_export", sessions.hasPendingFileExport(userId));
+        return new RoutingContext(
+                conversation.persona(), conversation.memories(), conversation.summary(),
+                conversation.recentMessages(), sessions.getCurrentLocation(userId),
+                sessions.getCurrentCity(userId), ZonedDateTime.now(ZoneId.systemDefault()),
+                mediaContext, pending);
+    }
+
     private void sendChatReply(ReplyChannel client, String userId, String text,
                                IntentResult route) throws Exception {
         String reply = chatService.chat(userId, text);
@@ -796,10 +778,12 @@ public final class UserRequestHandler {
     }
 
     /** 当前补充会话结束后继续执行同一段话中尚未完成的动作。 */
-    private void resumeActionPlan(ReplyChannel client, String userId) throws Exception {
+    private void resumeActionPlan(AgentContext context) throws Exception {
+        ReplyChannel client = context.replyChannel();
+        String userId = context.principalId();
         if (hasBlockingPending(userId)) return;
         actionPlanExecutor.resume(userId,
-                action -> executeAction(client, userId, action),
+                action -> executeAction(context, action),
                 () -> hasBlockingPending(userId),
                 (action, error) -> handleActionFailure(client, userId, action, error));
     }
@@ -817,14 +801,17 @@ public final class UserRequestHandler {
                 || nearbyFoodWorkflow.hasPendingLocation(userId)
                 || foodOrderWorkflow.hasPending(userId)
                 || taxiWorkflow.hasPending(userId)
+                || visualCardWorkflow.hasPending(userId)
                 || sessions.hasPendingFileExport(userId);
     }
 
-    private boolean handleFailedActionRetry(ReplyChannel client, String userId, String text) throws Exception {
+    private boolean handleFailedActionRetry(AgentContext context, String text) throws Exception {
+        ReplyChannel client = context.replyChannel();
+        String userId = context.principalId();
         if (!actionPlanExecutor.hasFailedAction(userId)
                 || !text.trim().matches("(重试|再试一次|重试刚才失败的.*)")) return false;
         actionPlanExecutor.retryFailed(userId,
-                action -> executeAction(client, userId, action),
+                action -> executeAction(context, action),
                 (action, error) -> handleActionFailure(client, userId, action, error));
         replySender.sendReply(client, userId, "已重试刚才失败的" + "操作。" );
         return true;
@@ -856,6 +843,9 @@ public final class UserRequestHandler {
         if (taxiWorkflow.hasPending(userId)) {
             return taxiWorkflow.acceptsPendingReply(userId, value) && !looksLikeNewRequest(value);
         }
+        if (visualCardWorkflow.hasPending(userId)) {
+            return visualCardWorkflow.acceptsPendingReply(userId, value) && !looksLikeNewRequest(value);
+        }
         return sessions.hasPendingFileExport(userId) && IntentPolicy.isFileTypeAnswer(value);
     }
 
@@ -877,6 +867,7 @@ public final class UserRequestHandler {
         nearbyFoodWorkflow.clearPending(userId);
         foodOrderWorkflow.clearPending(userId);
         taxiWorkflow.clearPending(userId);
+        visualCardWorkflow.clearPending(userId);
         sessions.clearPendingFileExport(userId);
     }
 
@@ -1393,6 +1384,12 @@ public final class UserRequestHandler {
             case "bilibili_search" -> "哔哩哔哩内容";
             case "media_lookup" -> "动漫音乐资料";
             case "email_query" -> "QQ邮箱查询";
+            case "todo" -> "待办";
+            case "express_query" -> "快递查询";
+            case "news_search" -> "新闻搜索";
+            case "web_search" -> "网页搜索";
+            case "memory" -> "长期记忆";
+            case "visual_card" -> "视觉卡片";
             case "task_plan" -> "制定计划";
             case "plan_adjust" -> "调整计划";
             case "plan_progress" -> "查询计划进度";

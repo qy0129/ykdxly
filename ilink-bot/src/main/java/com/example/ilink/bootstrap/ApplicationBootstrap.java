@@ -7,7 +7,6 @@ import com.example.ilink.adapter.inbound.wechat.LoginQrPage;
 import com.example.ilink.adapter.inbound.wechat.MessageDispatcher;
 import com.example.ilink.adapter.inbound.wechat.WechatMessageAdapter;
 import com.example.ilink.application.briefing.LoginBriefingService;
-import com.example.ilink.application.agent.AgentLoop;
 import com.example.ilink.application.command.CommandHandler;
 import com.example.ilink.application.command.CommandRouter;
 import com.example.ilink.application.conversation.AudioHistoryStore;
@@ -29,7 +28,6 @@ import com.example.ilink.application.messaging.ReplySender;
 import com.example.ilink.application.messaging.UserRequestHandler;
 import com.example.ilink.application.routing.IntentRecognizer;
 import com.example.ilink.application.routing.RoutePlanReviewer;
-import com.example.ilink.application.routing.SkillRegistry;
 import com.example.ilink.application.tooling.ToolManager;
 import com.example.ilink.application.tooling.mcp.HttpMcpClient;
 import com.example.ilink.application.tooling.mcp.McpServerRegistry;
@@ -235,9 +233,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 .register(new RelationTool())
                 .register(new ExpressTool(expressService, expressPageService));
 
-        SkillRegistry skillRegistry = SkillRegistry.defaults();
         installConfiguredMcpTools(httpClient, toolManager);
-        AgentLoop agentLoop = new AgentLoop(httpClient, toolManager, skillRegistry);
 
         ReplySender replySender = new ReplySender(
                 audioService, mediaStore, audioHistory, toolManager, sessions, chatHistory);
@@ -252,7 +248,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         NewSessionService newSessionService = new NewSessionService(sessions);
         SessionService sessionService = new SessionService(MySqlStore.getInstance(), sessions);
         CommandHandler commandHandler = new CommandHandler(
-                sessionService, sessions, memoryService, todoService, planSessions, welcomeHandler, replySender);
+                sessionService, sessions, memoryService, todoService, planSessions, replySender);
 
         CalendarWorkflow calendarWorkflow = new CalendarWorkflow(
                 calendarService, new CalendarSessionStore(), replySender);
@@ -273,7 +269,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         UserRequestHandler requestHandler = new UserRequestHandler(
                 chatHistory, sessions, documentSessions,
                 intentRecognizer, chatService, weatherService,
-                mediaStore, replySender, toolManager, agentLoop, new RoutePlanReviewer(), contextManager, planWorkflow,
+                mediaStore, replySender, toolManager, new RoutePlanReviewer(), contextManager, planWorkflow,
                 new CalculatorService(httpClient, toolManager), calendarWorkflow,
                 healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, foodOrderWorkflow,
                 taxiWorkflow, memoryService, todoService,

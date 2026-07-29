@@ -1,114 +1,203 @@
 package com.example.ilink.application.routing;
 
-import com.example.ilink.application.messaging.UserRequestHandler;
-
-import com.example.ilink.bootstrap.Config;
 import com.example.ilink.application.conversation.ChatHistoryStore;
 import com.example.ilink.application.conversation.UserSessionStore;
+import com.example.ilink.bootstrap.Config;
 import com.example.ilink.capabilities.memory.MemoryService;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
-/**
- * 唯一的用户意图识别入口。
- *
- * <p>把用户自然语言和会话上下文发送给路由模型，并将模型返回的 JSON
- * 转换为 {@link IntentPlan}。本类只负责识别，不执行具体业务。</p>
- */
+/** 唯一的用户意图识别入口：先拆需求，再逐项分配同级能力。 */
 public final class IntentRecognizer {
 
+    private static final int MAX_REQUIREMENTS = 12;
+
     private final HttpClient httpClient;
+    private final RouteClient routeClient;
     private final Gson gson = new Gson();
-    private final ChatHistoryStore history;
-    private final MemoryService memoryService;
-    private final UserSessionStore sessions;
-    private final RoutePromptBuilder promptBuilder;
+    private final CapabilityRegistry capabilities = CapabilityRegistry.defaults();
+    private final RoutePromptBuilder promptBuilder = new RoutePromptBuilder(capabilities);
     private final RouteResponseParser responseParser = new RouteResponseParser();
-    private final IntentNormalizer normalizer = new IntentNormalizer(SkillRegistry.defaults());
+    private final IntentNormalizer normalizer = new IntentNormalizer(capabilities);
 
-    /** 创建意图识别器并注入 HTTP 客户端。 */
     public IntentRecognizer(HttpClient httpClient) {
-        this(httpClient, null, null, null);
-    }
-
-    public IntentRecognizer(HttpClient httpClient, ChatHistoryStore history,
-                            MemoryService memoryService, UserSessionStore sessions) {
         this.httpClient = httpClient;
-        this.history = history;
-        this.memoryService = memoryService;
-        this.sessions = sessions;
-        this.promptBuilder = new RoutePromptBuilder(memoryService, sessions);
+        this.routeClient = this::sendRoute;
     }
 
-    /** 调用路由模型，把一段自然语言转换为一个或多个有序动作。 */
-    public IntentPlan recognize(String userId, String userMessage, IntentContext context) {
-        IntentPlan localCalendarPlan = localCalendarCreatePlan(userMessage);
-        if (localCalendarPlan != null) return localCalendarPlan;
-        IntentPlan localVisualPlan = localVisualPlan(userMessage, context);
-        if (localVisualPlan != null) return localVisualPlan;
+    IntentRecognizer(RouteClient routeClient) {
+        this.httpClient = null;
+        this.routeClient = routeClient;
+    }
 
-        // 路由模型只输出结构化意图，业务执行由 UserRequestHandler 负责。
+    /** 保留旧注入签名；完整上下文现在由调用方一次性传入。 */
+    public IntentRecognizer(HttpClient httpClient, ChatHistoryStore ignoredHistory,
+                            MemoryService ignoredMemory, UserSessionStore ignoredSessions) {
+        this(httpClient);
+    }
+
+    public IntentPlan recognize(String userId, String userMessage, IntentContext context) {
+        return recognize(userId, userMessage, RoutingContext.minimal(context));
+    }
+
+    public IntentPlan recognize(String userId, String userMessage, RoutingContext context) {
+        if (userMessage == null || userMessage.isBlank()) return fallbackChatPlan("");
         try {
-            String content = requestRoute(buildRequestBody(userId, userMessage, context, true, false));
-            JsonObject result;
-            try {
-                result = parseJsonObject(content);
-            } catch (IllegalArgumentException firstError) {
-                System.err.println("[意图识别] 首次返回格式异常，自动重试："
-                        + summarizeModelOutput(content));
-                content = requestRoute(buildRequestBody(userId, userMessage, context, false, true));
-                result = parseJsonObject(content);
+            List<AtomicRequirement> requirements = new ArrayList<>(splitRequirements(userMessage, context));
+            if (requirements.isEmpty()) requirements.add(new AtomicRequirement("r1", userMessage, List.of()));
+
+            AssignmentBatch firstBatch = assignRequirements(userMessage, context, requirements, false);
+            Map<String, IntentAction> assigned = new LinkedHashMap<>(firstBatch.actions());
+            appendUncoveredRequirements(requirements, firstBatch.uncovered());
+            orderRequirementsBySource(userMessage, requirements);
+            List<AtomicRequirement> missing = requirements.stream()
+                    .filter(requirement -> !assigned.containsKey(requirement.id())).toList();
+            if (!missing.isEmpty()) {
+                System.out.println("[路由覆盖校验] 首轮遗漏=" + missing.stream().map(AtomicRequirement::id).toList());
+                assigned.putAll(assignRequirements(userMessage, context, missing, true).actions());
             }
+
             List<IntentAction> actions = new ArrayList<>();
-            if (result.has("actions") && result.get("actions").isJsonArray()) {
-                JsonArray actionArray = result.getAsJsonArray("actions");
-                boolean hasModelDrawAction = containsIntent(actionArray, "draw");
-                boolean hasModelImageAction = containsIntent(actionArray, "image_action");
-                for (int index = 0; index < actionArray.size() && index < 6; index++) {
-                    JsonObject action = actionArray.get(index).getAsJsonObject();
-                    String actionText = string(action, "action_text");
-                    String modelIntent = string(action, "intent");
-                    normalizeAction(userMessage, actionText, action, context);
-                    String normalizedIntent = string(action, "intent");
-                    logCorrection(modelIntent, normalizedIntent, actionText.isBlank() ? userMessage : actionText);
-                    if ("generate_file".equals(modelIntent) && "draw".equals(normalizedIntent)
-                            && hasModelDrawAction) {
-                        continue;
-                    }
-                    if ("document_edit".equals(modelIntent) && "image_action".equals(normalizedIntent)
-                            && hasModelImageAction) {
-                        continue;
-                    }
-                    actions.add(new IntentAction(actionText.isBlank() ? userMessage : actionText,
-                            toIntentResult(action)));
+            for (AtomicRequirement requirement : requirements) {
+                IntentAction action = assigned.get(requirement.id());
+                if (action == null) {
+                    System.err.println("[路由覆盖校验] 补偿后仍遗漏=" + requirement.id() + "，降级为chat保留原需求");
+                    action = new IntentAction(requirement.id(), requirement.text(),
+                            requirement.dependsOn(), IntentResult.chat());
                 }
-            } else {
-                // 兼容旧版单意图 JSON，避免路由模型偶尔未按新格式返回时中断请求。
-                String modelIntent = string(result, "intent");
-                normalizeAction(userMessage, userMessage, result, context);
-                logCorrection(modelIntent, string(result, "intent"), userMessage);
-                actions.add(new IntentAction(userMessage, toIntentResult(result)));
+                actions.add(action);
             }
-            appendLearningResources(userMessage, actions);
             return new IntentPlan(actions);
-        } catch (Exception e) {
-            System.err.println("[意图识别] 识别失败：" + e.getMessage());
+        } catch (Exception error) {
+            System.err.println("[意图识别] 识别失败：" + error.getMessage());
             return fallbackChatPlan(userMessage);
         }
     }
 
-    private JsonObject buildRequestBody(String userId, String userMessage, IntentContext context,
-                                        boolean includeHistory, boolean retry) {
+    private List<AtomicRequirement> splitRequirements(String userMessage, RoutingContext context) throws Exception {
+        JsonObject result = requestJson(promptBuilder.buildRequirementPrompt(context), userMessage);
+        JsonArray array = result.has("requirements") && result.get("requirements").isJsonArray()
+                ? result.getAsJsonArray("requirements") : new JsonArray();
+        List<AtomicRequirement> requirements = new ArrayList<>();
+        Set<String> ids = new LinkedHashSet<>();
+        for (JsonElement element : array) {
+            if (!element.isJsonObject() || requirements.size() >= MAX_REQUIREMENTS) break;
+            JsonObject item = element.getAsJsonObject();
+            String text = string(item, "text");
+            if (text.isBlank()) continue;
+            String id = string(item, "id");
+            if (id.isBlank() || !ids.add(id)) {
+                id = "r" + (requirements.size() + 1);
+                while (!ids.add(id)) id = id + "x";
+            }
+            requirements.add(new AtomicRequirement(id, text, stringList(item, "depends_on")));
+        }
+        Set<String> validIds = requirements.stream().map(AtomicRequirement::id)
+                .collect(java.util.stream.Collectors.toSet());
+        return requirements.stream()
+                .map(item -> new AtomicRequirement(item.id(), item.text(), item.dependsOn().stream()
+                        .filter(validIds::contains).filter(id -> !id.equals(item.id())).toList()))
+                .toList();
+    }
+
+    private AssignmentBatch assignRequirements(String originalMessage, RoutingContext context,
+                                                List<AtomicRequirement> requirements,
+                                                boolean missingOnly) throws Exception {
+        String prompt = missingOnly
+                ? promptBuilder.buildMissingAssignmentPrompt(context, originalMessage, requirements)
+                : promptBuilder.buildAssignmentPrompt(context, originalMessage, requirements);
+        JsonObject payload = new JsonObject();
+        payload.addProperty("original_request", originalMessage);
+        payload.add("requirements", gson.toJsonTree(requirements));
+        JsonObject result = requestJson(prompt, gson.toJson(payload));
+        JsonArray array = result.has("actions") && result.get("actions").isJsonArray()
+                ? result.getAsJsonArray("actions") : new JsonArray();
+        Map<String, AtomicRequirement> expected = new LinkedHashMap<>();
+        for (AtomicRequirement requirement : requirements) expected.put(requirement.id(), requirement);
+        Map<String, IntentAction> actions = new LinkedHashMap<>();
+        for (JsonElement element : array) {
+            if (!element.isJsonObject()) continue;
+            JsonObject action = element.getAsJsonObject();
+            String requirementId = string(action, "requirement_id");
+            AtomicRequirement requirement = expected.get(requirementId);
+            if (requirement == null || actions.containsKey(requirementId)) continue;
+
+            String modelIntent = string(action, "intent");
+            normalizeAction(requirement.text(), requirement.text(), action, context.mediaContext());
+            String normalizedIntent = string(action, "intent");
+            if (!modelIntent.equals(normalizedIntent)) {
+                System.out.println("[意图校验] " + modelIntent + " -> " + normalizedIntent
+                        + "，需求=" + requirement.text());
+            }
+            actions.put(requirementId, new IntentAction(requirementId, requirement.text(),
+                    requirement.dependsOn(), toIntentResult(action)));
+        }
+        List<AtomicRequirement> uncovered = missingOnly
+                ? List.of() : parseRequirements(result, "missing_requirements", Set.of());
+        return new AssignmentBatch(actions, uncovered);
+    }
+
+    private void appendUncoveredRequirements(List<AtomicRequirement> requirements,
+                                             List<AtomicRequirement> uncovered) {
+        Set<String> ids = requirements.stream().map(AtomicRequirement::id)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        for (AtomicRequirement item : uncovered) {
+            if (requirements.size() >= MAX_REQUIREMENTS || item.text().isBlank()) break;
+            String id = item.id();
+            if (id.isBlank() || ids.contains(id)) id = "r" + (requirements.size() + 1);
+            while (!ids.add(id)) id = id + "x";
+            requirements.add(new AtomicRequirement(id, item.text(), item.dependsOn()));
+        }
+    }
+
+    private void orderRequirementsBySource(String originalMessage, List<AtomicRequirement> requirements) {
+        requirements.sort(java.util.Comparator.comparingInt(item -> {
+            int index = originalMessage.indexOf(item.text());
+            return index < 0 ? Integer.MAX_VALUE : index;
+        }));
+    }
+
+    private List<AtomicRequirement> parseRequirements(JsonObject source, String field, Set<String> reservedIds) {
+        if (!source.has(field) || !source.get(field).isJsonArray()) return List.of();
+        List<AtomicRequirement> values = new ArrayList<>();
+        Set<String> ids = new LinkedHashSet<>(reservedIds);
+        for (JsonElement element : source.getAsJsonArray(field)) {
+            if (!element.isJsonObject() || values.size() >= MAX_REQUIREMENTS) break;
+            JsonObject item = element.getAsJsonObject();
+            String text = string(item, "text");
+            if (text.isBlank()) continue;
+            String id = string(item, "id");
+            if (id.isBlank() || !ids.add(id)) id = "missing" + (values.size() + 1);
+            values.add(new AtomicRequirement(id, text, stringList(item, "depends_on")));
+        }
+        return values;
+    }
+
+    private JsonObject requestJson(String systemPrompt, String userContent) throws Exception {
+        String content = requestRoute(buildRequestBody(systemPrompt, userContent, false));
+        try {
+            return parseJsonObject(content);
+        } catch (IllegalArgumentException firstError) {
+            System.err.println("[意图识别] JSON格式异常，自动重试：" + summarizeModelOutput(content));
+            return parseJsonObject(requestRoute(buildRequestBody(systemPrompt, userContent, true)));
+        }
+    }
+
+    private JsonObject buildRequestBody(String systemPrompt, String userContent, boolean retry) {
         JsonObject body = new JsonObject();
         body.addProperty("model", Config.ROUTER_MODEL);
         body.addProperty("temperature", 0.1);
@@ -116,26 +205,27 @@ public final class IntentRecognizer {
         JsonObject responseFormat = new JsonObject();
         responseFormat.addProperty("type", "json_object");
         body.add("response_format", responseFormat);
-
         JsonArray messages = new JsonArray();
-        JsonObject system = new JsonObject();
-        system.addProperty("role", "system");
-        system.addProperty("content", promptBuilder.build(userId, context));
-        messages.add(system);
-        if (includeHistory && history != null) {
-            history.addHistoryMessages(messages, userId, userMessage);
-        }
-        JsonObject user = new JsonObject();
-        user.addProperty("role", "user");
-        user.addProperty("content", retry
-                ? "重新识别以下请求。只输出一个JSON对象，不要输出解释、Markdown或思考过程：\n" + userMessage
-                : userMessage);
-        messages.add(user);
+        messages.add(message("system", systemPrompt));
+        messages.add(message("user", retry
+                ? "重新处理以下输入。只输出JSON对象，不要输出解释、Markdown或思考过程：\n" + userContent
+                : userContent));
         body.add("messages", messages);
         return body;
     }
 
+    /** 兼容既有测试的请求体入口。 */
+    private JsonObject buildRequestBody(String userId, String userMessage, IntentContext context,
+                                        boolean includeHistory, boolean retry) {
+        return buildRequestBody(promptBuilder.buildRequirementPrompt(RoutingContext.minimal(context)),
+                userMessage, retry);
+    }
+
     private String requestRoute(JsonObject body) throws Exception {
+        return routeClient.request(body);
+    }
+
+    private String sendRoute(JsonObject body) throws Exception {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(Config.API_BASE_URL))
                 .timeout(Config.REQ_TIMEOUT)
@@ -153,75 +243,24 @@ public final class IntentRecognizer {
         return content == null || content.isJsonNull() ? "" : content.getAsString();
     }
 
-    private String summarizeModelOutput(String content) {
-        String summary = content == null ? "<null>" : content.replace('\n', ' ').replace('\r', ' ').trim();
-        return summary.length() <= 300 ? summary : summary.substring(0, 300) + "...";
+    @FunctionalInterface
+    interface RouteClient {
+        String request(JsonObject body) throws Exception;
+    }
+
+    private record AssignmentBatch(Map<String, IntentAction> actions,
+                                   List<AtomicRequirement> uncovered) {
+    }
+
+    private JsonObject parseJsonObject(String content) {
+        return responseParser.parseObject(content);
     }
 
     private IntentPlan fallbackChatPlan(String userMessage) {
-        JsonObject action = new JsonObject();
-        action.addProperty("intent", "chat");
-        return new IntentPlan(List.of(new IntentAction(userMessage, toIntentResult(action))));
+        return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), IntentResult.chat())));
     }
 
-    /** 明确的提醒创建由本地规则直达日历，避免模型偶发的非 JSON 输出中断提醒。 */
-    private IntentPlan localCalendarCreatePlan(String message) {
-        if (!isExplicitCalendarCreateRequest(message)) return null;
-        JsonObject action = new JsonObject();
-        action.addProperty("intent", "calendar_event");
-        action.addProperty("calendar_action", "create");
-        action.addProperty("calendar_title", calendarTitle(message));
-        action.addProperty("calendar_time", message.trim());
-        action.addProperty("calendar_recurrence", calendarRecurrence(message));
-        action.addProperty("calendar_time_type", "auto");
-        return new IntentPlan(List.of(new IntentAction(message, toIntentResult(action))));
-    }
-
-    private static boolean isExplicitCalendarCreateRequest(String message) {
-        if (message == null || message.isBlank() || !message.contains("提醒")) return false;
-        return !message.matches(".*(取消|删除|完成|延后|稍后|查询|查看|列表|有什么|哪些).*" );
-    }
-
-    private static String calendarTitle(String message) {
-        String title = message.trim();
-        int reminder = title.lastIndexOf("提醒");
-        if (reminder >= 0) title = title.substring(reminder + "提醒".length());
-        title = title.replaceFirst("^(我(?:该|要|记得)?|一下(?:我)?)", "")
-                .replaceFirst("^(今天|明天|后天|每天|每日|每周|每月|每年)?\\s*(上午|中午|下午|晚上|今晚|早上)?\\s*\\d{1,2}(?::\\d{2})?\\s*(点|时)?(?:半|\\d{1,2}分?)?\\s*", "")
-                .replaceAll("[了吧呀啊。！!？?]+$", "")
-                .trim();
-        return title.isBlank() ? "日历提醒" : title;
-    }
-
-    private static String calendarRecurrence(String message) {
-        if (message.contains("每天") || message.contains("每日") || message.contains("天天")) return "daily";
-        if (message.contains("每周") || message.contains("每星期") || message.contains("每礼拜")) return "weekly";
-        if (message.contains("每月")) return "monthly";
-        if (message.contains("每年")) return "yearly";
-        return "none";
-    }
-
-    /** 记录被规则层纠正的模型意图，方便复盘误判而不输出完整用户上下文。 */
-    private void logCorrection(String modelIntent, String normalizedIntent, String actionText) {
-        if (!modelIntent.equals(normalizedIntent)) {
-            System.out.println("[意图校验] " + modelIntent + " -> " + normalizedIntent
-                    + "，动作=" + actionText);
-        }
-    }
-
-    /** 判断模型动作数组中是否已经包含指定意图，用于去掉纠正后的重复动作。 */
-    private boolean containsIntent(JsonArray actions, String intent) {
-        for (var element : actions) {
-            if (element.isJsonObject() && intent.equals(string(element.getAsJsonObject(), "intent"))) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * 模型只负责提出候选动作；文件发送等高风险行为必须再次依据用户原话校验。
-     */
+    /** 规则层只做参数和安全约束校验，不负责在能力之间抢路由。 */
     private void normalizeAction(String userMessage, String actionText,
                                  JsonObject action, IntentContext context) {
         String modelIntent = string(action, "intent");
@@ -235,52 +274,22 @@ public final class IntentRecognizer {
         boolean imageCreation = IntentPolicy.isExplicitImageCreation(userMessage);
         boolean imageEdit = IntentPolicy.isExplicitImageEdit(userMessage);
         boolean fileRequest = IntentPolicy.hasExplicitFileRequest(userMessage);
-
-        String requestText = actionText == null || actionText.isBlank() ? userMessage : actionText;
-        if ("chat".equals(intent) && isEmailRequest(requestText)) {
-            action.addProperty("intent", "email_query");
-            action.addProperty("email_action", inferEmailAction(requestText));
-            action.addProperty("email_keyword", inferEmailKeyword(requestText));
-            intent = "email_query";
-        } else if ("chat".equals(intent) && isMediaKnowledgeRequest(requestText)) {
-            action.addProperty("intent", "media_lookup");
-            action.addProperty("media_category", inferMediaCategory(requestText));
-            action.addProperty("media_query", inferMediaQuery(requestText));
-            intent = "media_lookup";
-        } else if ("chat".equals(intent) && isBilibiliMediaRequest(requestText)) {
-            action.addProperty("intent", "bilibili_search");
-            action.addProperty("bilibili_category", inferBilibiliCategory(requestText));
-            action.addProperty("bilibili_query", inferBilibiliQuery(requestText,
-                    string(action, "bilibili_category")));
-            intent = "bilibili_search";
-        } else if ("chat".equals(intent) && isNearbyDiningRequest(userMessage)) {
-            action.addProperty("intent", "nearby_food");
-            action.addProperty("nearby_action", "search");
-            action.addProperty("meal_keyword", inferNearbyFoodKeyword(requestText));
-            intent = "nearby_food";
-        }
-
         if ("generate_file".equals(intent) && !fileRequest) {
             if (imageCreation) {
                 action.addProperty("intent", "draw");
                 action.addProperty("en_prompt", defaultPrompt(action, actionText, userMessage));
-                action.addProperty("cn_description", actionText.isBlank() ? userMessage : actionText);
-            } else if (imageEdit && (context.pendingImage() || context.hasLastImage())) {
-                action.addProperty("intent", "image_action");
-                action.addProperty("image_action", "edit");
-                action.addProperty("image_prompt", actionText.isBlank() ? userMessage : actionText);
+                action.addProperty("cn_description", actionText);
             } else {
                 action.addProperty("intent", "chat");
             }
             action.addProperty("output_file_type", "none");
             return;
         }
-
         if ("document_edit".equals(intent)) {
             if (imageEdit && (context.pendingImage() || context.hasLastImage())) {
                 action.addProperty("intent", "image_action");
                 action.addProperty("image_action", "edit");
-                action.addProperty("image_prompt", actionText.isBlank() ? userMessage : actionText);
+                action.addProperty("image_prompt", actionText);
                 action.addProperty("output_file_type", "none");
                 return;
             }
@@ -290,136 +299,101 @@ public final class IntentRecognizer {
                 return;
             }
         }
-
         if ("generate_file".equals(intent)) {
-            // 文件类型只能来自用户原话，不能采用模型自行补出的 PDF/DOCX。
             action.addProperty("output_file_type", IntentPolicy.explicitOutputFileType(userMessage));
-        } else if ("task_plan".equals(intent)) {
-            action.addProperty("output_file_type", fileRequest
-                    ? IntentPolicy.explicitOutputFileType(userMessage) : "none");
-        } else {
+        } else if (!"task_plan".equals(intent)) {
             action.addProperty("output_file_type", "none");
         }
-
         if ("draw".equals(string(action, "intent"))) {
             if (string(action, "en_prompt").isBlank()) {
                 action.addProperty("en_prompt", defaultPrompt(action, actionText, userMessage));
             }
-            if (string(action, "cn_description").isBlank()) {
-                action.addProperty("cn_description", actionText.isBlank() ? userMessage : actionText);
-            }
-            String imageSize = string(action, "image_size");
-            if (!Set.of("1024x1024", "768x1024", "1024x576").contains(imageSize)) {
+            if (string(action, "cn_description").isBlank()) action.addProperty("cn_description", actionText);
+            if (!Set.of("1024x1024", "768x1024", "1024x576").contains(string(action, "image_size"))) {
                 action.addProperty("image_size", "none");
             }
         }
-
-        if ("bilibili_search".equals(string(action, "intent"))) {
-            String category = string(action, "bilibili_category");
-            if (!Set.of("study", "music", "series", "video").contains(category)) {
-                category = inferBilibiliCategory(requestText);
-                action.addProperty("bilibili_category", category);
-            }
-            if (string(action, "bilibili_query").isBlank()) {
-                action.addProperty("bilibili_query", inferBilibiliQuery(requestText, category));
-            }
-        }
-
-        if ("media_lookup".equals(string(action, "intent"))) {
-            String category = string(action, "media_category");
-            if (!Set.of("anime", "music", "lyrics").contains(category)) {
-                category = inferMediaCategory(requestText);
-                action.addProperty("media_category", category);
-            }
-            if (string(action, "media_query").isBlank()) {
-                action.addProperty("media_query", inferMediaQuery(requestText));
-            }
-        }
-
-        if ("email_query".equals(string(action, "intent"))) {
-            String emailAction = string(action, "email_action");
-            if (!Set.of("unread", "important", "search").contains(emailAction)) {
-                action.addProperty("email_action", inferEmailAction(requestText));
-            }
-            if (string(action, "email_keyword").isBlank()) {
-                action.addProperty("email_keyword", inferEmailKeyword(requestText));
-            }
-        }
-
-        String resolvedIntent = string(action, "intent");
-        if ("nearby_food".equals(resolvedIntent)
-                && !isNearbyDiningRequest(userMessage)
-                && !isExplicitLocationRememberRequest(userMessage)) {
+        if ("nearby_food".equals(intent) && !isNearbyDiningRequest(userMessage)
+                && !IntentPolicy.isExplicitLocationRememberRequest(userMessage)) {
             action.addProperty("intent", "chat");
             action.addProperty("nearby_location", "");
             action.addProperty("nearby_action", "search");
             action.addProperty("meal_keyword", "");
             return;
         }
-        if ("food_order".equals(resolvedIntent) && isNearbyDiningRequest(userMessage)) {
+        if ("food_order".equals(intent) && isNearbyDiningRequest(userMessage)) {
             action.addProperty("intent", "nearby_food");
             action.addProperty("nearby_action", "search");
             String restaurant = string(action, "food_order_restaurants");
             action.addProperty("meal_keyword", restaurant.isBlank()
-                    ? inferNearbyFoodKeyword(requestText) : restaurant);
-            resolvedIntent = "nearby_food";
+                    ? inferNearbyFoodKeyword(actionText) : restaurant);
+            intent = "nearby_food";
         }
-        if ("nearby_food".equals(resolvedIntent)) {
+        if ("nearby_food".equals(intent)) {
             String keyword = string(action, "meal_keyword");
-            if (isGenericNearbyFoodQuery(requestText) || isGenericNearbyFoodKeyword(keyword)) {
+            if (isGenericNearbyFoodQuery(actionText) || isGenericNearbyFoodKeyword(keyword)) {
                 keyword = "";
             } else if (keyword.isBlank()) {
-                keyword = inferNearbyFoodKeyword(requestText);
+                keyword = inferNearbyFoodKeyword(actionText);
             }
             action.addProperty("meal_keyword", keyword);
-            if (requestText.matches(".*(想吃|想喝|找|有没有|附近有|有什么好吃|吃什么|推荐).*")) {
-                action.addProperty("nearby_action", "search");
-            }
+            action.addProperty("nearby_action", "search");
         }
     }
 
-    /** 学习计划固定追加课程资源动作，避免路由模型漏掉用户没有明说的学习入口。 */
-    private void appendLearningResources(String userMessage, List<IntentAction> actions) {
-        if (actions.size() >= 6 || !isLearningPlanRequest(userMessage)
-                || actions.stream().noneMatch(action -> "task_plan".equals(action.route().intent()))
-                || actions.stream().anyMatch(action -> "bilibili_search".equals(action.route().intent()))) {
-            return;
-        }
-        String goal = actions.stream()
-                .filter(action -> "task_plan".equals(action.route().intent()))
-                .map(action -> action.route().planGoal())
-                .filter(value -> value != null && !value.isBlank())
-                .findFirst()
-                .orElse(userMessage);
-        JsonObject resourceAction = new JsonObject();
-        resourceAction.addProperty("intent", "bilibili_search");
-        resourceAction.addProperty("bilibili_category", "study");
-        resourceAction.addProperty("bilibili_query", inferBilibiliQuery(goal, "study"));
-        actions.add(new IntentAction("查找与学习计划配套的哔哩哔哩课程", toIntentResult(resourceAction)));
+    private IntentResult toIntentResult(JsonObject result) {
+        return new IntentResult(
+                string(result, "intent"), string(result, "en_prompt"), string(result, "cn_description"),
+                defaultString(result, "image_size", "none"), defaultString(result, "reply_mode", "keep"),
+                defaultString(result, "voice_style", "default"), string(result, "persona"),
+                defaultString(result, "image_action", "none"), string(result, "image_prompt"),
+                defaultString(result, "audio_source", "any"), integer(result, "audio_index", 1),
+                defaultString(result, "document_action", "none"),
+                defaultString(result, "output_file_type", "none"), string(result, "weather_location"),
+                defaultString(result, "weather_day", "today"), string(result, "plan_goal"),
+                string(result, "plan_deadline"), string(result, "plan_available_time"),
+                string(result, "calculation_operation"), string(result, "calculation_left"),
+                string(result, "calculation_right"), string(result, "calculation_quantity"),
+                string(result, "calculation_unit_price"), string(result, "calculation_discount_percent"),
+                string(result, "travel_origin"), string(result, "travel_destination"),
+                stringList(result, "travel_stops"), string(result, "origin_city"),
+                string(result, "destination_city"), string(result, "travel_departure_time"),
+                integer(result, "time_budget_minutes", 0), string(result, "meal_keyword"),
+                string(result, "diet_goal"), string(result, "nearby_location"),
+                defaultString(result, "nearby_action", "search"),
+                defaultString(result, "calendar_action", "create"), string(result, "calendar_title"),
+                string(result, "calendar_time"), defaultString(result, "calendar_recurrence", "none"),
+                integer(result, "calendar_reminder_minutes", 0),
+                defaultString(result, "calendar_time_type", "auto"),
+                longInteger(result, "calendar_time_amount", 0), string(result, "calendar_time_unit"),
+                integer(result, "calendar_lead_time_seconds", 0), string(result, "bilibili_query"),
+                defaultString(result, "bilibili_category", "video"), string(result, "media_query"),
+                defaultString(result, "media_category", "music"),
+                defaultString(result, "email_action", "unread"), string(result, "email_keyword"),
+                string(result, "food_order_restaurants"));
     }
 
     static boolean isLearningPlanRequest(String text) {
-        return text != null
-                && text.matches(".*(学习|学一下|学会|备考|课程).*" )
-                && text.matches(".*(计划|规划|安排|预计|天|周|月).*" );
+        return text != null && text.matches(".*(学习|学一下|学会|备考|课程).*")
+                && text.matches(".*(计划|规划|安排|预计|天|周|月).*");
     }
 
     static boolean isBilibiliMediaRequest(String text) {
         if (text == null || text.isBlank()) return false;
-        return text.matches(".*(哔哩哔哩|B站|b站).*(搜|找|看|听|播放|课程|视频).*" )
-                || text.matches(".*(想|要|帮我|给我).*(看|追).*(剧|电影|番|动漫|视频).*" )
-                || text.matches(".*(想|要|帮我|给我).*(听|播放).*(歌|音乐|歌曲).*" );
+        return text.matches(".*(哔哩哔哩|B站|b站).*(搜|找|看|听|播放|课程|视频).*")
+                || text.matches(".*(想|要|帮我|给我).*(看|追).*(剧|电影|番|动漫|视频).*")
+                || text.matches(".*(想|要|帮我|给我).*(听|播放).*(歌|音乐|歌曲).*");
     }
 
     static boolean isMediaKnowledgeRequest(String text) {
         if (text == null || text.isBlank()) return false;
-        return text.matches(".*(查|查询|介绍|资料|了解).*(动漫|动画|番剧|漫画|歌手|歌曲|专辑|歌词).*" )
-                || text.matches(".*(歌词|歌手资料|专辑资料|动漫资料|番剧资料).*" );
+        return text.matches(".*(查|查询|介绍|资料|了解).*(动漫|动画|番剧|漫画|歌手|歌曲|专辑|歌词).*")
+                || text.matches(".*(歌词|歌手资料|专辑资料|动漫资料|番剧资料).*");
     }
 
     static boolean isEmailRequest(String text) {
-        return text != null && text.matches(".*(邮箱|邮件|未读邮件|重要邮件).*" )
-                && text.matches(".*(查|查询|看看|有什么|总结|搜索|找|未读|重要).*" );
+        return text != null && text.matches(".*(邮箱|邮件|未读邮件|重要邮件).*")
+                && text.matches(".*(查|查询|看看|有什么|总结|搜索|找|未读|重要).*");
     }
 
     static String inferMediaCategory(String text) {
@@ -432,52 +406,13 @@ public final class IntentRecognizer {
         if (text == null) return "";
         return text.replaceFirst("^(请)?(帮我)?(查|查询|搜索|找|介绍|了解)(一下)?", "")
                 .replaceAll("(的)?(资料|信息|歌词|歌手|歌曲|专辑|动漫|动画|番剧|漫画)", " ")
-                .replaceAll("[《》‘’“”\"，,。？?]", " ")
-                .replaceAll("\\s+", " ").trim();
+                .replaceAll("[《》‘’“”\"，,。？?]", " ").replaceAll("\\s+", " ").trim();
     }
 
     static String inferEmailAction(String text) {
         if (text != null && text.matches(".*(重要|需要回复|紧急).*")) return "important";
         if (text != null && text.matches(".*(搜索|查找|找一下|谁发的|发来的).*")) return "search";
         return "unread";
-    }
-
-    static String inferEmailKeyword(String text) {
-        if (text == null) return "";
-        return text.replaceFirst("^(请)?(帮我)?(查|查询|搜索|查找|找|看看|总结)(一下)?", "")
-                .replaceAll("(我的)?(QQ)?邮箱", "")
-                .replaceAll("(最近|今天|近期)?(的)?(未读|重要|新)?邮件", "")
-                .replaceAll("[，,。？?]", " ").replaceAll("\\s+", " ").trim();
-    }
-
-    static boolean isNearbyDiningRequest(String text) {
-        return IntentPolicy.isNearbyDiningRequest(text);
-    }
-
-    static String inferNearbyFoodKeyword(String text) {
-        if (text == null || text.isBlank()) return "";
-        if (isGenericNearbyFoodQuery(text)) return "";
-        if (!text.matches(".*(想吃|想喝|找|有没有|附近有).*")) return "";
-        String value = text.replaceFirst("^.*?(想吃|想喝|找|有没有|附近有)", "")
-                .replaceFirst("^(附近的?|周边的?)", "")
-                .replaceAll("(了|呢|吗|呀|啊|附近的?|附近有吗)$", "")
-                .replaceAll("[，,。？?！!]", " ")
-                .replaceAll("\\s+", " ").trim();
-        return value.length() > 30 ? value.substring(0, 30).trim() : value;
-    }
-
-    static boolean isGenericNearbyFoodQuery(String text) {
-        if (text == null || text.isBlank()) return false;
-        String normalized = text.replaceAll("[，,。？?！!\\s]", "");
-        return normalized.matches(".*(?:附近|周边).*(?:有什么好吃的?|有啥好吃的?|吃什么|"
-                + "推荐(?:点|些)?(?:好吃的|餐厅|美食|吃的)).*");
-    }
-
-    static boolean isGenericNearbyFoodKeyword(String keyword) {
-        if (keyword == null || keyword.isBlank()) return false;
-        String normalized = keyword.replaceAll("[，,。？?！!\\s]", "");
-        return normalized.matches("(?:什么好吃的?|有啥好吃的?|好吃的?|吃什么|"
-                + "附近美食|附近餐厅|美食|餐厅|饭店|推荐)");
     }
 
     static String inferBilibiliCategory(String text) {
@@ -492,8 +427,7 @@ public final class IntentRecognizer {
         query = query.replaceAll("^(请)?(帮我|给我)?(在)?(哔哩哔哩|B站|b站)?", "")
                 .replaceAll("(帮我完成|制定|生成|做)(一份|一个)?(学习)?计划", "")
                 .replaceAll("预计.{0,12}(天|周|月)(左右)?", "")
-                .replaceAll("[，,。？?]", " ")
-                .replaceAll("\\s+", " ").trim();
+                .replaceAll("[，,。？?]", " ").replaceAll("\\s+", " ").trim();
         return switch (category) {
             case "music" -> {
                 String value = query.replaceAll("^(我)?(想|要)?(听|播放)(一下)?", "")
@@ -513,136 +447,79 @@ public final class IntentRecognizer {
         };
     }
 
-    /** 清除不再适用于普通聊天的输出字段。 */
+    static boolean isNearbyDiningRequest(String text) {
+        return IntentPolicy.isNearbyDiningRequest(text);
+    }
+
+    static String inferNearbyFoodKeyword(String text) {
+        if (text == null || text.isBlank() || isGenericNearbyFoodQuery(text)) return "";
+        if (!text.matches(".*(想吃|想喝|找|有没有|附近有).*")) return "";
+        String value = text.replaceFirst("^.*?(想吃|想喝|找|有没有|附近有)", "")
+                .replaceFirst("^(附近的?|周边的?)", "")
+                .replaceAll("(了|呢|吗|呀|啊|附近的?|附近有吗)$", "")
+                .replaceAll("[，,。？?！!]", " ").replaceAll("\\s+", " ").trim();
+        return value.length() > 30 ? value.substring(0, 30).trim() : value;
+    }
+
+    static boolean isGenericNearbyFoodQuery(String text) {
+        if (text == null || text.isBlank()) return false;
+        String normalized = text.replaceAll("[，,。？?！!\\s]", "");
+        return normalized.matches(".*(?:附近|周边).*(?:有什么好吃的?|有啥好吃的?|吃什么|"
+                + "推荐(?:点|些)?(?:好吃的|餐厅|美食|吃的)).*");
+    }
+
+    static boolean isGenericNearbyFoodKeyword(String keyword) {
+        if (keyword == null || keyword.isBlank()) return false;
+        String normalized = keyword.replaceAll("[，,。？?！!\\s]", "");
+        return normalized.matches("(?:什么好吃的?|有啥好吃的?|好吃的?|吃什么|"
+                + "附近美食|附近餐厅|美食|餐厅|饭店|推荐)");
+    }
+
     private void clearOutputFields(JsonObject action) {
         action.addProperty("output_file_type", "none");
         action.addProperty("image_action", "none");
         action.addProperty("image_size", "none");
     }
 
-    /** 绘图模型可直接理解中文，缺少英文提示词时使用用户原始要求兜底。 */
     private String defaultPrompt(JsonObject action, String actionText, String userMessage) {
         String prompt = string(action, "en_prompt");
-        if (!prompt.isBlank()) return prompt;
-        return actionText == null || actionText.isBlank() ? userMessage : actionText;
+        return !prompt.isBlank() ? prompt : (actionText == null || actionText.isBlank() ? userMessage : actionText);
     }
 
-    /** 把单个动作 JSON 转换为现有业务层能够直接使用的结构化参数。 */
-    private IntentResult toIntentResult(JsonObject result) {
-        return new IntentResult(
-                string(result, "intent"),
-                string(result, "en_prompt"),
-                string(result, "cn_description"),
-                defaultString(result, "image_size", "none"),
-                defaultString(result, "reply_mode", "keep"),
-                defaultString(result, "voice_style", "default"),
-                string(result, "persona"),
-                defaultString(result, "image_action", "none"),
-                string(result, "image_prompt"),
-                defaultString(result, "audio_source", "any"),
-                integer(result, "audio_index", 1),
-                defaultString(result, "document_action", "none"),
-                defaultString(result, "output_file_type", "none"),
-                string(result, "weather_location"),
-                defaultString(result, "weather_day", "today"),
-                string(result, "plan_goal"),
-                string(result, "plan_deadline"),
-                string(result, "plan_available_time"),
-                string(result, "calculation_operation"),
-                string(result, "calculation_left"),
-                string(result, "calculation_right"),
-                string(result, "calculation_quantity"),
-                string(result, "calculation_unit_price"),
-                string(result, "calculation_discount_percent"),
-                string(result, "travel_origin"),
-                string(result, "travel_destination"),
-                stringList(result, "travel_stops"),
-                string(result, "origin_city"),
-                string(result, "destination_city"),
-                string(result, "travel_departure_time"),
-                integer(result, "time_budget_minutes", 0),
-                string(result, "meal_keyword"),
-                string(result, "diet_goal"),
-                string(result, "nearby_location"),
-                defaultString(result, "nearby_action", "search"),
-                defaultString(result, "calendar_action", "create"),
-                string(result, "calendar_title"),
-                string(result, "calendar_time"),
-                defaultString(result, "calendar_recurrence", "none"),
-                integer(result, "calendar_reminder_minutes", 0),
-                defaultString(result, "calendar_time_type", "auto"),
-                longInteger(result, "calendar_time_amount", 0),
-                string(result, "calendar_time_unit"),
-                integer(result, "calendar_lead_time_seconds", 0),
-                string(result, "bilibili_query"),
-                defaultString(result, "bilibili_category", "video"),
-                string(result, "media_query"),
-                defaultString(result, "media_category", "music"),
-                defaultString(result, "email_action", "unread"),
-                string(result, "email_keyword"),
-                string(result, "food_order_restaurants"));
+    private static JsonObject message(String role, String content) {
+        JsonObject message = new JsonObject();
+        message.addProperty("role", role);
+        message.addProperty("content", content == null ? "" : content);
+        return message;
     }
 
-    /** 构造路由模型的系统提示词和当前会话状态说明。 */
-    /** 从模型文本中提取 JSON 对象，处理代码块和多余说明文字。 */
-    private JsonObject parseJsonObject(String content) {
-        return responseParser.parseObject(content);
+    private String summarizeModelOutput(String content) {
+        String summary = content == null ? "<null>" : content.replace('\n', ' ').replace('\r', ' ').trim();
+        return summary.length() <= 300 ? summary : summary.substring(0, 300) + "...";
     }
 
-    private static boolean isExplicitLocationRememberRequest(String text) {
-        return IntentPolicy.isExplicitLocationRememberRequest(text);
-    }
-
-    /** 明确且单一的绘图、改图请求本地直达，避免与位置、文档等意图竞争。 */
-    private IntentPlan localVisualPlan(String message, IntentContext context) {
-        if (message == null || message.isBlank() || looksLikeCompoundRequest(message)) return null;
-        JsonObject action = new JsonObject();
-        if (IntentPolicy.isExplicitImageEdit(message)) {
-            action.addProperty("intent", "image_action");
-            action.addProperty("image_action", "edit");
-            action.addProperty("image_prompt", message.trim());
-            return new IntentPlan(List.of(new IntentAction(message, toIntentResult(action))));
-        }
-        if (!IntentPolicy.isExplicitImageCreation(message)) return null;
-        action.addProperty("intent", "draw");
-        action.addProperty("en_prompt", message.trim());
-        action.addProperty("cn_description", message.trim());
-        action.addProperty("image_size", DrawSizeParser.parseMention(message));
-        return new IntentPlan(List.of(new IntentAction(message, toIntentResult(action))));
-    }
-
-    private static boolean looksLikeCompoundRequest(String message) {
-        return message.matches(".*(同时|并且|然后|接着|另外|顺便|再帮我).*");
-    }
-
-    /** 读取可选字符串字段，模型省略时返回空字符串。 */
     private String string(JsonObject object, String name) {
-        return object.has(name) && !object.get(name).isJsonNull()
-                ? object.get(name).getAsString() : "";
+        return object.has(name) && !object.get(name).isJsonNull() ? object.get(name).getAsString() : "";
     }
 
-    /** 读取可选字符串字段，字段为空时也使用调用方给出的默认值。 */
     private String defaultString(JsonObject object, String name, String defaultValue) {
         String value = string(object, name);
         return value.isBlank() ? defaultValue : value;
     }
 
-    /** 读取字符串数组字段，并忽略模型返回的空白元素。 */
     private List<String> stringList(JsonObject object, String name) {
         if (!object.has(name) || !object.get(name).isJsonArray()) return List.of();
         List<String> values = new ArrayList<>();
-        for (var element : object.getAsJsonArray(name)) {
+        for (JsonElement element : object.getAsJsonArray(name)) {
             String value = element.getAsString().trim();
             if (!value.isBlank()) values.add(value);
         }
         return List.copyOf(values);
     }
 
-    /** 读取可选整数，模型遗漏或格式异常时使用默认值，避免路由失败影响普通聊天。 */
     private int integer(JsonObject object, String name, int defaultValue) {
         try {
-            return object.has(name) && !object.get(name).isJsonNull()
-                    ? object.get(name).getAsInt() : defaultValue;
+            return object.has(name) && !object.get(name).isJsonNull() ? object.get(name).getAsInt() : defaultValue;
         } catch (RuntimeException ignored) {
             return defaultValue;
         }
@@ -650,12 +527,9 @@ public final class IntentRecognizer {
 
     private long longInteger(JsonObject object, String name, long defaultValue) {
         try {
-            return object.has(name) && !object.get(name).isJsonNull()
-                    ? object.get(name).getAsLong() : defaultValue;
+            return object.has(name) && !object.get(name).isJsonNull() ? object.get(name).getAsLong() : defaultValue;
         } catch (RuntimeException ignored) {
             return defaultValue;
         }
     }
-
-
 }

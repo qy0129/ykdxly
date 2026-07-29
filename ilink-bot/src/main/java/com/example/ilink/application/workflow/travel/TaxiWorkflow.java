@@ -119,18 +119,13 @@ public final class TaxiWorkflow {
         }
         if (fromCity.isBlank()) fromCity = toCity;
         if (toCity.isBlank()) toCity = fromCity;
-        List<DidiMcpClient.Place> candidates = didi.textSearch(origin, fromCity);
-        if (candidates.isEmpty()) {
+        List<DidiMcpClient.Place> originCandidates = didi.textSearch(origin, fromCity);
+        if (originCandidates.isEmpty()) {
             save(userId, PendingTaxi.city(origin, destination));
             replySender.sendReply(client, userId, "没有找到出发地“" + origin + "”，请补充更完整的地点或城市。");
             return;
         }
-        if (candidates.size() == 1) {
-            resolveDestination(client, userId, origin, destination, fromCity, toCity, candidates.getFirst());
-            return;
-        }
-        save(userId, PendingTaxi.originChoices(origin, destination, fromCity, toCity, candidates));
-        replySender.sendReply(client, userId, choices("出发地", candidates));
+        resolveDestination(client, userId, origin, destination, fromCity, toCity, originCandidates.getFirst());
     }
 
     private void selectOrigin(ReplyChannel client, String userId, PendingTaxi pending, String text) throws Exception {
@@ -148,9 +143,8 @@ public final class TaxiWorkflow {
             replySender.sendReply(client, userId, "没有找到目的地“" + destination + "”，请重新发起叫车并补充更完整的地点。");
             return;
         }
-        if (candidates.size() == 1) { estimate(client, userId, from, candidates.getFirst()); return; }
-        save(userId, PendingTaxi.destinationChoices(origin, destination, originCity, destinationCity, from, candidates));
-        replySender.sendReply(client, userId, choices("目的地", candidates));
+        // 地图搜索结果已按相关度排序。新流程自动采用首项，把地址和车型合并成一次确认。
+        estimate(client, userId, from, candidates.getFirst());
     }
 
     private void selectDestination(ReplyChannel client, String userId, PendingTaxi pending, String text) throws Exception {
@@ -168,14 +162,14 @@ public final class TaxiWorkflow {
         }
         save(userId, PendingTaxi.confirm(from, to, estimate.traceId(), estimate.items()));
         StringBuilder reply = new StringBuilder("滴滴").append(didi.isSandbox() ? " Sandbox 模拟" : "")
-                .append("价格预估\n")
-                .append(from.displayName()).append(" -> ").append(to.displayName()).append('\n');
+                .append("价格预估\n已自动匹配路线：\n")
+                .append(from.label()).append(" -> ").append(to.label()).append('\n');
         for (int index = 0; index < estimate.items().size(); index++) {
             DidiMcpClient.EstimateItem item = estimate.items().get(index);
             reply.append(index + 1).append(". ").append(item.productName()).append("：")
                     .append(item.priceText()).append('\n');
         }
-        reply.append("请回复车型序号生成滴滴 App 下单链接，例如“1”。");
+        reply.append("请回复一个序号确认地址和车型并生成下单链接，例如“1”；地址不对请回复“取消”后重新说明。");
         replySender.sendReply(client, userId, reply.toString());
     }
 

@@ -9,6 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class WelcomeHandler {
     private final Set<String> greetedUsers = ConcurrentHashMap.newKeySet();
 
+<<<<<<< Updated upstream
     public WelcomeHandler(Object ignoredRepository) { }
 
     public void sendMenu(ReplyChannel client, String userId) throws Exception {
@@ -19,5 +20,22 @@ public final class WelcomeHandler {
         if (greetedUsers.add(userId)) {
             client.sendText(userId, "你好，可以直接告诉我需要做什么。发送“新会话”可开始独立聊天。");
         }
+=======
+    private final UserRepository userRepository;
+
+    public WelcomeHandler(UserRepository userRepository) {
+        this.userRepository = userRepository;
+    }
+
+    /** 首次登录只登记用户，不发送会干扰正常对话的菜单消息。 */
+    public boolean handleFirstLogin(ReplyChannel client, String userId) throws Exception {
+        User existing = userRepository.findByWechatId(userId);
+        if (existing != null) {
+            userRepository.updateLastLoginTime(userId);
+            return false;
+        }
+        userRepository.save(userId, null);
+        return true;
+>>>>>>> Stashed changes
     }
 }
