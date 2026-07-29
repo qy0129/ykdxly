@@ -9,6 +9,8 @@ import com.example.ilink.application.workflow.planning.PlanWorkflow;
 import com.example.ilink.application.workflow.travel.TaxiWorkflow;
 import com.example.ilink.application.workflow.travel.TravelWorkflow;
 import com.example.ilink.application.workflow.visual.VisualCardWorkflow;
+import com.example.ilink.application.executive.ExecutiveRuntime;
+import com.example.ilink.application.executive.ExecutiveTaskService;
 
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.application.conversation.ChatHistoryStore;
@@ -18,6 +20,7 @@ import com.example.ilink.application.conversation.DocumentSessionStore;
 import com.example.ilink.application.conversation.KnowledgeContext;
 import com.example.ilink.application.conversation.UserSessionStore;
 import com.example.ilink.capabilities.chat.ChatService;
+import com.example.ilink.capabilities.automation.AutomationWorkflow;
 import com.example.ilink.capabilities.calculator.CalculatorService;
 import com.example.ilink.capabilities.image.GeneratedImage;
 import com.example.ilink.capabilities.express.ExpressService;
@@ -117,6 +120,9 @@ public final class UserRequestHandler {
     private final MediaKnowledgeService mediaKnowledgeService;
     private final QqMailService qqMailService;
     private final VisualCardWorkflow visualCardWorkflow;
+    private final RagContextService ragContextService;
+    private final ExecutiveRuntime executiveRuntime;
+    private final AutomationWorkflow automationWorkflow;
     private final ActionPlanExecutor actionPlanExecutor = new ActionPlanExecutor();
     private final CapabilityContractValidator capabilityValidator = new CapabilityContractValidator();
 
@@ -137,6 +143,8 @@ public final class UserRequestHandler {
                               WebSearchService webSearchService, NewsSearchService newsSearchService,
                               BilibiliSearchService bilibiliSearchService,
                               MediaKnowledgeService mediaKnowledgeService, QqMailService qqMailService,
+                              VisualCardWorkflow visualCardWorkflow, RagContextService ragContextService,
+                              ExecutiveRuntime executiveRuntime, AutomationWorkflow automationWorkflow) {
                                VisualCardWorkflow visualCardWorkflow) {
         this.chatHistory = chatHistory;
         this.sessions = sessions;
@@ -165,11 +173,23 @@ public final class UserRequestHandler {
         this.mediaKnowledgeService = mediaKnowledgeService;
         this.qqMailService = qqMailService;
         this.visualCardWorkflow = visualCardWorkflow;
+        this.ragContextService = ragContextService;
+        this.executiveRuntime = executiveRuntime;
+        this.automationWorkflow = automationWorkflow;
     }
     /** 识别用户意图并调用对应功能处理器。 */
     public void handle(AgentContext agentContext, String text) throws Exception {
         ReplyChannel client = agentContext.replyChannel();
         String userId = agentContext.principalId();
+        String executiveReply = executiveRuntime.handleCommand(userId, text);
+        if (executiveReply != null) {
+            replySender.sendReply(client, userId, executiveReply);
+            return;
+        }
+        if (automationWorkflow.looksLikeAutomation(text)) {
+            submitAutomation(client, userId, "automation_research", text);
+            return;
+        }
         if (handleFailedActionRetry(agentContext, text)) return;
 
         UserSessionStore.PendingFileExport pendingFileExport = sessions.getPendingFileExport(userId);
@@ -714,6 +734,10 @@ public final class UserRequestHandler {
             case "express_query" -> queryExpress(client, userId, actionText);
             case "news_search" -> searchNews(client, userId, actionText);
             case "web_search" -> searchWeb(client, userId, actionText);
+            case "automation_research", "job_search", "jd_analysis", "resume_match" ->
+                    submitAutomation(client, userId, route.intent(), actionText);
+            case "automation_status" -> replySender.sendReply(client, userId,
+                    executiveRuntime.handleCommand(userId, "任务状态"));
             case "memory" -> {
                 if (!handleMemoryCommand(client, userId, actionText)) executeChatAction(context, actionText, route);
             }
@@ -743,6 +767,15 @@ public final class UserRequestHandler {
 
     private void executeChatAction(AgentContext context, String text, IntentResult route) throws Exception {
         sendChatReply(context.replyChannel(), context.principalId(), text, route);
+    }
+
+    private void submitAutomation(ReplyChannel client, String userId, String intent, String text) throws Exception {
+        ExecutiveTaskService.Submission submission = automationWorkflow.submit(userId, intent, text);
+        String message = submission.created()
+                ? "已创建自动化任务：" + submission.task().id() + "\n我会在后台执行并主动发送结果。"
+                : "这个自动化任务已经存在：" + submission.task().id()
+                        + "\n当前状态：" + submission.task().status();
+        replySender.sendReply(client, userId, message);
     }
 
     /** 把会话、位置、时间和所有等待状态合并成一次路由快照。 */

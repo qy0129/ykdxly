@@ -23,7 +23,12 @@ import java.util.Set;
 public final class WebSearchService {
 
     private static final URI TAVILY_URL = URI.create("https://api.tavily.com/search");
+    private static final String SO_URL = "https://www.so.com/s?q=";
+    private static final String SOGOU_URL = "https://www.sogou.com/web?query=";
     private static final String BING_RSS_URL = "https://www.bing.com/search?format=rss&q=";
+    private static final String BROWSER_USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    + "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
     private static final Set<Integer> REDIRECT_STATUSES = Set.of(301, 302, 303, 307, 308);
     private static final int MAX_REDIRECTS = 3;
     private final HttpClient httpClient;
@@ -42,8 +47,28 @@ public final class WebSearchService {
                 System.err.println("[联网搜索] Tavily 失败，使用公共搜索回退: " + e.getMessage());
             }
         }
+        if (containsChinese(query)) {
+            try {
+                URI uri = URI.create(SO_URL + URLEncoder.encode(query.trim(), StandardCharsets.UTF_8));
+                List<SearchResult> results = SoSearchSupport.parse(get(uri), limit);
+                if (!results.isEmpty()) return results;
+            } catch (IOException | RuntimeException e) {
+                System.err.println("[联网搜索] 360 搜索失败，尝试搜狗回退: " + e.getMessage());
+            }
+            try {
+                URI uri = URI.create(SOGOU_URL + URLEncoder.encode(query.trim(), StandardCharsets.UTF_8));
+                List<SearchResult> results = SogouSearchSupport.parse(get(uri), limit);
+                if (!results.isEmpty()) return results;
+            } catch (IOException | RuntimeException e) {
+                System.err.println("[联网搜索] 搜狗失败，使用 Bing RSS 回退: " + e.getMessage());
+            }
+        }
         URI uri = URI.create(BING_RSS_URL + URLEncoder.encode(query.trim(), StandardCharsets.UTF_8));
         return RssSearchSupport.parse(get(uri), limit);
+    }
+
+    private boolean containsChinese(String value) {
+        return value.codePoints().anyMatch(codePoint -> codePoint >= 0x4E00 && codePoint <= 0x9FFF);
     }
 
     private List<SearchResult> searchTavily(String query, int limit) throws IOException, InterruptedException {
@@ -78,7 +103,7 @@ public final class WebSearchService {
         for (int redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount++) {
             HttpRequest request = HttpRequest.newBuilder(current)
                     .timeout(Duration.ofSeconds(Config.WEB_SEARCH_TIMEOUT_SECONDS))
-                    .header("User-Agent", "Mozilla/5.0 iLinkBot/1.0")
+                    .header("User-Agent", BROWSER_USER_AGENT)
                     .GET().build();
             HttpResponse<String> response = httpClient.send(
                     request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));

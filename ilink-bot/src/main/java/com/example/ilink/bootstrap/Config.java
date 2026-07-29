@@ -121,6 +121,13 @@ public class Config {
             loadProperty("session.management.bind.address", "127.0.0.1");
     public static final int SESSION_MANAGEMENT_PORT =
             Integer.parseInt(loadProperty("session.management.port", "8791"));
+    /** Executive Automation 本机控制台。 */
+    public static final boolean AUTOMATION_CONSOLE_ENABLED =
+            Boolean.parseBoolean(loadProperty("automation.console.enabled", "true"));
+    public static final String AUTOMATION_CONSOLE_BIND_ADDRESS =
+            loadProperty("automation.console.bind.address", "127.0.0.1");
+    public static final int AUTOMATION_CONSOLE_PORT =
+            Integer.parseInt(loadProperty("automation.console.port", "8790"));
     public static final boolean VISUAL_CARDS_ENABLED =
             Boolean.parseBoolean(loadProperty("visual.cards.enabled", "true"));
     public static final String VISUAL_CARDS_MODE = loadProperty("visual.cards.mode", "image");

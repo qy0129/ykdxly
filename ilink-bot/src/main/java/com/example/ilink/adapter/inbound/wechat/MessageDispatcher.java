@@ -5,6 +5,8 @@ import com.example.ilink.adapter.inbound.http.ExpressHttpServer;
 import com.example.ilink.adapter.inbound.http.SessionManagementServer;
 import com.example.ilink.adapter.outbound.wechat.WechatReplyChannel;
 import com.example.ilink.application.briefing.LoginBriefingService;
+import com.example.ilink.application.executive.ExecutiveRuntime;
+import com.example.ilink.application.executive.OutboxMessage;
 import com.example.ilink.application.messaging.AgentContext;
 import com.example.ilink.application.messaging.IncomingMessage;
 import com.example.ilink.application.messaging.MessageProcessor;
@@ -52,6 +54,7 @@ public final class MessageDispatcher implements AutoCloseable {
     private final SessionManagementServer sessionManagementServer;
     private final ExpressHttpServer expressHttpServer;
     private final ExpressPageService expressPageService;
+    private final ExecutiveRuntime executiveRuntime;
     private final ScheduledExecutorService progressScheduler = Executors.newScheduledThreadPool(1);
     private final ScheduledExecutorService reminderScheduler = Executors.newScheduledThreadPool(1);
     private final ScheduledExecutorService briefingScheduler = Executors.newSingleThreadScheduledExecutor();
@@ -68,7 +71,8 @@ public final class MessageDispatcher implements AutoCloseable {
                              WelcomeHandler welcomeHandler,
                              DailyDashboardServer dailyDashboardServer, SessionManagementServer sessionManagementServer,
                              ExpressHttpServer expressHttpServer,
-                             ExpressPageService expressPageService) {
+                             ExpressPageService expressPageService,
+                             ExecutiveRuntime executiveRuntime) {
         this.messageProcessor = messageProcessor;
         this.replySender = replySender;
         this.chatService = chatService;
@@ -80,6 +84,7 @@ public final class MessageDispatcher implements AutoCloseable {
         this.sessionManagementServer = sessionManagementServer;
         this.expressHttpServer = expressHttpServer;
         this.expressPageService = expressPageService;
+        this.executiveRuntime = executiveRuntime;
         dailyDashboardServer.start();
         expressHttpServer.start();
         startExpressTunnel();
@@ -176,6 +181,19 @@ public final class MessageDispatcher implements AutoCloseable {
             } catch (Exception e) {
                 System.err.println("[日历提醒] 发送失败: " + e.getMessage());
                 calendarService.markReminderFailed(delivery, LocalDateTime.now(), e.getMessage());
+            }
+        }
+        sendExecutiveNotifications(client, userId);
+    }
+
+    private void sendExecutiveNotifications(ILinkClient client, String userId) {
+        for (OutboxMessage message : executiveRuntime.pendingNotifications(userId, 10)) {
+            try {
+                replySender.sendReply(new WechatReplyChannel(client), userId, message.content());
+                executiveRuntime.markNotificationSent(message);
+            } catch (Exception error) {
+                System.err.println("[Executive 通知] 发送失败：" + error.getMessage());
+                executiveRuntime.markNotificationFailed(message);
             }
         }
     }

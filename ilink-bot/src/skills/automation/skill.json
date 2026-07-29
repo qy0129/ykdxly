@@ -1,0 +1,15 @@
+{
+  "name": "automation",
+  "description": "长期联网调研、岗位搜索、JD分析和简历匹配",
+  "version": "1.0.0",
+  "enabled": true,
+  "requiresApproval": false,
+  "toolNames": ["automation_web_search", "automation_fetch_page", "automation_job_search", "automation_job_page_fetch", "automation_job_analysis", "automation_job_report", "automation_jd_analysis", "automation_resume_match", "automation_research_analysis", "automation_report"],
+  "capabilities": [
+    {"name":"automation_research","description":"创建可持续执行的联网调研任务","parameterHint":"action_text","interactive":false},
+    {"name":"job_search","description":"搜索实习、校招或社会招聘岗位并整理来源","parameterHint":"action_text","interactive":false},
+    {"name":"jd_analysis","description":"分析职位描述、硬性要求和准备建议","parameterHint":"action_text","interactive":false},
+    {"name":"resume_match","description":"对比简历与职位要求并给出修改建议","parameterHint":"action_text","interactive":false},
+    {"name":"automation_status","description":"查询自动化任务状态","parameterHint":"action_text","interactive":false}
+  ]
+}
