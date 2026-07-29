@@ -42,7 +42,7 @@ public final class LoginQrPage {
 
         Files.createDirectories(PAGE_FILE.getParent());
         Files.writeString(PAGE_FILE, html, StandardCharsets.UTF_8);
-        return URI.create(PAGE_FILE.toUri() + "?refresh=" + System.currentTimeMillis());
+        return PAGE_FILE.toUri();
     }
 
     /** 删除程序运行期间创建的本地页面和静态资源。 */

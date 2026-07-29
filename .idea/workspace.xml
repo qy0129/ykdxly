@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="7ef5a97d-8ab3-4de2-b2a0-cd0206c2ce50" name="更改" comment="">
+      <change beforePath="$PROJECT_DIR$/config.properties" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/adapter/inbound/wechat/LoginQrPage.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/adapter/inbound/wechat/LoginQrPage.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/adapter/inbound/wechat/MessageDispatcher.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/adapter/inbound/wechat/MessageDispatcher.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/conversation/ChatHistoryStore.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/conversation/ChatHistoryStore.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/conversation/UserSessionStore.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/conversation/UserSessionStore.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/messaging/MessageProcessor.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/messaging/MessageProcessor.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/messaging/MessageSerialExecutor.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/messaging/MessageSerialExecutor.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/messaging/UserRequestHandler.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/messaging/UserRequestHandler.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/routing/BotSkill.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/routing/BotSkill.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/routing/IntentResult.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/routing/IntentResult.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/routing/SkillRegistry.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/routing/SkillRegistry.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/tooling/ToolContext.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/tooling/ToolContext.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/bootstrap/ApplicationBootstrap.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/bootstrap/ApplicationBootstrap.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/bootstrap/Config.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/bootstrap/Config.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/bootstrap/ILinkBot.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/bootstrap/ILinkBot.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/capabilities/memory/MemoryService.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/capabilities/memory/MemoryService.java" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ilink-bot/src/test/java/com/example/ilink/application/messaging/MessageSerialExecutorTest.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/test/java/com/example/ilink/application/messaging/MessageSerialExecutorTest.java" afterDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="DBNavigator.Project.Workspace.Settings">
+    <assistant-settings>
+      <credential-settings>
+        <credentials />
+      </credential-settings>
+      <profile-settings>
+        <profiles />
+      </profile-settings>
+      <mcp-server-settings>
+        <workspace-integration value="false" />
+        <mcp-servers />
+        <mcp-tool-approvals />
+      </mcp-server-settings>
+    </assistant-settings>
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="GitHubPullRequestSearchHistory">{
+  &quot;lastFilter&quot;: {
+    &quot;state&quot;: &quot;OPEN&quot;,
+    &quot;assignee&quot;: &quot;ChenYanzhou-719&quot;
+  }
+}</component>
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;https://github.com/qy0129/ykdxly.git&quot;,
+    &quot;accountId&quot;: &quot;932dbead-d820-4911-bfb0-968d96419ddf&quot;
+  }
+}</component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 0
+}</component>
+  <component name="ProjectId" id="3H6w8yqb8fz4Gwx6WGevhVqyYS4" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ASKED_SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;SHARE_PROJECT_CONFIGURATION_FILES&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;Chen&quot;,
+    &quot;ignore.virus.scanning.warn.message&quot;: &quot;true&quot;,
+    &quot;kotlin-language-version-configured&quot;: &quot;true&quot;,
+    &quot;last_opened_file_path&quot;: &quot;D:/.BB/ykdxly/ilink-bot/pom.xml&quot;,
+    &quot;project.structure.last.edited&quot;: &quot;项目&quot;,
+    &quot;project.structure.proportion&quot;: &quot;0.0&quot;,
+    &quot;project.structure.side.proportion&quot;: &quot;0.0&quot;,
+    &quot;应用程序.ILinkBot.executor&quot;: &quot;Run&quot;
+  }
+}</component>
+  <component name="RecentsManager">
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="D:\.BB\ykdxly" />
+      <recent name="D:\.BB\ykdxly\ilink-bot" />
+    </key>
+  </component>
+  <component name="RunManager">
+    <configuration name="ILinkBot" type="Application" factoryName="Application" temporary="true" nameIsGenerated="true">
+      <option name="MAIN_CLASS_NAME" value="com.example.ilink.bootstrap.ILinkBot" />
+      <extension name="coverage">
+        <pattern>
+          <option name="PATTERN" value="com.example.ilink.bootstrap.*" />
+          <option name="ENABLED" value="true" />
+        </pattern>
+      </extension>
+      <method v="2">
+        <option name="Make" enabled="true" />
+      </method>
+    </configuration>
+    <configuration default="true" type="JetRunConfigurationType">
+      <module name="ykdxly" />
+      <method v="2">
+        <option name="Make" enabled="true" />
+      </method>
+    </configuration>
+    <configuration default="true" type="KotlinStandaloneScriptRunConfigurationType">
+      <module name="ykdxly" />
+      <option name="filePath" />
+      <method v="2" />
+    </configuration>
+    <recent_temporary>
+      <list>
+        <item itemvalue="应用程序.ILinkBot" />
+      </list>
+    </recent_temporary>
+  </component>
+  <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="应用程序级" UseSingleDictionary="true" transferred="true" />
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="默认任务">
+      <changelist id="7ef5a97d-8ab3-4de2-b2a0-cd0206c2ce50" name="更改" comment="" />
+      <created>1785201670642</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1785201670642</updated>
+    </task>
+    <servers />
+  </component>
+</project>
