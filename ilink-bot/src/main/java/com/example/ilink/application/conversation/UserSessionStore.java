@@ -6,18 +6,8 @@ import com.example.ilink.capabilities.weather.WeatherLocation;
 import java.util.List;
 import java.util.regex.Pattern;
 
-/**
- * 用户会话状态存储抽象。
- *
- * <p>管理 userId 与 {@link ConversationSession} 之间的关系，负责获取当前会话、
- * 创建新会话和更新会话活跃状态。同时管理用户临时状态，包括人设、待确认绘图提示词、
- * 最近图片、待处理图片、待导出文件、快递查询、天气地点和位置信息。</p>
- *
- * <p>具体存储实现由 platform 层完成。</p>
- */
+/** 用户长期资料与当前会话状态的访问接口。 */
 public interface UserSessionStore {
-
-    // ========== Persona ==========
 
     void setPersona(String userId, String persona);
 
@@ -27,31 +17,37 @@ public interface UserSessionStore {
 
     String getPersonaVoiceStyle(String userId);
 
-    // ========== Draw ==========
-
     void setPendingDraw(String userId, String prompt);
+
+    void setPendingDraw(String userId, String prompt, String description, String originalRequest);
 
     String peekPendingDraw(String userId);
 
-    void clearPendingDraw(String userId);
+    PendingDrawRequest getPendingDraw(String userId);
 
-    // ========== Image ==========
+    void clearPendingDraw(String userId);
 
     void setLastImage(String userId, String path);
 
+    void setLastImage(String userId, String path, ImageSource source);
+
     String getLastImage(String userId);
+
+    ImageReference getLastImageReference(String userId);
 
     void setPendingImage(String userId, String path);
 
     String peekPendingImage(String userId);
+
+    ImageReference getPendingImageReference(String userId);
+
+    ImageReference resolveCurrentImage(String userId);
 
     void clearPendingImage(String userId);
 
     void setLastImageAnalysis(String userId, String analysis);
 
     String getLastImageAnalysis(String userId);
-
-    // ========== Pending File Export ==========
 
     void setPendingFileExport(String userId, String userText, IntentResult route);
 
@@ -61,8 +57,6 @@ public interface UserSessionStore {
 
     void clearPendingFileExport(String userId);
 
-    // ========== Express ==========
-
     void setPendingExpress(String userId, String stage, String referenceNo);
 
     PendingExpressState getPendingExpress(String userId);
@@ -70,8 +64,6 @@ public interface UserSessionStore {
     boolean hasPendingExpress(String userId);
 
     void clearPendingExpress(String userId);
-
-    // ========== Weather ==========
 
     void setPendingWeatherLocations(String userId, List<WeatherLocation> locations, String weatherDay);
 
@@ -83,15 +75,11 @@ public interface UserSessionStore {
 
     void clearPendingWeatherLocations(String userId);
 
-    // ========== Location ==========
-
     void setCurrentLocation(String userId, String location);
 
     String getCurrentLocation(String userId);
 
     String getCurrentCity(String userId);
-
-    // ========== Session Lifecycle ==========
 
     ConversationSession getCurrentSession(String userId);
 
@@ -99,24 +87,35 @@ public interface UserSessionStore {
 
     void refreshSession(String userId);
 
-    /** 从数据库查询当前活跃的 {@link ChatSession}，不依赖内存缓存。 */
+    boolean activateSession(String userId, String sessionId);
+
     ChatSession getActiveSession(String userId);
 
-    /** 便捷方法：直接从 {@link #getActiveSession} 取 sessionId。 */
     default String getActiveSessionId(String userId) {
-        ChatSession s = getActiveSession(userId);
-        return s == null ? null : s.sessionId();
+        ChatSession session = getActiveSession(userId);
+        return session == null ? null : session.sessionId();
     }
 
-    // ========== Nested Types ==========
+    enum ImageSource { USER, BOT }
 
-    record PendingExpressState(String stage, String referenceNo) {
+    record ImageReference(String path, ImageSource source, long createdAtMillis) {
+        public ImageReference {
+            path = path == null ? "" : path.trim();
+            source = source == null ? ImageSource.BOT : source;
+        }
     }
 
-    record PendingFileExport(String userText, IntentResult route, long expiresAtMillis) {
+    record PendingDrawRequest(String prompt, String description, String originalRequest, long expiresAtMillis) {
+        public PendingDrawRequest {
+            prompt = prompt == null ? "" : prompt.trim();
+            description = description == null ? "" : description.trim();
+            originalRequest = originalRequest == null ? "" : originalRequest.trim();
+        }
     }
 
-    // ========== Static Utility ==========
+    record PendingFileExport(String userText, IntentResult route, long expiresAtMillis) { }
+
+    record PendingExpressState(String stage, String referenceNo) { }
 
     static String extractCity(String location) {
         if (location == null || location.isBlank()) return "";

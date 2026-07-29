@@ -4,6 +4,7 @@ import com.example.ilink.platform.persistence.MySqlStore;
 
 import java.util.List;
 
+/** 新建、查看和切换聊天会话。 */
 public final class SessionService {
 
     private final MySqlStore database;
@@ -15,25 +16,14 @@ public final class SessionService {
     }
 
     public String createNewSession(String userId) {
-        ConversationSession session = sessions.createNewSession(userId);
-        if (database.isAvailable()) {
-            database.deactivateOtherSessions(session.sessionId(), userId);
-        }
-        return session.sessionId();
+        return sessions.createNewSession(userId).sessionId();
     }
 
     public List<MySqlStore.SessionRow> listSessions(String userId) {
-        if (!database.isAvailable()) return List.of();
-        return database.listUserSessions(userId);
+        return database.isAvailable() ? database.listUserSessions(userId) : List.of();
     }
 
-    public void switchSession(String userId, String sessionId) {
-        if (!database.isAvailable()) return;
-        database.switchActiveSession(sessionId, userId);
-    }
-
-    public void closeSession(String sessionId) {
-        if (!database.isAvailable()) return;
-        database.closeSession(sessionId);
+    public boolean switchSession(String userId, String sessionId) {
+        return sessions.activateSession(userId, sessionId);
     }
 }

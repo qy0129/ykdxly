@@ -1,6 +1,6 @@
 package com.example.ilink.platform.persistence;
 
-import com.example.ilink.application.user.User;
+import com.example.ilink.application.conversation.User;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;

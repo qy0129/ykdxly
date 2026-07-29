@@ -3,9 +3,9 @@ package com.example.ilink.platform.persistence;
 import com.example.ilink.application.conversation.ChatSession;
 import com.example.ilink.application.conversation.ConversationSession;
 import com.example.ilink.application.conversation.UserSessionStore;
+import com.example.ilink.application.routing.IntentResult;
 import com.example.ilink.capabilities.persona.Personas;
 import com.example.ilink.capabilities.weather.WeatherLocation;
-import com.example.ilink.application.routing.IntentResult;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
 
@@ -15,68 +15,63 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
- * 用户会话状态存储默认实现。
- *
- * <p>保存人设、待确认的绘图提示词、最近图片和待处理图片等状态；数据库启用时，
- * 人设会跨重启保存，其他短期状态仍只保存在内存。</p>
+ * 默认会话存储实现。
+ * 用户级资料保存人格和常用地点；短期交互状态绑定当前 sessionId，避免新对话被旧任务污染。
  */
 public final class DefaultUserSessionStore implements UserSessionStore {
 
-    private static final String CURRENT_LOCATION_KEY = "current_location";
-    private static final String CURRENT_CITY_KEY = "current_city";
-    private static final String PENDING_EXPRESS_KEY = "pending_express";
-    private static final String PENDING_WEATHER_KEY = "pending_weather_locations";
-    private static final String PENDING_DRAW_KEY = "pending_draw";
-    private static final String LAST_IMAGE_KEY = "last_image";
-    private static final String PENDING_IMAGE_KEY = "pending_image";
-    private static final String PENDING_FILE_EXPORT_KEY = "pending_file_export";
     private static final long PENDING_TTL_MILLIS = 24L * 60 * 60 * 1000;
-    private static final long CURRENT_LOCATION_TTL_MILLIS = 24L * 60 * 60 * 1000;
-    private static final Pattern CITY_PATTERN = Pattern.compile("(?:^|省)([^省市区县]{2,10})市");
+    private static final String PERSONA = "persona";
+    private static final String LOCATION = "current_location";
+    private static final String DRAW = "pending_draw";
+    private static final String LAST_IMAGE = "last_image";
+    private static final String PENDING_IMAGE = "pending_image";
+    private static final String IMAGE_ANALYSIS = "last_image_analysis";
+    private static final String FILE_EXPORT = "pending_file_export";
+    private static final String EXPRESS = "pending_express";
+    private static final String WEATHER = "pending_weather";
 
-    private final MySqlStore database = MySqlStore.getInstance();
+    private final MySqlStore database;
     private final Gson gson = new Gson();
     private final Map<String, String> personas = new ConcurrentHashMap<>();
-    private final Set<String> loadedPersonaUsers = ConcurrentHashMap.newKeySet();
-    private final Map<String, String> pendingDrawPrompts = new ConcurrentHashMap<>();
-    private final Map<String, String> lastImagePaths = new ConcurrentHashMap<>();
-    private final Map<String, String> pendingImagePaths = new ConcurrentHashMap<>();
-    private final Map<String, String> lastImageAnalyses = new ConcurrentHashMap<>();
-    private final Map<String, List<WeatherLocation>> pendingWeatherLocations = new ConcurrentHashMap<>();
-    private final Map<String, String> pendingWeatherDays = new ConcurrentHashMap<>();
-    private final Set<String> loadedWeatherUsers = ConcurrentHashMap.newKeySet();
-    private final Map<String, PendingFileExport> pendingFileExports = new ConcurrentHashMap<>();
-    private final Set<String> loadedMediaUsers = ConcurrentHashMap.newKeySet();
-    private final Set<String> loadedFileExportUsers = ConcurrentHashMap.newKeySet();
     private final Map<String, String> currentLocations = new ConcurrentHashMap<>();
-    private final Map<String, String> currentCities = new ConcurrentHashMap<>();
-    private final Set<String> loadedLocationUsers = ConcurrentHashMap.newKeySet();
-    private final Map<String, PendingExpressState> pendingExpressStates = new ConcurrentHashMap<>();
-    private final Set<String> loadedExpressUsers = ConcurrentHashMap.newKeySet();
-    private final Map<String, ConversationSession> sessions = new ConcurrentHashMap<>();
+    private final Set<String> loadedProfiles = ConcurrentHashMap.newKeySet();
+    private final Map<String, ConversationSession> activeSessions = new ConcurrentHashMap<>();
+    private final Map<String, PendingDrawRequest> pendingDraws = new ConcurrentHashMap<>();
+    private final Map<String, ImageReference> lastImages = new ConcurrentHashMap<>();
+    private final Map<String, ImageReference> pendingImages = new ConcurrentHashMap<>();
+    private final Map<String, String> imageAnalyses = new ConcurrentHashMap<>();
+    private final Map<String, PendingFileExport> pendingExports = new ConcurrentHashMap<>();
+    private final Map<String, PendingExpressState> pendingExpress = new ConcurrentHashMap<>();
+    private final Map<String, PendingWeatherState> pendingWeather = new ConcurrentHashMap<>();
+
+    public DefaultUserSessionStore() {
+        this(MySqlStore.getInstance());
+    }
+
+    DefaultUserSessionStore(MySqlStore database) {
+        this.database = database;
+    }
 
     @Override
     public void setPersona(String userId, String persona) {
-        loadedPersonaUsers.add(userId);
-        personas.put(userId, persona);
-        database.savePersona(userId, persona);
+        if (blank(userId)) return;
+        personas.put(userId, persona == null || persona.isBlank() ? Personas.DEFAULT : persona.trim());
+        database.savePersona(userId, personas.get(userId));
     }
 
     @Override
     public String getPersonaPrompt(String userId) {
-        String name = getPersonaName(userId);
-        return name == null ? null : Personas.get(name);
+        return Personas.get(getPersonaName(userId));
     }
 
     @Override
     public String getPersonaName(String userId) {
-        ensurePersonaLoaded(userId);
-        String name = personas.getOrDefault(userId, Personas.DEFAULT);
-        return Personas.get(name) == null ? Personas.DEFAULT : name;
+        loadProfile(userId);
+        String persona = personas.getOrDefault(userId, Personas.DEFAULT);
+        return Personas.get(persona) == null ? Personas.DEFAULT : persona;
     }
 
     @Override
@@ -84,94 +79,129 @@ public final class DefaultUserSessionStore implements UserSessionStore {
         return Personas.voiceStyle(getPersonaName(userId));
     }
 
-    private void ensurePersonaLoaded(String userId) {
-        if (!loadedPersonaUsers.add(userId)) return;
-        String persona = database.loadPersona(userId);
-        if (persona != null && !persona.isBlank()) {
-            personas.put(userId, persona);
-        }
+    @Override
+    public void setPendingDraw(String userId, String prompt) {
+        setPendingDraw(userId, prompt, "", "");
     }
 
     @Override
-    public void setPendingDraw(String userId, String prompt) {
-        ensureMediaLoaded(userId);
-        pendingDrawPrompts.put(userId, prompt);
-        database.saveUserState(userId, PENDING_DRAW_KEY, prompt);
+    public void setPendingDraw(String userId, String prompt, String description, String originalRequest) {
+        PendingDrawRequest request = new PendingDrawRequest(prompt, description, originalRequest, expiresAt());
+        pendingDraws.put(stateKey(userId, DRAW), request);
+        saveState(userId, DRAW, request);
     }
 
     @Override
     public String peekPendingDraw(String userId) {
-        ensureMediaLoaded(userId);
-        return pendingDrawPrompts.get(userId);
+        PendingDrawRequest request = getPendingDraw(userId);
+        return request == null ? null : request.prompt();
+    }
+
+    @Override
+    public PendingDrawRequest getPendingDraw(String userId) {
+        PendingDrawRequest request = loadState(userId, DRAW, PendingDrawRequest.class, pendingDraws);
+        if (request != null && request.expiresAtMillis() <= System.currentTimeMillis()) {
+            clearPendingDraw(userId);
+            return null;
+        }
+        return request;
     }
 
     @Override
     public void clearPendingDraw(String userId) {
-        loadedMediaUsers.add(userId);
-        pendingDrawPrompts.remove(userId);
-        database.deleteUserState(userId, PENDING_DRAW_KEY);
+        removeState(userId, DRAW, pendingDraws);
     }
 
     @Override
     public void setLastImage(String userId, String path) {
-        ensureMediaLoaded(userId);
-        lastImagePaths.put(userId, path);
-        database.saveUserState(userId, LAST_IMAGE_KEY, path);
+        setLastImage(userId, path, ImageSource.BOT);
+    }
+
+    @Override
+    public void setLastImage(String userId, String path, ImageSource source) {
+        ImageReference image = new ImageReference(path, source, System.currentTimeMillis());
+        lastImages.put(stateKey(userId, LAST_IMAGE), image);
+        saveState(userId, LAST_IMAGE, image);
     }
 
     @Override
     public String getLastImage(String userId) {
-        ensureMediaLoaded(userId);
-        return lastImagePaths.get(userId);
+        ImageReference image = getLastImageReference(userId);
+        return image == null ? null : image.path();
+    }
+
+    @Override
+    public ImageReference getLastImageReference(String userId) {
+        return loadState(userId, LAST_IMAGE, ImageReference.class, lastImages);
     }
 
     @Override
     public void setPendingImage(String userId, String path) {
-        ensureMediaLoaded(userId);
-        pendingImagePaths.put(userId, path);
-        lastImageAnalyses.remove(userId);
-        database.saveUserState(userId, PENDING_IMAGE_KEY, path);
+        ImageReference image = new ImageReference(path, ImageSource.USER, System.currentTimeMillis());
+        pendingImages.put(stateKey(userId, PENDING_IMAGE), image);
+        imageAnalyses.remove(stateKey(userId, IMAGE_ANALYSIS));
+        saveState(userId, PENDING_IMAGE, image);
     }
 
     @Override
     public String peekPendingImage(String userId) {
-        ensureMediaLoaded(userId);
-        return pendingImagePaths.get(userId);
+        ImageReference image = getPendingImageReference(userId);
+        return image == null ? null : image.path();
+    }
+
+    @Override
+    public ImageReference getPendingImageReference(String userId) {
+        return loadState(userId, PENDING_IMAGE, ImageReference.class, pendingImages);
+    }
+
+    @Override
+    public ImageReference resolveCurrentImage(String userId) {
+        ImageReference pending = getPendingImageReference(userId);
+        return pending == null ? getLastImageReference(userId) : pending;
     }
 
     @Override
     public void clearPendingImage(String userId) {
-        loadedMediaUsers.add(userId);
-        pendingImagePaths.remove(userId);
-        database.deleteUserState(userId, PENDING_IMAGE_KEY);
+        removeState(userId, PENDING_IMAGE, pendingImages);
     }
 
-    private void ensureMediaLoaded(String userId) {
-        if (userId == null || userId.isBlank() || !loadedMediaUsers.add(userId)) return;
-        loadStringState(userId, PENDING_DRAW_KEY, pendingDrawPrompts);
-        loadStringState(userId, LAST_IMAGE_KEY, lastImagePaths);
-        loadStringState(userId, PENDING_IMAGE_KEY, pendingImagePaths);
+    @Override
+    public void setLastImageAnalysis(String userId, String analysis) {
+        String key = stateKey(userId, IMAGE_ANALYSIS);
+        if (analysis == null || analysis.isBlank()) {
+            imageAnalyses.remove(key);
+            deleteState(userId, IMAGE_ANALYSIS);
+            return;
+        }
+        imageAnalyses.put(key, analysis.trim());
+        saveState(userId, IMAGE_ANALYSIS, analysis.trim());
     }
 
-    private void loadStringState(String userId, String key, Map<String, String> target) {
-        String value = database.loadUserState(userId, key);
-        if (!value.isBlank()) target.put(userId, value);
+    @Override
+    public String getLastImageAnalysis(String userId) {
+        String key = stateKey(userId, IMAGE_ANALYSIS);
+        String value = imageAnalyses.get(key);
+        if (value != null) return value;
+        value = database.loadUserState(userId, scopedStateKey(userId, IMAGE_ANALYSIS));
+        if (!value.isBlank()) imageAnalyses.put(key, value);
+        return value.isBlank() ? null : value;
     }
 
     @Override
     public void setPendingFileExport(String userId, String userText, IntentResult route) {
-        if (userId == null || userId.isBlank() || route == null) return;
-        loadedFileExportUsers.add(userId);
-        PendingFileExport value = new PendingFileExport(userText, route,
-                System.currentTimeMillis() + PENDING_TTL_MILLIS);
-        pendingFileExports.put(userId, value);
-        database.saveUserState(userId, PENDING_FILE_EXPORT_KEY, gson.toJson(value));
+        PendingFileExport value = new PendingFileExport(userText, route, expiresAt());
+        pendingExports.put(stateKey(userId, FILE_EXPORT), value);
+        saveState(userId, FILE_EXPORT, value);
     }
 
     @Override
     public PendingFileExport getPendingFileExport(String userId) {
-        ensureFileExportLoaded(userId);
-        return pendingFileExports.get(userId);
+        PendingFileExport value = loadState(userId, FILE_EXPORT, PendingFileExport.class, pendingExports);
+        if (value != null && value.expiresAtMillis() <= System.currentTimeMillis()) {
+            clearPendingFileExport(userId);
+            return null;
+        }
+        return value;
     }
 
     @Override
@@ -181,41 +211,19 @@ public final class DefaultUserSessionStore implements UserSessionStore {
 
     @Override
     public void clearPendingFileExport(String userId) {
-        loadedFileExportUsers.add(userId);
-        pendingFileExports.remove(userId);
-        database.deleteUserState(userId, PENDING_FILE_EXPORT_KEY);
-    }
-
-    private void ensureFileExportLoaded(String userId) {
-        if (userId == null || userId.isBlank() || !loadedFileExportUsers.add(userId)) return;
-        String value = database.loadUserState(userId, PENDING_FILE_EXPORT_KEY);
-        if (value.isBlank()) return;
-        try {
-            PendingFileExport state = gson.fromJson(value, PendingFileExport.class);
-            if (state != null && state.expiresAtMillis() > System.currentTimeMillis()) {
-                pendingFileExports.put(userId, state);
-            } else {
-                database.deleteUserState(userId, PENDING_FILE_EXPORT_KEY);
-            }
-        } catch (JsonSyntaxException error) {
-            database.deleteUserState(userId, PENDING_FILE_EXPORT_KEY);
-        }
+        removeState(userId, FILE_EXPORT, pendingExports);
     }
 
     @Override
     public void setPendingExpress(String userId, String stage, String referenceNo) {
-        if (userId == null || userId.isBlank() || stage == null || stage.isBlank()) return;
-        loadedExpressUsers.add(userId);
-        PendingExpressState state = new PendingExpressState(stage,
-                referenceNo == null ? "" : referenceNo.trim());
-        pendingExpressStates.put(userId, state);
-        database.saveUserState(userId, PENDING_EXPRESS_KEY, gson.toJson(state));
+        PendingExpressState value = new PendingExpressState(stage, referenceNo == null ? "" : referenceNo.trim());
+        pendingExpress.put(stateKey(userId, EXPRESS), value);
+        saveState(userId, EXPRESS, value);
     }
 
     @Override
     public PendingExpressState getPendingExpress(String userId) {
-        ensureExpressLoaded(userId);
-        return pendingExpressStates.get(userId);
+        return loadState(userId, EXPRESS, PendingExpressState.class, pendingExpress);
     }
 
     @Override
@@ -225,211 +233,191 @@ public final class DefaultUserSessionStore implements UserSessionStore {
 
     @Override
     public void clearPendingExpress(String userId) {
-        loadedExpressUsers.add(userId);
-        pendingExpressStates.remove(userId);
-        database.deleteUserState(userId, PENDING_EXPRESS_KEY);
-    }
-
-    private void ensureExpressLoaded(String userId) {
-        if (userId == null || userId.isBlank() || !loadedExpressUsers.add(userId)) return;
-        String value = database.loadUserState(userId, PENDING_EXPRESS_KEY);
-        if (value.isBlank()) return;
-        try {
-            PendingExpressState state = gson.fromJson(value, PendingExpressState.class);
-            if (state != null && state.stage() != null && !state.stage().isBlank()) {
-                pendingExpressStates.put(userId, state);
-            }
-        } catch (JsonSyntaxException ignored) {
-            database.deleteUserState(userId, PENDING_EXPRESS_KEY);
-        }
-    }
-
-    @Override
-    public void setLastImageAnalysis(String userId, String analysis) {
-        if (analysis == null || analysis.isBlank()) {
-            lastImageAnalyses.remove(userId);
-        } else {
-            lastImageAnalyses.put(userId, analysis);
-        }
-    }
-
-    @Override
-    public String getLastImageAnalysis(String userId) {
-        return lastImageAnalyses.get(userId);
+        removeState(userId, EXPRESS, pendingExpress);
     }
 
     @Override
     public void setPendingWeatherLocations(String userId, List<WeatherLocation> locations, String weatherDay) {
-        if (userId == null || userId.isBlank() || locations == null || locations.isEmpty()) return;
-        loadedWeatherUsers.add(userId);
-        List<WeatherLocation> candidates = List.copyOf(locations);
-        String day = weatherDay == null || weatherDay.isBlank() ? "today" : weatherDay;
-        pendingWeatherLocations.put(userId, candidates);
-        pendingWeatherDays.put(userId, day);
-        database.saveUserState(userId, PENDING_WEATHER_KEY,
-                gson.toJson(new PendingWeatherState(candidates, day,
-                        System.currentTimeMillis() + PENDING_TTL_MILLIS)));
+        if (locations == null || locations.isEmpty()) return;
+        PendingWeatherState value = new PendingWeatherState(List.copyOf(locations),
+                weatherDay == null || weatherDay.isBlank() ? "today" : weatherDay, expiresAt());
+        pendingWeather.put(stateKey(userId, WEATHER), value);
+        saveState(userId, WEATHER, value);
     }
 
     @Override
     public List<WeatherLocation> getPendingWeatherLocations(String userId) {
-        ensureWeatherLoaded(userId);
-        return pendingWeatherLocations.getOrDefault(userId, List.of());
+        PendingWeatherState value = getPendingWeather(userId);
+        return value == null ? List.of() : value.locations();
     }
 
     @Override
     public boolean hasPendingWeatherLocations(String userId) {
-        ensureWeatherLoaded(userId);
-        return pendingWeatherLocations.containsKey(userId);
+        return getPendingWeather(userId) != null;
     }
 
     @Override
     public String getPendingWeatherDay(String userId) {
-        ensureWeatherLoaded(userId);
-        return pendingWeatherDays.getOrDefault(userId, "today");
+        PendingWeatherState value = getPendingWeather(userId);
+        return value == null ? "today" : value.weatherDay();
     }
 
     @Override
     public void clearPendingWeatherLocations(String userId) {
-        loadedWeatherUsers.add(userId);
-        pendingWeatherLocations.remove(userId);
-        pendingWeatherDays.remove(userId);
-        database.deleteUserState(userId, PENDING_WEATHER_KEY);
-    }
-
-    private void ensureWeatherLoaded(String userId) {
-        if (userId == null || userId.isBlank() || !loadedWeatherUsers.add(userId)) return;
-        String value = database.loadUserState(userId, PENDING_WEATHER_KEY);
-        if (value.isBlank()) return;
-        try {
-            PendingWeatherState state = gson.fromJson(value, PendingWeatherState.class);
-            if (state != null && state.expiresAtMillis() > System.currentTimeMillis()
-                    && !state.locations().isEmpty()) {
-                pendingWeatherLocations.put(userId, state.locations());
-                pendingWeatherDays.put(userId, state.weatherDay());
-            } else {
-                database.deleteUserState(userId, PENDING_WEATHER_KEY);
-            }
-        } catch (JsonSyntaxException error) {
-            database.deleteUserState(userId, PENDING_WEATHER_KEY);
-        }
+        removeState(userId, WEATHER, pendingWeather);
     }
 
     @Override
     public void setCurrentLocation(String userId, String location) {
-        if (userId == null || userId.isBlank() || location == null || location.isBlank()) return;
-        loadedLocationUsers.add(userId);
+        if (blank(userId) || blank(location)) return;
         String value = location.trim();
         currentLocations.put(userId, value);
-        String city = UserSessionStore.extractCity(value);
-        if (!city.isBlank()) {
-            currentCities.put(userId, city);
-        }
-        database.saveUserState(userId, CURRENT_LOCATION_KEY, gson.toJson(new CurrentLocationState(
-                value, city, System.currentTimeMillis() + CURRENT_LOCATION_TTL_MILLIS)));
-        database.deleteUserState(userId, CURRENT_CITY_KEY);
+        database.saveUserState(userId, LOCATION, value);
     }
 
     @Override
     public String getCurrentLocation(String userId) {
-        ensureLocationLoaded(userId);
-        return currentLocations.get(userId);
+        String cached = currentLocations.get(userId);
+        if (cached != null) return cached;
+        String value = database.loadUserState(userId, LOCATION);
+        if (!value.isBlank()) currentLocations.put(userId, value);
+        return value.isBlank() ? null : value;
     }
 
     @Override
     public String getCurrentCity(String userId) {
-        ensureLocationLoaded(userId);
-        return currentCities.get(userId);
-    }
-
-    private void ensureLocationLoaded(String userId) {
-        if (userId == null || userId.isBlank() || !loadedLocationUsers.add(userId)) return;
-        String value = database.loadUserState(userId, CURRENT_LOCATION_KEY);
-        if (value.isBlank()) return;
-        try {
-            CurrentLocationState state = gson.fromJson(value, CurrentLocationState.class);
-            if (state != null && state.expiresAtMillis() > System.currentTimeMillis()
-                    && state.location() != null && !state.location().isBlank()) {
-                currentLocations.put(userId, state.location());
-                String city = state.city().isBlank() ? UserSessionStore.extractCity(state.location()) : state.city();
-                if (!city.isBlank()) currentCities.put(userId, city);
-            } else {
-                database.deleteUserState(userId, CURRENT_LOCATION_KEY);
-                database.deleteUserState(userId, CURRENT_CITY_KEY);
-            }
-        } catch (JsonSyntaxException error) {
-            database.deleteUserState(userId, CURRENT_LOCATION_KEY);
-            database.deleteUserState(userId, CURRENT_CITY_KEY);
-        }
+        return UserSessionStore.extractCity(getCurrentLocation(userId));
     }
 
     @Override
     public ConversationSession getCurrentSession(String userId) {
-        ConversationSession session = sessions.get(userId);
-        if (session == null && database.isAvailable()) {
-            String activeSessionId = database.findActiveSessionId(userId);
-            if (activeSessionId != null) {
-                session = new ConversationSession(userId, activeSessionId,
-                        LocalDateTime.now(), LocalDateTime.now(), List.of(), Map.of());
-                sessions.put(userId, session);
-            }
+        ConversationSession cached = activeSessions.get(userId);
+        if (cached != null) return cached;
+        ChatSession active = loadActiveSession(userId);
+        if (active != null) {
+            ConversationSession session = new ConversationSession(userId, active.sessionId(),
+                    active.createdTime(), active.lastActiveTime(), List.of(), Map.of());
+            activeSessions.put(userId, session);
+            return session;
         }
-        return session;
-    }
-
-    @Override
-    public ChatSession getActiveSession(String userId) {
-        if (!database.isAvailable()) return null;
-        String sessionId = database.findActiveSessionId(userId);
-        if (sessionId == null) return null;
-        MySqlStore.SessionRow row = database.findSession(sessionId);
-        if (row == null) return null;
-        return new ChatSession(row.sessionId(), row.wechatId(), row.title(), row.status(),
-                row.lastActiveTime(), row.createdTime());
+        return createNewSession(userId);
     }
 
     @Override
     public ConversationSession createNewSession(String userId) {
-        var now = LocalDateTime.now();
-        var sessionId = UUID.randomUUID().toString();
+        LocalDateTime now = LocalDateTime.now();
+        String sessionId = UUID.randomUUID().toString();
         if (database.isAvailable()) {
             database.createSession(sessionId, userId, null);
+            database.deactivateOtherSessions(sessionId, userId);
         }
-        var session = new ConversationSession(userId, sessionId, now, now, List.of(), Map.of());
-        sessions.put(userId, session);
+        ConversationSession session = new ConversationSession(userId, sessionId, now, now, List.of(), Map.of());
+        activeSessions.put(userId, session);
         return session;
     }
 
     @Override
     public void refreshSession(String userId) {
-        var session = sessions.get(userId);
-        if (session != null) {
-            var refreshed = new ConversationSession(
-                    session.userId(),
-                    session.sessionId(),
-                    session.createdAt(),
-                    LocalDateTime.now(),
-                    session.messages(),
-                    session.taskState());
-            sessions.put(userId, refreshed);
-            if (database.isAvailable()) {
-                database.updateSessionActiveTime(session.sessionId());
-            }
+        ConversationSession current = getCurrentSession(userId);
+        ConversationSession refreshed = new ConversationSession(current.userId(), current.sessionId(),
+                current.createdAt(), LocalDateTime.now(), current.messages(), current.taskState());
+        activeSessions.put(userId, refreshed);
+        if (database.isAvailable()) database.updateSessionActiveTime(current.sessionId());
+    }
+
+    @Override
+    public boolean activateSession(String userId, String sessionId) {
+        if (blank(userId) || blank(sessionId) || !database.isAvailable()) return false;
+        MySqlStore.SessionRow row = database.findSession(sessionId);
+        if (row == null || !userId.equals(row.wechatId())) return false;
+        database.switchActiveSession(sessionId, userId);
+        activeSessions.put(userId, new ConversationSession(userId, sessionId,
+                row.createdTime(), LocalDateTime.now(), List.of(), Map.of()));
+        return true;
+    }
+
+    @Override
+    public ChatSession getActiveSession(String userId) {
+        ChatSession active = loadActiveSession(userId);
+        if (active != null) return active;
+        ConversationSession current = activeSessions.get(userId);
+        if (current == null) return null;
+        return new ChatSession(current.sessionId(), userId, "", "ACTIVE", current.lastActiveAt(), current.createdAt());
+    }
+
+    private ChatSession loadActiveSession(String userId) {
+        if (!database.isAvailable()) return null;
+        String sessionId = database.findActiveSessionId(userId);
+        if (sessionId == null) return null;
+        MySqlStore.SessionRow row = database.findSession(sessionId);
+        return row == null ? null : new ChatSession(row.sessionId(), row.wechatId(), row.title(), row.status(),
+                row.lastActiveTime(), row.createdTime());
+    }
+
+    private PendingWeatherState getPendingWeather(String userId) {
+        PendingWeatherState value = loadState(userId, WEATHER, PendingWeatherState.class, pendingWeather);
+        if (value != null && value.expiresAtMillis() <= System.currentTimeMillis()) {
+            clearPendingWeatherLocations(userId);
+            return null;
+        }
+        return value;
+    }
+
+    private void loadProfile(String userId) {
+        if (blank(userId) || !loadedProfiles.add(userId)) return;
+        String value = database.loadPersona(userId);
+        if (!blank(value)) personas.put(userId, value);
+    }
+
+    private <T> T loadState(String userId, String name, Class<T> type, Map<String, T> values) {
+        String key = stateKey(userId, name);
+        T cached = values.get(key);
+        if (cached != null) return cached;
+        String json = database.loadUserState(userId, scopedStateKey(userId, name));
+        if (json.isBlank()) return null;
+        try {
+            T value = gson.fromJson(json, type);
+            if (value != null) values.put(key, value);
+            return value;
+        } catch (JsonSyntaxException error) {
+            deleteState(userId, name);
+            return null;
         }
     }
 
-    private record PendingWeatherState(List<WeatherLocation> locations, String weatherDay,
-                                       long expiresAtMillis) {
+    private void saveState(String userId, String name, Object value) {
+        database.saveUserState(userId, scopedStateKey(userId, name), gson.toJson(value));
+    }
+
+    private void removeState(String userId, String name, Map<String, ?> values) {
+        values.remove(stateKey(userId, name));
+        deleteState(userId, name);
+    }
+
+    private void deleteState(String userId, String name) {
+        database.deleteUserState(userId, scopedStateKey(userId, name));
+    }
+
+    private String scopedStateKey(String userId, String name) {
+        return getCurrentSession(userId).sessionId() + ":" + name;
+    }
+
+    private String stateKey(String userId, String name) {
+        return getCurrentSession(userId).sessionId() + ":" + name;
+    }
+
+    private static long expiresAt() {
+        return System.currentTimeMillis() + PENDING_TTL_MILLIS;
+    }
+
+    private static boolean blank(String value) {
+        return value == null || value.isBlank();
+    }
+
+    private record PendingWeatherState(List<WeatherLocation> locations, String weatherDay, long expiresAtMillis) {
         private PendingWeatherState {
             locations = locations == null ? List.of() : List.copyOf(locations);
             weatherDay = weatherDay == null || weatherDay.isBlank() ? "today" : weatherDay;
-        }
-    }
-
-    private record CurrentLocationState(String location, String city, long expiresAtMillis) {
-        private CurrentLocationState {
-            location = location == null ? "" : location.trim();
-            city = city == null ? "" : city.trim();
         }
     }
 }

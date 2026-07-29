@@ -1,7 +1,7 @@
 package com.example.ilink.application.welcome;
 
 import com.example.ilink.application.messaging.ReplyChannel;
-import com.example.ilink.application.user.User;
+import com.example.ilink.application.conversation.User;
 import com.example.ilink.platform.persistence.UserRepository;
 
 public final class WelcomeHandler {
