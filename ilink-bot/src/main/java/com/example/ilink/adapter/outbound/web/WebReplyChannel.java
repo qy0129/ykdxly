@@ -74,7 +74,8 @@ public final class WebReplyChannel implements ReplyChannel {
                 + (text == null ? 0 : text.length()) + " preview=" + RequestLogContext.preview(text));
         rememberCompletedText(text);
         if (wechatBridge != null && text != null && !text.isBlank()) {
-            wechatBridge.mirrorWebReply(recipientId, text);
+            RequestScope scope = requestScope.get();
+            wechatBridge.mirrorWebReply(recipientId, scope == null ? "" : scope.requestId(), text);
         }
         publishScoped(recipientId, new AgentEvent(
                 AgentEvent.Type.COMPLETED, text, Map.of("kind", "text", "state", "idle")));

@@ -34,6 +34,7 @@
     <symbol id="icon-tool" viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5-5L7.5 3.5l3 3L8 9 5 6 2.8 8.2a4 4 0 0 0 5 5L17.5 23l5.5-5.5-9.7-9.7Z"/></symbol>
     <symbol id="icon-eraser" viewBox="0 0 24 24"><path d="m7 21-4-4L15 5l4 4Z"/><path d="m14 6 4 4M7 21h14"/></symbol>
     <symbol id="icon-external" viewBox="0 0 24 24"><path d="M15 4h5v5M20 4l-9 9M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6"/></symbol>
+    <symbol id="icon-maximize" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></symbol>
     <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
   </svg>
 
@@ -53,13 +54,11 @@
       <nav class="module-nav" aria-label="工作台导航">
         <span class="module-heading">工作台</span>
         <button type="button" class="module-link is-active" data-route="/web"><svg class="icon"><use href="#icon-message"/></svg><span>AI 工作台</span></button>
-        <button type="button" class="module-link" data-existing-view="wechat"><svg class="icon"><use href="#icon-tool"/></svg><span>微信 Bot</span></button>
+        <button type="button" class="module-link" data-route="/web/wechat"><svg class="icon"><use href="#icon-tool"/></svg><span>微信 Bot</span></button>
         <span class="module-heading">任务与空间</span>
         <button type="button" class="module-link" data-existing-view="plan"><svg class="icon"><use href="#icon-check"/></svg><span>七日计划</span></button>
         <button type="button" class="module-link" data-existing-view="sessions"><svg class="icon"><use href="#icon-message"/></svg><span>微信会话管理</span></button>
         <button type="button" class="module-link" data-route="/web/files"><svg class="icon"><use href="#icon-file"/></svg><span>工作空间文件</span></button>
-        <span class="module-heading">系统</span>
-        <button type="button" class="module-link" data-existing-view="login"><svg class="icon"><use href="#icon-image"/></svg><span>微信扫码登录</span></button>
       </nav>
       <div class="section-heading"><span>最近会话</span><span id="session-count">0</span></div>
       <nav id="session-list" class="session-list" aria-label="会话列表"></nav>
@@ -145,7 +144,7 @@
     <main id="console-views" class="console-views" hidden>
       <button id="console-open-sidebar" class="console-menu-button icon-button mobile-only has-tooltip" type="button" title="打开导航" aria-label="打开导航"><svg class="icon"><use href="#icon-menu"/></svg></button>
       <section class="console-view" data-view="wechat" hidden>
-        <header class="view-header wechat-header"><div><h1>微信 Bot</h1><p>电脑与手机共用当前微信 Bot 身份、会话、工具和记忆。</p></div><div class="inline-actions"><button class="secondary-command" type="button" data-existing-view="sessions">会话管理</button><button class="secondary-command" type="button" data-route="/web/files">电脑文件</button><span id="wechat-connection" class="status-badge">检查连接中</span></div></header>
+        <header class="view-header wechat-header"><div><h1>微信 Bot</h1><p>电脑与手机共用当前微信 Bot 身份、会话、工具和记忆。</p></div><div class="inline-actions"><button class="secondary-command" type="button" data-existing-view="sessions">会话管理</button><button class="secondary-command" type="button" data-route="/web/files">电脑文件</button><button id="wechat-login-button" class="secondary-command" type="button">重新扫码</button><span id="wechat-connection" class="status-badge">检查连接中</span></div></header>
         <section class="wechat-chat-surface">
           <div id="wechat-messages" class="mirror-messages wechat-conversation" aria-live="polite"><p class="muted-copy">正在加载同步对话。</p></div>
           <form id="wechat-composer" class="wechat-composer">
@@ -173,6 +172,19 @@
       <div id="activity-list" class="activity-list">
         <div class="activity-entry is-ready"><span class="activity-icon"><svg class="icon"><use href="#icon-check"/></svg></span><div><strong>就绪</strong><time>现在</time></div></div>
       </div>
+    </aside>
+
+    <button id="side-view-backdrop" class="side-view-backdrop" type="button" aria-label="关闭辅助页面"></button>
+    <aside id="side-view-panel" class="side-view-panel" aria-label="辅助页面" aria-hidden="true">
+      <header class="side-view-header">
+        <strong id="side-view-title">辅助页面</strong>
+        <div class="side-view-actions">
+          <a id="side-view-external" class="icon-button subtle-button has-tooltip" href="#" target="_blank" rel="noopener noreferrer" title="在新窗口打开" aria-label="在新窗口打开" data-tooltip="新窗口"><svg class="icon"><use href="#icon-external"/></svg></a>
+          <button id="side-view-fullscreen" class="icon-button subtle-button has-tooltip" type="button" title="全屏显示" aria-label="全屏显示" aria-pressed="false" data-tooltip="全屏"><svg class="icon"><use href="#icon-maximize"/></svg></button>
+          <button id="side-view-close" class="icon-button subtle-button has-tooltip" type="button" title="关闭" aria-label="关闭辅助页面" data-tooltip="关闭"><svg class="icon"><use href="#icon-x"/></svg></button>
+        </div>
+      </header>
+      <iframe id="side-view-frame" title="辅助页面内容"></iframe>
     </aside>
   </div>
 

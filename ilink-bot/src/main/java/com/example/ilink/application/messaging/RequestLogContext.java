@@ -1,5 +1,7 @@
 package com.example.ilink.application.messaging;
 
+import java.util.function.Consumer;
+
 /** Correlates request logs across the synchronous message-processing call chain. */
 public final class RequestLogContext {
 
@@ -11,8 +13,13 @@ public final class RequestLogContext {
     }
 
     public static Scope open(ChannelType channel, String userId, String sessionId, String requestId) {
+        return open(channel, userId, sessionId, requestId, null);
+    }
+
+    public static Scope open(ChannelType channel, String userId, String sessionId, String requestId,
+                             Consumer<AgentEvent> eventSink) {
         Context previous = CURRENT.get();
-        CURRENT.set(new Context(channel, clean(userId), clean(sessionId), clean(requestId)));
+        CURRENT.set(new Context(channel, clean(userId), clean(sessionId), clean(requestId), eventSink));
         return () -> restore(previous);
     }
 
@@ -61,6 +68,17 @@ public final class RequestLogContext {
                 ? "" : ": " + preview(message));
     }
 
+    /** Publishes a public progress summary when the inbound adapter supplied an event sink. */
+    public static void publish(AgentEvent event) {
+        Context context = CURRENT.get();
+        if (context == null || context.eventSink() == null || event == null) return;
+        try {
+            context.eventSink().accept(event);
+        } catch (RuntimeException ignored) {
+            // Progress reporting must never break the business operation.
+        }
+    }
+
     private static String shortId(String value) {
         String cleaned = clean(value);
         return cleaned.length() <= CORRELATION_ID_LIMIT
@@ -81,7 +99,8 @@ public final class RequestLogContext {
         else CURRENT.set(previous);
     }
 
-    private record Context(ChannelType channel, String userId, String sessionId, String requestId) {
+    private record Context(ChannelType channel, String userId, String sessionId, String requestId,
+                           Consumer<AgentEvent> eventSink) {
     }
 
     @FunctionalInterface

@@ -306,7 +306,7 @@ public final class MessageProcessor {
                 return;
             }
         }
-        String sessionId = sessions.getCurrentSession(userId).sessionId();
+        String sessionId = sessionId(context, userId);
         chatHistory.setUserSessionId(userId, sessionId);
         chatHistory.addUserMessage(userId, text);
         memoryExtractor.extract(userId, text);

@@ -193,11 +193,12 @@
     const metadata = event.metadata || {};
     const sessionId = metadata.sessionId || state.activeSessionId;
     const requestId = metadata.requestId || "";
+    const existingTask = requestId ? findTask(requestId) : null;
     let task = requestId ? upsertTask({
       requestId,
       sessionId,
       state: metadata.taskState || (event.type === "status" ? normalizeTaskState(metadata.state) : undefined),
-      createdAt: Number(metadata.startedAt) || Date.now(),
+      createdAt: Number(metadata.startedAt) || existingTask?.createdAt || Date.now(),
       elapsedMs: Number(metadata.elapsedMs) || 0,
       attempt: Number(metadata.attempt) || 1,
       detail: metadata.detail || event.content || "正在处理"
@@ -308,7 +309,9 @@
   }
 
   function appendTaskDetail(task, text, metadata) {
-    const elapsed = metadata.elapsedMs == null ? null : Number(metadata.elapsedMs);
+    const elapsed = metadata.elapsedMs == null
+      ? Math.max(0, Date.now() - (task.createdAt || Date.now()))
+      : Number(metadata.elapsedMs);
     const last = task.details[task.details.length - 1];
     if (last && last.text === text && last.status === metadata.status) return;
     task.details.push({ text, elapsed, status: metadata.status || "running" });
@@ -375,7 +378,10 @@
   }
 
   function currentElapsed(task) {
-    return task.elapsedMs + (task.state === "running" ? Date.now() - task.updatedAt : 0);
+    if (task.state !== "running" && task.state !== "queued") return task.elapsedMs;
+    const fromLastUpdate = task.elapsedMs + Math.max(0, Date.now() - task.updatedAt);
+    const fromStart = Math.max(0, Date.now() - (task.createdAt || task.updatedAt));
+    return Math.max(fromLastUpdate, fromStart);
   }
 
   function updateTaskTimers() {
@@ -472,6 +478,10 @@
   }
 
   async function useSession(session) {
+    if (location.pathname !== "/web") {
+      history.pushState({}, "", "/web");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    }
     state.selectedSessionId = session.sessionId;
     state.unreadSessions.delete(session.sessionId);
     renderSessions();
@@ -768,19 +778,84 @@
 
   function renderMessageContent(container, content, role) {
     const value = String(content || "");
+    const choices = role === "agent" ? extractChoices(value) : [];
     const text = document.createElement("div");
     text.className = "message-text";
-    if (role === "agent") renderLinkedText(text, value);
+    if (role === "agent") renderLinkedText(text, choices.length ? withoutChoiceLines(value, choices) : value);
     else text.textContent = value;
     container.replaceChildren(text);
     if (role !== "agent") return;
 
     const links = extractLinks(value);
-    if (!links.length) return;
+    if (links.length) {
+      const list = document.createElement("div");
+      list.className = "link-card-list";
+      links.forEach((link) => list.appendChild(createLinkCard(link, value)));
+      container.appendChild(list);
+    }
+    if (choices.length) container.appendChild(createChoiceCards(choices));
+  }
+
+  function extractChoices(content) {
+    const choices = [];
+    String(content || "").split(/\r?\n/).forEach((line, lineIndex) => {
+      const match = line.match(/^\s*(\d{1,2})\s*[.、):：]\s*(.{2,180})\s*$/);
+      if (match) choices.push({ value: match[1], label: match[2], lineIndex });
+    });
+    return choices.length >= 2 && choices.length <= 12 ? choices : [];
+  }
+
+  function withoutChoiceLines(content, choices) {
+    const choiceLines = new Set(choices.map((choice) => choice.lineIndex));
+    return String(content || "").split(/\r?\n/)
+      .filter((_, index) => !choiceLines.has(index)).join("\n").trim();
+  }
+
+  function createChoiceCards(choices) {
     const list = document.createElement("div");
-    list.className = "link-card-list";
-    links.forEach((link) => list.appendChild(createLinkCard(link, value)));
-    container.appendChild(list);
+    list.className = "choice-card-list";
+    list.setAttribute("aria-label", "可选操作");
+    choices.forEach((choice) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "choice-card";
+      const number = document.createElement("span");
+      number.className = "choice-card-number";
+      number.textContent = choice.value;
+      const label = document.createElement("span");
+      label.className = "choice-card-label";
+      label.textContent = choice.label;
+      button.append(number, label, iconElement("chevron"));
+      button.addEventListener("click", () => submitChoice(choice.value, list));
+      list.appendChild(button);
+    });
+    return list;
+  }
+
+  async function submitChoice(value, list) {
+    const sessionId = state.selectedSessionId;
+    if (!sessionId) return;
+    list.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+    addMessage("user", value);
+    try {
+      const data = await api("/api/web/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: value,
+          sessionId,
+          syncWechat: Boolean(document.getElementById("sync-wechat")?.checked),
+          syncReplies: Boolean(document.getElementById("sync-wechat-replies")?.checked)
+        })
+      });
+      upsertTask({ requestId: data.requestId, sessionId, state: "queued", createdAt: Date.now(), elapsedMs: 0, attempt: 0 });
+      renderTasks();
+      renderSessions();
+      updateSelectedState();
+    } catch (error) {
+      list.querySelectorAll("button").forEach((button) => { button.disabled = false; });
+      addActivity(error.message, "error", sessionId);
+    }
   }
 
   function renderLinkedText(container, content) {
@@ -1044,11 +1119,15 @@
       const detail = document.createElement("div");
       detail.className = "activity-detail";
       const values = [];
-      const toolName = metadata && (metadata.toolName || metadata.tool);
+      const toolName = metadata && (metadata.toolLabel || metadata.toolName || metadata.tool);
       if (toolName) values.push("工具：" + toolName);
-      if (metadata && metadata.status) values.push("状态：" + metadata.status);
+      if (metadata && metadata.model) values.push("模型：" + metadata.model);
+      if (metadata && metadata.phase) values.push("阶段：" + phaseLabel(metadata.phase));
+      if (metadata && (metadata.action || metadata.actions)) values.push("流程：" + (metadata.action || metadata.actions));
+      if (metadata && metadata.intent) values.push("意图：" + metadata.intent);
+      if (metadata && metadata.status) values.push("状态：" + statusLabel(metadata.status));
       if (metadata && metadata.elapsedMs != null) values.push("耗时：" + formatElapsed(Number(metadata.elapsedMs)));
-      detail.textContent = values.length ? values.join(" · ") : "工具执行事件已记录";
+      detail.textContent = values.length ? values.join(" · ") : "处理事件已记录";
       item.append(summary, detail);
     } else {
       item.append(marker, copy);
@@ -1056,6 +1135,14 @@
     if (activityKey) item.dataset.activityKey = String(activityKey);
     if (metadata && metadata.requestId) item.dataset.requestId = metadata.requestId;
     return item;
+  }
+
+  function phaseLabel(value) {
+    return ({ model: "模型分析", tool: "工具调用", workflow: "工作流程" })[value] || value;
+  }
+
+  function statusLabel(value) {
+    return ({ running: "进行中", success: "已完成", failed: "失败", paused: "已暂停" })[value] || value;
   }
 
   function settleActivity(requestId, finalKind) {

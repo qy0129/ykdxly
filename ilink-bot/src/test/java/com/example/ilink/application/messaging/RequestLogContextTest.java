@@ -2,6 +2,10 @@ package com.example.ilink.application.messaging;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -37,5 +41,21 @@ class RequestLogContextTest {
             assertEquals("[WX][回复发送]",
                     RequestLogContext.prefixFor(ChannelType.WECHAT, "回复发送", "wechat-user"));
         }
+    }
+
+    @Test
+    void forwardsPublicAgentEventsToTheCurrentRequestSink() {
+        List<AgentEvent> events = new ArrayList<>();
+        AgentEvent expected = new AgentEvent(AgentEvent.Type.TOOL_ACTIVITY,
+                "调用工具：文档问答", Map.of("toolName", "document_question"));
+
+        try (RequestLogContext.Scope ignored = RequestLogContext.open(
+                ChannelType.WEB, "web-user", "session-1", "request-1", events::add)) {
+            RequestLogContext.publish(expected);
+        }
+
+        assertEquals(List.of(expected), events);
+        RequestLogContext.publish(expected);
+        assertEquals(1, events.size(), "request scope must not leak after close");
     }
 }

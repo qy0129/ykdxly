@@ -88,9 +88,15 @@ public final class WechatWebBridge {
     public boolean processWebInput(String webUserId, String text) throws Exception {
         String wechatUserId = pairedWechatUserId(webUserId);
         Gateway current = gateway;
-        if (wechatUserId.isBlank() || current == null || !current.connected()) return false;
+        if (wechatUserId.isBlank() || current == null || !current.connected()
+                || !current.canSend(wechatUserId)) return false;
         record(wechatUserId, "web_input", text, "local");
-        current.mirrorWebInput(wechatUserId, text);
+        try {
+            current.mirrorWebInput(wechatUserId, text);
+        } catch (Exception error) {
+            publish("sync_failed", "Web 输入镜像到微信失败，AI 仍会继续处理",
+                    wechatUserId, "web_input", "failed");
+        }
         current.processText(wechatUserId, text);
         return true;
     }
@@ -104,18 +110,33 @@ public final class WechatWebBridge {
     }
 
     public boolean syncWebInput(String webUserId, String text, boolean includeReplies) throws Exception {
+        return syncWebInput(webUserId, "", text, includeReplies);
+    }
+
+    public boolean syncWebInput(String webUserId, String requestId, String text,
+                                boolean includeReplies) throws Exception {
         String wechatUserId = webToWechat.getOrDefault(webUserId, "");
         Gateway current = gateway;
-        if (wechatUserId.isBlank() || current == null || !current.connected()) return false;
-        syncReplies.put(webUserId, includeReplies);
-        current.sendText(wechatUserId, text);
-        return true;
+        if (wechatUserId.isBlank() || current == null || !current.connected()
+                || !current.canSend(wechatUserId)) return false;
+        String key = syncKey(webUserId, requestId);
+        syncReplies.put(key, includeReplies);
+        try {
+            current.sendText(wechatUserId, text);
+            return true;
+        } catch (Exception error) {
+            syncReplies.remove(key);
+            publish("sync_failed", "Web 消息同步到微信失败，请检查连接后重试",
+                    wechatUserId, "web_input", "failed");
+            return false;
+        }
     }
 
     public boolean sendFile(String webUserId, byte[] content, String fileName, String caption) throws Exception {
         String wechatUserId = webToWechat.getOrDefault(webUserId, "");
         Gateway current = gateway;
-        if (wechatUserId.isBlank() || current == null || !current.connected()) return false;
+        if (wechatUserId.isBlank() || current == null || !current.connected()
+                || !current.canSend(wechatUserId)) return false;
         current.sendFile(wechatUserId, content, fileName, caption);
         return true;
     }
@@ -130,15 +151,29 @@ public final class WechatWebBridge {
     }
 
     public void mirrorWebReply(String webUserId, String reply) {
-        if (!Boolean.TRUE.equals(syncReplies.get(webUserId))) return;
+        mirrorWebReply(webUserId, "", reply);
+    }
+
+    public void mirrorWebReply(String webUserId, String requestId, String reply) {
+        if (!Boolean.TRUE.equals(syncReplies.get(syncKey(webUserId, requestId)))) return;
         String wechatUserId = webToWechat.getOrDefault(webUserId, "");
         Gateway current = gateway;
-        if (wechatUserId.isBlank() || current == null || !current.connected()) return;
+        if (wechatUserId.isBlank() || current == null || !current.connected()
+                || !current.canSend(wechatUserId)) return;
         try {
             current.sendText(wechatUserId, reply);
         } catch (Exception ignored) {
-            publish("sync_failed", "同步微信失败", "", "bot_reply", "failed");
+            publish("sync_failed", "Bot 回复同步到微信失败，请检查连接后重试",
+                    wechatUserId, "bot_reply", "failed");
         }
+    }
+
+    public void endWebRequest(String webUserId, String requestId) {
+        syncReplies.remove(syncKey(webUserId, requestId));
+    }
+
+    private static String syncKey(String webUserId, String requestId) {
+        return webUserId + "|" + (requestId == null ? "" : requestId);
     }
 
     private void record(String wechatUserId, String source, String content, String syncState) {

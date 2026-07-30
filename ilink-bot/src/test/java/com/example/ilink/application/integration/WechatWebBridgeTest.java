@@ -65,17 +65,65 @@ class WechatWebBridgeTest {
         assertEquals("微信已登录，请先在手机向 Bot 发送一条消息", status.detail());
     }
 
+    @Test
+    void replySyncFlagsAreIsolatedByRequestAndSendFailureDoesNotLeakState() throws Exception {
+        WebEventBroker events = new WebEventBroker();
+        WechatWebBridge bridge = new WechatWebBridge(events);
+        Gateway gateway = new Gateway();
+        bridge.attach(gateway);
+        bridge.updateActiveUser("wechat-user");
+        bridge.activate("web-user");
+
+        assertTrue(bridge.syncWebInput("web-user", "request-a", "消息 A", true));
+        assertTrue(bridge.syncWebInput("web-user", "request-b", "消息 B", false));
+        bridge.mirrorWebReply("web-user", "request-b", "回复 B");
+        bridge.mirrorWebReply("web-user", "request-a", "回复 A");
+        assertEquals(List.of("消息 A", "消息 B", "回复 A"), gateway.texts);
+
+        gateway.failSend = true;
+        assertFalse(bridge.syncWebInput("web-user", "request-c", "失败消息", true));
+        gateway.failSend = false;
+        bridge.mirrorWebReply("web-user", "request-c", "不应补发");
+        assertEquals(List.of("消息 A", "消息 B", "回复 A"), gateway.texts);
+        assertEquals("sync_failed", events.history(WechatWebBridge.EVENT_STREAM, 0)
+                .getLast().event().metadata().get("integrationType"));
+    }
+
+    @Test
+    void mirrorFailureStillProcessesWebInput() throws Exception {
+        WebEventBroker events = new WebEventBroker();
+        WechatWebBridge bridge = new WechatWebBridge(events);
+        Gateway gateway = new Gateway();
+        gateway.failMirror = true;
+        bridge.attach(gateway);
+        bridge.updateActiveUser("wechat-user");
+        bridge.activate("web-user");
+
+        assertTrue(bridge.processWebInput("web-user", "继续完成任务"));
+        assertEquals(List.of("继续完成任务"), gateway.processedTexts);
+        assertEquals("sync_failed", events.history(WechatWebBridge.EVENT_STREAM, 0)
+                .getLast().event().metadata().get("integrationType"));
+    }
+
     private static final class Gateway implements WechatWebBridge.Gateway {
         private final List<String> texts = new ArrayList<>();
         private final List<String> processedTexts = new ArrayList<>();
         private final List<String> mirroredInputs = new ArrayList<>();
         private boolean canSend = true;
+        private boolean failSend;
+        private boolean failMirror;
         @Override public boolean connected() { return true; }
         @Override public boolean canSend(String userId) { return canSend; }
         @Override public String status() { return "connected"; }
-        @Override public void sendText(String userId, String text) { texts.add(text); }
+        @Override public void sendText(String userId, String text) {
+            if (failSend) throw new IllegalStateException("send failed");
+            texts.add(text);
+        }
         @Override public void sendFile(String userId, byte[] content, String fileName, String caption) { }
-        @Override public void mirrorWebInput(String userId, String text) { mirroredInputs.add(text); }
+        @Override public void mirrorWebInput(String userId, String text) {
+            if (failMirror) throw new IllegalStateException("mirror failed");
+            mirroredInputs.add(text);
+        }
         @Override public void processText(String userId, String text) { processedTexts.add(text); }
     }
 }

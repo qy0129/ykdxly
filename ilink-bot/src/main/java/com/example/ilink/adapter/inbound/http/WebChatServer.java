@@ -328,7 +328,7 @@ public final class WebChatServer implements AutoCloseable {
         boolean synced = false;
         if (body.has("syncWechat") && body.get("syncWechat").getAsBoolean() && wechatBridge != null) {
             try {
-                synced = wechatBridge.syncWebInput(client.userId, text,
+                synced = wechatBridge.syncWebInput(client.userId, task.id(), text,
                         body.has("syncReplies") && body.get("syncReplies").getAsBoolean());
             } catch (Exception error) {
                 System.err.println(webLog("微信同步失败", client, task) + " error=" + RequestLogContext.error(error));
@@ -379,7 +379,10 @@ public final class WebChatServer implements AutoCloseable {
             long executionGeneration = task.start();
             if (executionGeneration < 0L) return;
             try (RequestLogContext.Scope ignored = RequestLogContext.open(
-                    ChannelType.WEB, client.userId, task.sessionId(), task.id())) {
+                    ChannelType.WEB, client.userId, task.sessionId(), task.id(),
+                    event -> replyChannel.publish(client.userId, event));
+                 ChatHistoryStore.SessionScope historyScope = chatHistory.bindSession(
+                         client.userId, task.sessionId())) {
                 AgentContext context = AgentContext.web(client.userId, task.sessionId(),
                         replyChannel, client.workspaceId);
                 IncomingMessage message = new IncomingMessage(context.identity(), task.parts());
@@ -424,6 +427,7 @@ public final class WebChatServer implements AutoCloseable {
                 } finally {
                     replyChannel.consumeCompletedText(task.id());
                     replyChannel.endRequest();
+                    if (wechatBridge != null) wechatBridge.endWebRequest(client.userId, task.id());
                 }
             }
         });
@@ -874,7 +878,8 @@ public final class WebChatServer implements AutoCloseable {
         response.addProperty("wechatReady", status.ready());
         response.addProperty("wechatUrl", status.connected() && status.paired() ? "/web/wechat" : loginPageUrl(client));
         response.addProperty("loginUrl", loginPageUrl(client));
-        response.addProperty("planUrl", dailyDashboardServer == null ? "" : dailyDashboardServer.url());
+        response.addProperty("planUrl", dailyDashboardServer == null || !status.paired()
+                ? "" : dailyDashboardServer.loopbackUrlFor(status.wechatUserId()));
         response.addProperty("sessionsUrl", sessionManagementServer == null ? "" : sessionManagementServer.url());
         sendJson(exchange, 200, response);
     }
@@ -885,9 +890,10 @@ public final class WebChatServer implements AutoCloseable {
     }
 
     private void sendWechatLoginPage(HttpExchange exchange) throws IOException {
+        boolean force = "1".equals(query(exchange, "force"));
         if (wechatBridge != null) {
             WechatWebBridge.Status status = wechatBridge.activate(client(exchange).userId);
-            if (status.connected() && status.paired()) {
+            if (status.connected() && status.paired() && !force) {
                 redirect(exchange, "/web/wechat");
                 return;
             }
@@ -899,10 +905,11 @@ public final class WebChatServer implements AutoCloseable {
                   const check = async () => {
                     try {
                       const query = new URLSearchParams(location.search);
+                      const force = query.get('force') === '1';
                       query.set('summary', '1');
                       const response = await fetch('/api/web/login?' + query.toString(), { cache: 'no-store' });
                       const status = await response.json();
-                      if (status.connected && status.paired) location.replace('/web/wechat');
+                      if (status.connected && status.paired && !force) location.replace('/web/wechat');
                       else if (status.available && document.documentElement.dataset.qrPending === 'true') location.reload();
                     } catch (_) { }
                   };
@@ -1055,7 +1062,8 @@ public final class WebChatServer implements AutoCloseable {
         exchange.getResponseHeaders().set("X-Content-Type-Options", "nosniff");
         exchange.getResponseHeaders().set("Referrer-Policy", "no-referrer");
         exchange.getResponseHeaders().set("Content-Security-Policy",
-                "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'");
+                "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; "
+                        + "frame-src 'self' http://127.0.0.1:* http://localhost:*");
         exchange.sendResponseHeaders(status, body.length);
         exchange.getResponseBody().write(body);
     }

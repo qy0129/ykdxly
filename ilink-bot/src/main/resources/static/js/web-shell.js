@@ -1,7 +1,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const state = { roots: [], rootId: "", path: "", preview: null, previewUrl: "", wechatEvents: null,
-    wechatStatusTimer: 0, wechatReady: false, seen: new Set() };
+    wechatStatusTimer: 0, wechatReady: false, seen: new Set(), sideView: "", sideViewUrl: "" };
   const clientId = localStorage.getItem("ilink.web.client") || "";
   const workspaceId = localStorage.getItem("ilink.web.workspace") || "";
   const headers = (extra) => Object.assign({ "X-Web-Client-Id": clientId, "X-Web-Workspace-Id": workspaceId }, extra || {});
@@ -14,11 +14,22 @@
   const routeToView = (path) => ({ "/web/wechat": "wechat", "/web/files": "files" })[path] || "";
 
   document.querySelectorAll("[data-route]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.route)));
-  document.querySelectorAll("[data-existing-view]").forEach((button) => button.addEventListener("click", () => openExisting(button.dataset.existingView)));
+  document.querySelectorAll("[data-existing-view]").forEach((button) => button.addEventListener("click", () =>
+    openExisting(button.dataset.existingView, button.classList.contains("module-link"))));
   document.querySelectorAll("[data-route-link]").forEach((link) => link.addEventListener("click", (event) => { event.preventDefault(); navigate(link.dataset.routeLink); }));
   window.addEventListener("popstate", () => renderRoute(location.pathname, false));
   $("console-open-sidebar")?.addEventListener("click", () => $("open-sidebar")?.click());
   $("wechat-composer")?.addEventListener("submit", sendWechatMessage);
+  $("wechat-login-button")?.addEventListener("click", () => openExisting("login", false, true));
+  $("side-view-backdrop")?.addEventListener("click", closeSideView);
+  $("side-view-close")?.addEventListener("click", closeSideView);
+  $("side-view-fullscreen")?.addEventListener("click", toggleSideViewFullscreen);
+  window.addEventListener("message", (event) => {
+    if (event.origin !== location.origin || event.data?.type !== "ilink-wechat-connected") return;
+    closeSideView();
+    if (location.pathname !== "/web/wechat") navigate("/web/wechat");
+    else loadWechat();
+  });
   $("wechat-input")?.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
@@ -36,9 +47,14 @@
   function renderRoute(path) {
     if (path !== "/web/wechat") clearWechatStatusTimer();
     if (["/web/plan", "/web/sessions", "/web/login"].includes(path)) {
-      openExisting(path.substring("/web/".length));
+      showAiWorkspace();
+      const view = path.substring("/web/".length);
+      document.querySelectorAll(".module-link").forEach((item) =>
+        item.classList.toggle("is-active", item.dataset.existingView === view));
+      openExisting(view, false, view === "login");
       return;
     }
+    closeSideView(false);
     const view = routeToView(path);
     const chat = document.querySelector(".chat-workspace");
     const activity = document.querySelector(".activity-panel");
@@ -51,19 +67,66 @@
     if (view === "files") loadRoots();
   }
 
-  async function openExisting(view) {
+  function showAiWorkspace() {
+    document.querySelector(".chat-workspace").hidden = false;
+    document.querySelector(".activity-panel").hidden = false;
+    $("console-views").hidden = true;
+  }
+
+  async function openExisting(view, updateRoute, forceLogin) {
+    if (updateRoute) {
+      navigate("/web/" + view);
+      return;
+    }
     try {
       const navigation = await api("/api/web/navigation");
-      const url = view === "wechat" ? navigation.wechatUrl
+      let url = view === "wechat" ? navigation.wechatUrl
         : view === "plan" ? navigation.planUrl
         : view === "sessions" ? navigation.sessionsUrl
         : navigation.loginUrl;
       if (!url) throw new Error("对应页面尚未启动");
       if (url === "/web/wechat") navigate(url);
-      else window.location.assign(url);
+      else {
+        if (view === "login" && forceLogin) {
+          const loginUrl = new URL(url, location.origin);
+          loginUrl.searchParams.set("force", "1");
+          url = loginUrl.pathname + loginUrl.search;
+        }
+        openSideView(view, url);
+      }
     } catch (error) {
       window.alert(error.message);
     }
+  }
+
+  function openSideView(view, url) {
+    const titles = { plan: "七日计划", sessions: "微信会话管理", login: "微信扫码登录" };
+    state.sideView = view;
+    state.sideViewUrl = url;
+    $("side-view-title").textContent = titles[view] || "辅助页面";
+    $("side-view-frame").src = url;
+    $("side-view-external").href = url;
+    $("side-view-panel").classList.add("is-open");
+    $("side-view-panel").setAttribute("aria-hidden", "false");
+    $("side-view-backdrop").classList.add("is-open");
+  }
+
+  function closeSideView(clearFrame = true) {
+    const panel = $("side-view-panel");
+    panel.classList.remove("is-open", "is-fullscreen");
+    panel.setAttribute("aria-hidden", "true");
+    $("side-view-backdrop").classList.remove("is-open");
+    $("side-view-fullscreen").setAttribute("aria-pressed", "false");
+    if (clearFrame) $("side-view-frame").src = "about:blank";
+    state.sideView = "";
+    state.sideViewUrl = "";
+  }
+
+  function toggleSideViewFullscreen() {
+    const panel = $("side-view-panel");
+    const fullscreen = panel.classList.toggle("is-fullscreen");
+    $("side-view-fullscreen").setAttribute("aria-pressed", String(fullscreen));
+    $("side-view-fullscreen").title = fullscreen ? "退出全屏" : "全屏显示";
   }
 
   async function loadWechat() {
@@ -75,6 +138,7 @@
         return;
       }
       state.wechatReady = Boolean(status.ready);
+      $("wechat-connection").classList.remove("is-error");
       $("wechat-connection").textContent = status.detail || (state.wechatReady ? "微信已连接" : "微信已登录");
       setWechatComposerReady(state.wechatReady);
       renderWechatMessages((await api("/api/web/wechat/messages")).messages || []);
@@ -132,6 +196,11 @@
     source.addEventListener("agent", (event) => {
       localStorage.setItem("ilink.web.wechat.lastEventId", event.lastEventId || "0");
       const payload = JSON.parse(event.data); const meta = payload.metadata || {};
+      if (meta.integrationType === "sync_failed") {
+        $("wechat-connection").textContent = payload.content || "微信同步失败";
+        $("wechat-connection").classList.add("is-error");
+        return;
+      }
       const messageKey = meta.messageId || event.lastEventId;
       if (meta.integrationType !== "message" || state.seen.has(messageKey)) return;
       state.seen.add(messageKey); appendWechatMessage({ messageId: meta.messageId, content: payload.content, source: meta.source, syncState: meta.syncState, createdAtMillis: meta.createdAtMillis || Date.now() });

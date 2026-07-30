@@ -1,5 +1,6 @@
 package com.example.ilink.application.tooling;
 
+import com.example.ilink.application.messaging.AgentEvent;
 import com.example.ilink.application.messaging.RequestLogContext;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -66,16 +67,28 @@ public final class ToolManager {
         }
 
         ToolDefinition definition = tool.definition();
+        RequestLogContext.publish(new AgentEvent(AgentEvent.Type.TOOL_ACTIVITY,
+                "调用工具：" + definition.displayName(), Map.of(
+                "toolName", definition.name(), "toolLabel", definition.displayName(),
+                "status", "running", "phase", "tool")));
         System.out.println(RequestLogContext.prefix("工具") + " name=" + definition.name()
                 + " label=" + definition.displayName()
                 + " args=" + RequestLogContext.preview(arguments == null ? "{}" : arguments.toString()));
         try {
             ToolResult result = tool.execute(context, arguments);
             String status = result.success() ? "成功" : "失败";
+            RequestLogContext.publish(new AgentEvent(AgentEvent.Type.TOOL_ACTIVITY,
+                    (result.success() ? "工具完成：" : "工具失败：") + definition.displayName(), Map.of(
+                    "toolName", definition.name(), "toolLabel", definition.displayName(),
+                    "status", result.success() ? "success" : "failed", "phase", "tool")));
             System.out.println(RequestLogContext.prefix("工具结果") + " name=" + definition.name()
                     + " status=" + status);
             return result;
         } catch (Exception e) {
+            RequestLogContext.publish(new AgentEvent(AgentEvent.Type.TOOL_ACTIVITY,
+                    "工具失败：" + definition.displayName(), Map.of(
+                    "toolName", definition.name(), "toolLabel", definition.displayName(),
+                    "status", "failed", "phase", "tool")));
             System.err.println(RequestLogContext.prefix("工具结果") + " name=" + definition.name()
                     + " status=失败 error=" + RequestLogContext.error(e));
             return ToolResult.failure(e.getMessage());

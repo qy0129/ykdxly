@@ -54,6 +54,16 @@ class WebUiResourceTest {
         assertTrue(shell.contains("/api/web/workspace"));
         assertTrue(shell.contains("navigation.planUrl"));
         assertTrue(shell.contains("navigation.sessionsUrl"));
+        assertTrue(html.contains("wechat-login-button"));
+        assertTrue(html.contains("side-view-panel"));
+        assertTrue(html.contains("side-view-fullscreen"));
+        assertFalse(html.contains("data-existing-view=\"login\""));
+        assertTrue(script.contains("extractChoices"));
+        assertTrue(script.contains("choice-card-list"));
+        assertTrue(script.contains("location.pathname !== \"/web\""));
+        assertTrue(script.contains("const fromStart"));
+        assertTrue(shell.contains("openSideView"));
+        assertTrue(shell.contains("is-fullscreen"));
         assertFalse(html.contains("data-view=\"plan\""));
         assertFalse(html.contains("data-view=\"sessions\""));
         assertFalse(html.contains("data-view=\"login\""));
