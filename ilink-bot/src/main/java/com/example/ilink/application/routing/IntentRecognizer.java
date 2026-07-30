@@ -95,10 +95,13 @@ public final class IntentRecognizer {
                 }
                 actions.add(action);
             }
+            if (actions.size() == 1 && IntentPolicy.isExplicitImageEdit(userMessage)) {
+                return imageEditPlan(userMessage);
+            }
             return new IntentPlan(actions);
         } catch (Exception error) {
             System.err.println("[意图识别] 识别失败：" + error.getMessage());
-            return fallbackChatPlan(userMessage);
+            return fallbackPlan(userMessage, context);
         }
     }
 
@@ -126,10 +129,14 @@ public final class IntentRecognizer {
                 actions.add(new IntentAction(id, requestText,
                         stringList(action, "depends_on"), toIntentResult(action)));
             }
-            return actions.isEmpty() ? fallbackPlan(userMessage) : new IntentPlan(actions);
+            if (actions.isEmpty()) return fallbackPlan(userMessage, context);
+            if (actions.size() == 1 && IntentPolicy.isExplicitImageEdit(userMessage)) {
+                return imageEditPlan(userMessage);
+            }
+            return new IntentPlan(actions);
         } catch (Exception error) {
             System.err.println("[统一意图识别] 识别失败：" + error.getMessage());
-            return fallbackPlan(userMessage);
+            return fallbackPlan(userMessage, context);
         }
     }
 
@@ -305,8 +312,17 @@ public final class IntentRecognizer {
         return fallbackPlan(userMessage);
     }
 
-    /** 路由调用失败时仍维持统一动作契约；只对强确定性的绘图意图给出最小兜底。 */
+    /** 兼容不带上下文的既有调用。 */
     private IntentPlan fallbackPlan(String userMessage) {
+        return fallbackPlan(userMessage, RoutingContext.minimal(
+                new IntentContext(false, false, false, false, false)));
+    }
+
+    /** 路由调用失败时仍维持统一动作契约，保留确定性的图片生成和编辑能力。 */
+    private IntentPlan fallbackPlan(String userMessage, RoutingContext context) {
+        if (IntentPolicy.isExplicitImageEdit(userMessage)) {
+            return imageEditPlan(userMessage);
+        }
         if (IntentPolicy.isExplicitImageCreation(userMessage)) {
             JsonObject action = new JsonObject();
             action.addProperty("intent", "draw");
@@ -318,6 +334,16 @@ public final class IntentRecognizer {
             return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), toIntentResult(action))));
         }
         return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), IntentResult.chat())));
+    }
+
+    private IntentPlan imageEditPlan(String userMessage) {
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "image_action");
+        action.addProperty("image_action", "edit");
+        action.addProperty("image_prompt", userMessage);
+        action.addProperty("reply_mode", "keep");
+        action.addProperty("voice_style", "default");
+        return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), toIntentResult(action))));
     }
 
     /** 规则层只做参数和安全约束校验，不负责在能力之间抢路由。 */
@@ -334,6 +360,13 @@ public final class IntentRecognizer {
         boolean imageCreation = IntentPolicy.isExplicitImageCreation(userMessage);
         boolean imageEdit = IntentPolicy.isExplicitImageEdit(userMessage);
         boolean fileRequest = IntentPolicy.hasExplicitFileRequest(userMessage);
+        if (imageEdit) {
+            action.addProperty("intent", "image_action");
+            action.addProperty("image_action", "edit");
+            action.addProperty("image_prompt", defaultPrompt(action, actionText, userMessage));
+            action.addProperty("output_file_type", "none");
+            return;
+        }
         if (imageCreation && "chat".equals(intent)) {
             action.addProperty("intent", "draw");
             action.addProperty("en_prompt", defaultPrompt(action, actionText, userMessage));
@@ -381,8 +414,9 @@ public final class IntentRecognizer {
                 action.addProperty("image_size", "none");
             }
         }
-        if ("image_action".equals(intent) && string(action, "image_prompt").isBlank()) {
-            action.addProperty("image_prompt", actionText);
+        if ("image_action".equals(intent)) {
+            action.addProperty("image_action", normalizeImageAction(string(action, "image_action")));
+            if (string(action, "image_prompt").isBlank()) action.addProperty("image_prompt", actionText);
         }
         if ("nearby_food".equals(intent) && !isNearbyDiningRequest(userMessage)
                 && !IntentPolicy.isExplicitLocationRememberRequest(userMessage)) {
@@ -550,6 +584,16 @@ public final class IntentRecognizer {
         action.addProperty("output_file_type", "none");
         action.addProperty("image_action", "none");
         action.addProperty("image_size", "none");
+    }
+
+    private String normalizeImageAction(String value) {
+        return switch (value == null ? "" : value.trim().toLowerCase()) {
+            case "edit", "modify", "change", "add", "insert", "image_edit" -> "edit";
+            case "analyze", "analysis" -> "analyze";
+            case "solve", "answer" -> "solve";
+            case "clarify" -> "clarify";
+            default -> "none";
+        };
     }
 
     private String defaultPrompt(JsonObject action, String actionText, String userMessage) {

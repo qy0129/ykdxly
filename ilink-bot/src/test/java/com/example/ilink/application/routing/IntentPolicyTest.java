@@ -31,6 +31,8 @@ class IntentPolicyTest {
     @Test
     void imageAndDocumentEditsAreSeparatedByExplicitObject() {
         assertTrue(IntentPolicy.isExplicitImageEdit("把这张图片改成水彩风格"));
+        assertTrue(IntentPolicy.isExplicitImageEdit("将上面生成那只小猫的眼睛上戴一个墨镜"));
+        assertTrue(IntentPolicy.isExplicitImageEdit("帮我在刚刚那只小猫的图片上再加一个小狗"));
         assertTrue(IntentPolicy.isExplicitDocumentEdit("把文档第三段删除"));
         assertFalse(IntentPolicy.isExplicitDocumentEdit("把这张图片改成水彩风格"));
     }
@@ -100,6 +102,25 @@ class IntentPolicyTest {
                 action, new IntentContext(true, true, false, false, false));
 
         assertEquals("分析这张图片里的表格", action.get("image_prompt").getAsString());
+    }
+
+    @Test
+    void explicitImageEditCorrectsChatIntentAndMissingSubtype() throws Exception {
+        IntentRecognizer recognizer = new IntentRecognizer(HttpClient.newHttpClient());
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "chat");
+
+        Method normalize = IntentRecognizer.class.getDeclaredMethod(
+                "normalizeAction", String.class, String.class, JsonObject.class, IntentContext.class);
+        normalize.setAccessible(true);
+        normalize.invoke(recognizer, "帮我在刚刚那只小猫的图片上再加一个小狗",
+                "帮我在刚刚那只小猫的图片上再加一个小狗", action,
+                new IntentContext(false, true, false, false, false));
+
+        assertEquals("image_action", action.get("intent").getAsString());
+        assertEquals("edit", action.get("image_action").getAsString());
+        assertEquals("帮我在刚刚那只小猫的图片上再加一个小狗",
+                action.get("image_prompt").getAsString());
     }
 
     @Test

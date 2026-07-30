@@ -76,4 +76,37 @@ class IntentRecognizerJsonTest {
         assertEquals("chat", plan.actions().getFirst().route().intent());
         assertEquals("你好", plan.actions().getFirst().requestText());
     }
+
+    @Test
+    void fallsBackToImageEditWhenRoutingFails() {
+        IntentRecognizer recognizer = new IntentRecognizer(body -> {
+            throw new IllegalStateException("offline");
+        });
+
+        IntentPlan plan = recognizer.recognize("user", "将上面生成那只小猫的眼睛上戴一个墨镜",
+                new IntentContext(false, true, false, false, false));
+
+        assertEquals(1, plan.actions().size());
+        assertEquals("image_action", plan.actions().getFirst().route().intent());
+        assertEquals("edit", plan.actions().getFirst().route().imageAction());
+        assertEquals("将上面生成那只小猫的眼睛上戴一个墨镜",
+                plan.actions().getFirst().route().imagePrompt());
+    }
+
+    @Test
+    void correctsModelChatResultToImageEdit() {
+        List<String> responses = List.of(
+                "{\"requirements\":[{\"id\":\"r1\",\"text\":\"帮我在刚刚那只小猫的图片上再加一个小狗\",\"depends_on\":[]}]}",
+                "{\"actions\":[{\"requirement_id\":\"r1\",\"intent\":\"chat\"}]}"
+        );
+        AtomicInteger index = new AtomicInteger();
+        IntentRecognizer recognizer = new IntentRecognizer(body -> responses.get(index.getAndIncrement()));
+
+        IntentPlan plan = recognizer.recognize("user", "帮我在刚刚那只小猫的图片上再加一个小狗",
+                new IntentContext(false, true, false, false, false));
+
+        assertEquals("image_action", plan.actions().getFirst().route().intent());
+        assertEquals("edit", plan.actions().getFirst().route().imageAction());
+        assertEquals(2, index.get());
+    }
 }

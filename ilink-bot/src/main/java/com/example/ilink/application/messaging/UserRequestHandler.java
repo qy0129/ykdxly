@@ -1235,16 +1235,21 @@ public final class UserRequestHandler {
     /** 处理图片分析、解题和编辑请求。 */
     private void handleImageAction(ReplyChannel client, String userId, String actionText,
                                    IntentResult route) throws Exception {
-        if ("clarify".equals(route.imageAction()) || "none".equals(route.imageAction())) {
+        String imageAction = route.imageAction();
+        if ((imageAction == null || imageAction.isBlank() || "none".equals(imageAction)
+                || "clarify".equals(imageAction)) && IntentPolicy.isExplicitImageEdit(actionText)) {
+            imageAction = "edit";
+        }
+        if ("clarify".equals(imageAction) || "none".equals(imageAction)) {
             replySender.sendReply(client, userId, "请告诉我想怎么处理图片：分析内容、解答题目，还是修改图片？");
             return;
         }
 
-        if ("analyze".equals(route.imageAction()) || "solve".equals(route.imageAction())) {
+        if ("analyze".equals(imageAction) || "solve".equals(imageAction)) {
             JsonObject arguments = new JsonObject();
             String request = route.imagePrompt().isBlank() ? actionText : route.imagePrompt();
             arguments.addProperty("request", request);
-            arguments.addProperty("mode", route.imageAction());
+            arguments.addProperty("mode", imageAction);
             ToolResult result = toolManager.execute(
                     ImageAnalysisTool.NAME, new ToolContext(userId), arguments);
             if (result.success()) {
@@ -1255,7 +1260,7 @@ public final class UserRequestHandler {
             return;
         }
 
-        if ("edit".equals(route.imageAction())) {
+        if ("edit".equals(imageAction)) {
             JsonObject arguments = new JsonObject();
             String prompt = route.imagePrompt().isBlank() ? actionText : route.imagePrompt();
             arguments.addProperty("prompt", prompt);
@@ -1273,7 +1278,11 @@ public final class UserRequestHandler {
                 String error = result.success() ? "图片服务没有返回有效图片，请稍后重试。" : result.output();
                 replySender.sendReply(client, userId, error);
             }
+            return;
         }
+
+        replySender.sendReply(client, userId,
+                "我识别到你想处理图片，但没有确定具体操作。请说明要分析、解题，还是修改图片。");
     }
 
     /** 调用费用分摊工具，处理多人 AA 和不同付款金额的结算。 */
