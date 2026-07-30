@@ -3,6 +3,8 @@ package com.example.ilink.bootstrap;
 import java.io.*;
 import java.nio.file.*;
 import java.time.Duration;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Properties;
 
 /**
@@ -141,6 +143,21 @@ public class Config {
             loadProperty("session.management.bind.address", "127.0.0.1");
     public static final int SESSION_MANAGEMENT_PORT =
             Integer.parseInt(loadProperty("session.management.port", "8791"));
+    /** 本机 Web Bot 配置，与微信入站适配器相互独立。 */
+    public static final boolean WEB_CHAT_ENABLED =
+            Boolean.parseBoolean(loadProperty("web.chat.enabled", "true"));
+    public static final String WEB_CHAT_BIND_ADDRESS =
+            loadProperty("web.chat.bind.address", "127.0.0.1");
+    public static final int WEB_CHAT_PORT =
+            Integer.parseInt(loadProperty("web.chat.port", "8792"));
+    public static final long WEB_CHAT_MAX_UPLOAD_BYTES = Math.max(1L, Long.parseLong(
+            loadProperty("web.chat.max.upload.mb", "25"))) * 1024L * 1024L;
+    /** Roots exposed by the local Web workspace browser; paths outside these roots are rejected. */
+    public static final List<Path> WORKSPACE_ROOTS = Arrays.stream(
+                    loadProperty("workspace.roots", "").split(";"))
+            .map(String::trim).filter(value -> !value.isBlank()).map(Path::of).toList();
+    public static final long WORKSPACE_MAX_SEND_BYTES = Math.max(1L, Long.parseLong(
+            loadProperty("workspace.max.send.mb", "20"))) * 1024L * 1024L;
     /** Executive Automation 本机控制台。 */
     public static final boolean AUTOMATION_CONSOLE_ENABLED =
             Boolean.parseBoolean(loadProperty("automation.console.enabled", "true"));

@@ -26,4 +26,24 @@ public final class SessionService {
     public boolean switchSession(String userId, String sessionId) {
         return sessions.activateSession(userId, sessionId);
     }
+
+    public boolean renameSession(String userId, String sessionId, String title) {
+        return database.renameSession(sessionId, userId, title);
+    }
+
+    public boolean autoNameSession(String userId, String sessionId, String title) {
+        return database.autoRenameSession(sessionId, userId, title);
+    }
+
+    public String deleteSession(String userId, String sessionId) {
+        String activeSessionId = sessions.getCurrentSession(userId).sessionId();
+        if (!database.deleteSession(sessionId, userId)) return null;
+        if (!sessionId.equals(activeSessionId)) return activeSessionId;
+
+        List<MySqlStore.SessionRow> remaining = database.listUserSessions(userId);
+        if (!remaining.isEmpty() && sessions.activateSession(userId, remaining.getFirst().sessionId())) {
+            return remaining.getFirst().sessionId();
+        }
+        return sessions.createNewSession(userId).sessionId();
+    }
 }

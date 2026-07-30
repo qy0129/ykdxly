@@ -14,6 +14,7 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
+import java.net.BindException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -38,6 +39,7 @@ public final class SessionManagementServer implements AutoCloseable {
     private final String accessToken = UUID.randomUUID().toString().replace("-", "");
     private final ExecutorService executor = Executors.newFixedThreadPool(3);
     private volatile String ownerUserId = "";
+    private volatile int runtimePort;
     private HttpServer server;
 
     public SessionManagementServer(SessionService sessionService, UserSessionStore sessions, MySqlStore database) {
@@ -49,11 +51,17 @@ public final class SessionManagementServer implements AutoCloseable {
     public void start() {
         if (!Config.SESSION_MANAGEMENT_ENABLED) return;
         try {
-            server = HttpServer.create(new InetSocketAddress(
-                    Config.SESSION_MANAGEMENT_BIND_ADDRESS, Config.SESSION_MANAGEMENT_PORT), 0);
+            try {
+                server = createServer(Config.SESSION_MANAGEMENT_PORT);
+            } catch (BindException busy) {
+                server = createServer(0);
+                System.err.println("[会话管理] 端口 " + Config.SESSION_MANAGEMENT_PORT
+                        + " 已占用，改用本地端口 " + server.getAddress().getPort());
+            }
             server.createContext("/", this::handle);
             server.setExecutor(executor);
             server.start();
+            runtimePort = server.getAddress().getPort();
             System.out.println("[会话管理] 已启动: " + url());
         } catch (IOException error) {
             System.err.println("[会话管理] 启动失败: " + error.getMessage());
@@ -64,7 +72,11 @@ public final class SessionManagementServer implements AutoCloseable {
     public String url() {
         if (server == null) return "";
         return "http://" + Config.SESSION_MANAGEMENT_BIND_ADDRESS + ":"
-                + Config.SESSION_MANAGEMENT_PORT + "/sessions/" + accessToken;
+                + runtimePort + "/sessions/" + accessToken;
+    }
+
+    private HttpServer createServer(int port) throws IOException {
+        return HttpServer.create(new InetSocketAddress(Config.SESSION_MANAGEMENT_BIND_ADDRESS, port), 0);
     }
 
     /** 由微信消息入口刷新页面所管理的当前用户。 */

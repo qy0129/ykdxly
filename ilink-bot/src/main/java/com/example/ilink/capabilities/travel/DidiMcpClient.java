@@ -171,16 +171,68 @@ public final class DidiMcpClient {
         return result;
     }
 
-    private JsonObject structuredContent(JsonObject result) {
+    static JsonObject structuredContent(JsonObject result) {
         JsonObject structured = object(result, "structuredContent");
-        if (structured == null) throw new IllegalStateException("滴滴 Sandbox 返回缺少结构化数据");
-        return structured;
+        if (structured != null) return unwrapStructuredContent(structured);
+        structured = object(result, "structured_content");
+        if (structured != null) return unwrapStructuredContent(structured);
+
+        // Sandbox responses can put the same JSON in a text content item instead of structuredContent.
+        for (JsonElement content : contents(result)) {
+            JsonObject item = content.isJsonObject() ? content.getAsJsonObject() : null;
+            JsonObject candidate = jsonObject(item == null ? null : item.get("structuredContent"));
+            if (candidate == null) candidate = jsonObject(item == null ? null : item.get("structured_content"));
+            if (candidate == null) candidate = jsonObject(item == null ? null : item.get("text"));
+            if (candidate != null) return unwrapStructuredContent(candidate);
+        }
+        throw new IllegalStateException("滴滴 Sandbox 返回缺少可解析的结构化数据");
     }
 
     private String contentText(JsonObject result) {
-        JsonArray content = result.getAsJsonArray("content");
-        if (content == null || content.isEmpty()) throw new IllegalStateException("滴滴 Sandbox 返回缺少内容");
-        return value(content.get(0).getAsJsonObject(), "text");
+        StringBuilder text = new StringBuilder();
+        for (JsonElement content : contents(result)) {
+            if (content.isJsonObject()) {
+                String value = value(content.getAsJsonObject(), "text");
+                if (!value.isBlank()) {
+                    if (!text.isEmpty()) text.append('\n');
+                    text.append(value);
+                }
+            }
+        }
+        if (text.isEmpty()) throw new IllegalStateException("滴滴 Sandbox 返回缺少内容");
+        return text.toString();
+    }
+
+    private static JsonArray contents(JsonObject result) {
+        return result != null && result.has("content") && result.get("content").isJsonArray()
+                ? result.getAsJsonArray("content") : new JsonArray();
+    }
+
+    private static JsonObject unwrapStructuredContent(JsonObject candidate) {
+        JsonObject structured = object(candidate, "structuredContent");
+        if (structured != null) return structured;
+        structured = object(candidate, "structured_content");
+        if (structured != null) return structured;
+        JsonObject data = object(candidate, "data");
+        return data == null ? candidate : data;
+    }
+
+    private static JsonObject jsonObject(JsonElement value) {
+        if (value == null || value.isJsonNull()) return null;
+        if (value.isJsonObject()) return value.getAsJsonObject();
+        if (!value.isJsonPrimitive() || !value.getAsJsonPrimitive().isString()) return null;
+        String json = value.getAsString().trim();
+        if (json.startsWith("```")) {
+            int lineBreak = json.indexOf('\n');
+            json = lineBreak >= 0 ? json.substring(lineBreak + 1) : "";
+            if (json.endsWith("```")) json = json.substring(0, json.length() - 3).trim();
+        }
+        try {
+            JsonElement parsed = JsonParser.parseString(json);
+            return parsed.isJsonObject() ? parsed.getAsJsonObject() : null;
+        } catch (RuntimeException ignored) {
+            return null;
+        }
     }
 
     private static JsonObject object(JsonObject source, String name) {

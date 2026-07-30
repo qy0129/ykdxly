@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 
+/** Embedding adapter compatible with providers that require a single string input. */
 public class EmbeddingService {
 
     private final HttpClient httpClient;
@@ -24,18 +25,26 @@ public class EmbeddingService {
     }
 
     public List<Float> embed(String text) throws Exception {
-        return embedBatch(List.of(text)).get(0);
+        return requestVector(requestBody(Config.EMBEDDING_MODEL, text));
     }
 
+    /** Keep the batch API for callers, while sending provider-compatible single inputs. */
     public List<List<Float>> embedBatch(List<String> texts) throws Exception {
         if (texts == null || texts.isEmpty()) return List.of();
-        JsonObject body = new JsonObject();
-        body.addProperty("model", Config.EMBEDDING_MODEL);
-        JsonArray input = new JsonArray();
-        texts.forEach(input::add);
-        body.add("input", input);
-        body.addProperty("encoding_format", "float");
+        List<List<Float>> vectors = new ArrayList<>(texts.size());
+        for (String text : texts) vectors.add(embed(text));
+        return vectors;
+    }
 
+    static JsonObject requestBody(String model, String text) {
+        JsonObject body = new JsonObject();
+        body.addProperty("model", model);
+        body.addProperty("input", text == null ? "" : text);
+        body.addProperty("encoding_format", "float");
+        return body;
+    }
+
+    private List<Float> requestVector(JsonObject body) throws Exception {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(Config.EMBEDDING_API_URL))
                 .timeout(Duration.ofSeconds(30))
@@ -53,18 +62,10 @@ public class EmbeddingService {
 
         JsonObject json = JsonParser.parseString(response.body()).getAsJsonObject();
         JsonArray data = json.getAsJsonArray("data");
-        if (data == null || data.isEmpty()) {
-            throw new RuntimeException("Embedding API returned empty data");
-        }
-
-        List<List<Float>> vectors = new ArrayList<>(data.size());
-        for (var item : data) {
-            JsonArray values = item.getAsJsonObject().getAsJsonArray("embedding");
-            List<Float> vector = new ArrayList<>(values.size());
-            for (var value : values) vector.add(value.getAsFloat());
-            vectors.add(vector);
-        }
-        if (vectors.size() != texts.size()) throw new RuntimeException("Embedding API returned incomplete data");
-        return vectors;
+        if (data == null || data.isEmpty()) throw new RuntimeException("Embedding API returned empty data");
+        JsonArray values = data.get(0).getAsJsonObject().getAsJsonArray("embedding");
+        List<Float> vector = new ArrayList<>(values.size());
+        for (var value : values) vector.add(value.getAsFloat());
+        return vector;
     }
 }

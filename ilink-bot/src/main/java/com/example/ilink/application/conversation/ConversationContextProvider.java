@@ -13,7 +13,12 @@ public final class ConversationContextProvider {
 
     public ConversationContext build(String userId) {
         ConversationSession session = sessions.getCurrentSession(userId);
-        String sessionId = session.sessionId();
+        return build(userId, session.sessionId());
+    }
+
+    public ConversationContext build(String userId, String requestedSessionId) {
+        String sessionId = requestedSessionId == null || requestedSessionId.isBlank()
+                ? sessions.getCurrentSession(userId).sessionId() : requestedSessionId;
         return new ConversationContext(sessionId, sessions.getPersonaPrompt(userId),
                 database.loadSessionSummary(sessionId),
                 database.loadSessionMessages(sessionId, 20));
