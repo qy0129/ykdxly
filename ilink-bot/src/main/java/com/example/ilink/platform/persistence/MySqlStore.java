@@ -85,8 +85,8 @@ public final class MySqlStore implements AutoCloseable {
     public List<ChatEntry> loadRecentMessages(String userId, int limit) {
         if (!isAvailable()) return List.of();
 
-        String sql = "SELECT role, content FROM ("
-                + "SELECT id, role, content FROM chat_messages "
+        String sql = "SELECT id, role, message_type, content FROM ("
+                + "SELECT id, role, message_type, content FROM chat_messages "
                 + "WHERE bot_id = ? AND user_id = ? ORDER BY id DESC LIMIT ?"
                 + ") recent ORDER BY id ASC";
         List<ChatEntry> messages = new ArrayList<>();
@@ -97,7 +97,9 @@ public final class MySqlStore implements AutoCloseable {
             statement.setInt(3, limit);
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
-                    messages.add(new ChatEntry(result.getString("role"), result.getString("content")));
+                    messages.add(new ChatEntry(result.getLong("id"),
+                            result.getString("role"), result.getString("message_type"),
+                            result.getString("content")));
                 }
             }
         } catch (SQLException e) {
@@ -793,7 +795,7 @@ public final class MySqlStore implements AutoCloseable {
 
     public SessionRow findSession(String sessionId) {
         if (!isAvailable()) return null;
-        String sql = "SELECT session_id, wechat_id, title, status, last_active_time, created_time "
+        String sql = "SELECT session_id, wechat_id, title, title_source, status, last_active_time, created_time "
                 + "FROM chat_session WHERE session_id = ?";
         try (Connection connection = openConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -801,7 +803,7 @@ public final class MySqlStore implements AutoCloseable {
             try (ResultSet result = statement.executeQuery()) {
                 if (result.next()) {
                     return new SessionRow(result.getString("session_id"), result.getString("wechat_id"),
-                            result.getString("title"), result.getString("status"),
+                            result.getString("title"), result.getString("title_source"), result.getString("status"),
                             toLocalDateTime(result.getTimestamp("last_active_time")),
                             toLocalDateTime(result.getTimestamp("created_time")));
                 }
@@ -814,7 +816,7 @@ public final class MySqlStore implements AutoCloseable {
 
     public List<SessionRow> listUserSessions(String wechatId) {
         if (!isAvailable()) return List.of();
-        String sql = "SELECT session_id, wechat_id, title, status, last_active_time, created_time "
+        String sql = "SELECT session_id, wechat_id, title, title_source, status, last_active_time, created_time "
                 + "FROM chat_session WHERE wechat_id = ? ORDER BY last_active_time DESC";
         List<SessionRow> sessions = new ArrayList<>();
         try (Connection connection = openConnection();
@@ -823,7 +825,7 @@ public final class MySqlStore implements AutoCloseable {
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
                     sessions.add(new SessionRow(result.getString("session_id"), result.getString("wechat_id"),
-                            result.getString("title"), result.getString("status"),
+                            result.getString("title"), result.getString("title_source"), result.getString("status"),
                             toLocalDateTime(result.getTimestamp("last_active_time")),
                             toLocalDateTime(result.getTimestamp("created_time"))));
                 }
@@ -859,6 +861,97 @@ public final class MySqlStore implements AutoCloseable {
         }
     }
 
+    public boolean renameSession(String sessionId, String wechatId, String title) {
+        if (!isAvailable() || sessionId == null || sessionId.isBlank()
+                || wechatId == null || wechatId.isBlank() || title == null || title.isBlank()) return false;
+        String sql = "UPDATE chat_session SET title = ?, title_source = 'MANUAL' "
+                + "WHERE session_id = ? AND wechat_id = ?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, title.trim());
+            statement.setString(2, sessionId);
+            statement.setString(3, wechatId);
+            return statement.executeUpdate() == 1;
+        } catch (SQLException e) {
+            logFailure("重命名会话", e);
+            return false;
+        }
+    }
+
+    public boolean autoRenameSession(String sessionId, String wechatId, String title) {
+        if (!isAvailable() || sessionId == null || sessionId.isBlank()
+                || wechatId == null || wechatId.isBlank() || title == null || title.isBlank()) return false;
+        String sql = "UPDATE chat_session SET title = ?, title_source = 'AUTO' "
+                + "WHERE session_id = ? AND wechat_id = ? AND title_source <> 'MANUAL' "
+                + "AND (title IS NULL OR TRIM(title) = '' OR title LIKE '会话 · %')";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, title.trim());
+            statement.setString(2, sessionId);
+            statement.setString(3, wechatId);
+            return statement.executeUpdate() == 1;
+        } catch (SQLException error) {
+            logFailure("自动命名会话", error);
+            return false;
+        }
+    }
+
+    public boolean deleteSession(String sessionId, String wechatId) {
+        if (!isAvailable() || sessionId == null || sessionId.isBlank()
+                || wechatId == null || wechatId.isBlank()) return false;
+        try (Connection connection = openConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "SELECT wechat_id FROM chat_session WHERE session_id = ? FOR UPDATE")) {
+                    statement.setString(1, sessionId);
+                    try (ResultSet result = statement.executeQuery()) {
+                        if (!result.next() || !wechatId.equals(result.getString("wechat_id"))) {
+                            connection.rollback();
+                            return false;
+                        }
+                    }
+                }
+                deleteBySession(connection, "chat_messages", sessionId);
+                deleteBySession(connection, "conversation_summaries", sessionId);
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "DELETE FROM user_states WHERE bot_id = ? AND user_id = ? AND state_key LIKE ?")) {
+                    statement.setString(1, Config.DATABASE_BOT_ID);
+                    statement.setString(2, wechatId);
+                    statement.setString(3, sessionId + ":%");
+                    statement.executeUpdate();
+                }
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "DELETE FROM chat_session WHERE session_id = ? AND wechat_id = ?")) {
+                    statement.setString(1, sessionId);
+                    statement.setString(2, wechatId);
+                    if (statement.executeUpdate() != 1) {
+                        connection.rollback();
+                        return false;
+                    }
+                }
+                connection.commit();
+                return true;
+            } catch (SQLException error) {
+                connection.rollback();
+                throw error;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        } catch (SQLException e) {
+            logFailure("删除会话", e);
+            return false;
+        }
+    }
+
+    private void deleteBySession(Connection connection, String table, String sessionId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "DELETE FROM " + table + " WHERE session_id = ?")) {
+            statement.setString(1, sessionId);
+            statement.executeUpdate();
+        }
+    }
+
     // ========== Session Messages (v2.0) ==========
 
     public void saveChatMessage(String sessionId, String role, String content, String messageType) {
@@ -881,8 +974,8 @@ public final class MySqlStore implements AutoCloseable {
 
     public List<ChatEntry> loadSessionMessages(String sessionId, int limit) {
         if (!isAvailable()) return List.of();
-        String sql = "SELECT role, content FROM ("
-                + "SELECT id, role, content FROM chat_messages "
+        String sql = "SELECT id, role, message_type, content FROM ("
+                + "SELECT id, role, message_type, content FROM chat_messages "
                 + "WHERE session_id = ? ORDER BY id DESC LIMIT ?"
                 + ") recent ORDER BY id ASC";
         List<ChatEntry> messages = new ArrayList<>();
@@ -892,13 +985,67 @@ public final class MySqlStore implements AutoCloseable {
             statement.setInt(2, limit);
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
-                    messages.add(new ChatEntry(result.getString("role"), result.getString("content")));
+                    messages.add(new ChatEntry(result.getLong("id"),
+                            result.getString("role"), result.getString("message_type"),
+                            result.getString("content")));
                 }
             }
         } catch (SQLException e) {
             logFailure("读取会话消息", e);
         }
         return messages;
+    }
+
+    /** Deletes a user message and everything after it so an edited prompt can branch the conversation. */
+    public boolean truncateSessionFromUserMessage(String sessionId, String wechatId, long messageId) {
+        if (!isAvailable() || sessionId == null || sessionId.isBlank()
+                || wechatId == null || wechatId.isBlank() || messageId <= 0L) return false;
+        try (Connection connection = openConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                String role;
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "SELECT m.role FROM chat_messages m "
+                                + "JOIN chat_session s ON s.session_id = m.session_id "
+                                + "WHERE m.id = ? AND m.session_id = ? AND s.wechat_id = ? FOR UPDATE")) {
+                    statement.setLong(1, messageId);
+                    statement.setString(2, sessionId);
+                    statement.setString(3, wechatId);
+                    try (ResultSet result = statement.executeQuery()) {
+                        if (!result.next()) {
+                            connection.rollback();
+                            return false;
+                        }
+                        role = result.getString("role");
+                    }
+                }
+                if (!"user".equals(role)) {
+                    connection.rollback();
+                    return false;
+                }
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "DELETE FROM chat_messages WHERE session_id = ? AND id >= ?")) {
+                    statement.setString(1, sessionId);
+                    statement.setLong(2, messageId);
+                    statement.executeUpdate();
+                }
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "DELETE FROM conversation_summaries WHERE session_id = ?")) {
+                    statement.setString(1, sessionId);
+                    statement.executeUpdate();
+                }
+                connection.commit();
+                return true;
+            } catch (SQLException error) {
+                connection.rollback();
+                throw error;
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        } catch (SQLException error) {
+            logFailure("从编辑消息创建分支", error);
+            return false;
+        }
     }
 
     // ========== Session Summaries (v2.0) ==========
@@ -1351,6 +1498,8 @@ public final class MySqlStore implements AutoCloseable {
             // ========== 扩展已有表列 ==========
             ensureColumn(connection, statement, "chat_messages", "session_id",
                     "VARCHAR(64) DEFAULT NULL AFTER user_id");
+            ensureColumn(connection, statement, "chat_session", "title_source",
+                    "VARCHAR(16) NOT NULL DEFAULT 'AUTO' AFTER title");
             ensureColumn(connection, statement, "chat_messages", "message_type",
                     "VARCHAR(30) DEFAULT 'TEXT' AFTER role");
             ensureColumn(connection, statement, "conversation_summaries", "session_id",
@@ -1406,11 +1555,15 @@ public final class MySqlStore implements AutoCloseable {
     }
 
     /** 数据库中的一条聊天消息。 */
-    public record ChatEntry(String role, String content) {
+    public record ChatEntry(long id, String role, String messageType, String content) {
+        /** 兼容只关心角色和正文的路由上下文调用方。 */
+        public ChatEntry(String role, String content) {
+            this(0L, role, "text", content);
+        }
     }
 
     /** 数据库中的一条会话记录。 */
-    public record SessionRow(String sessionId, String wechatId, String title, String status,
+    public record SessionRow(String sessionId, String wechatId, String title, String titleSource, String status,
                              LocalDateTime lastActiveTime, LocalDateTime createdTime) {
     }
 

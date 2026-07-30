@@ -12,4 +12,8 @@ public final class CapabilityDispatcher {
     public void dispatch(AgentContext context, String text) throws Exception {
         requestHandler.handle(context, text);
     }
+
+    public boolean hasPendingInteraction(String userId) {
+        return requestHandler.hasPendingInteraction(userId);
+    }
 }

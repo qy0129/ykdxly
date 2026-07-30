@@ -12,6 +12,7 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.DatagramSocket;
+import java.net.BindException;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -42,6 +43,7 @@ public final class DailyDashboardServer implements AutoCloseable {
     private final Map<String, String> tokenUsers = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newFixedThreadPool(3);
     private volatile String runtimeBaseUrl = "";
+    private volatile int runtimePort;
     private HttpServer server;
     private CloudflareTunnel tunnel;
 
@@ -49,15 +51,21 @@ public final class DailyDashboardServer implements AutoCloseable {
         this.dashboardService = dashboardService;
     }
 
-    /** 启动本地网页服务；端口占用时仅关闭页面能力，不影响 Bot 其他功能。 */
+    /** 启动本地网页服务；端口占用时自动使用系统分配的本地端口。 */
     public void start() {
         if (!Config.DAILY_DASHBOARD_ENABLED) return;
         try {
-            server = HttpServer.create(new InetSocketAddress(
-                    Config.DAILY_DASHBOARD_BIND_ADDRESS, Config.DAILY_DASHBOARD_PORT), 0);
+            try {
+                server = createServer(Config.DAILY_DASHBOARD_PORT);
+            } catch (BindException busy) {
+                server = createServer(0);
+                System.err.println("[日报页面] 端口 " + Config.DAILY_DASHBOARD_PORT
+                        + " 已占用，改用本地端口 " + server.getAddress().getPort());
+            }
             server.createContext("/", this::handle);
             server.setExecutor(executor);
             server.start();
+            runtimePort = server.getAddress().getPort();
             runtimeBaseUrl = resolveBaseUrl();
             if (!Config.PERSONAL_OWNER_USER_ID.isBlank()) {
                 saveDashboardUrl(urlFor(Config.PERSONAL_OWNER_USER_ID));
@@ -69,26 +77,45 @@ public final class DailyDashboardServer implements AutoCloseable {
         }
     }
 
+    private HttpServer createServer(int port) throws IOException {
+        return HttpServer.create(new InetSocketAddress(Config.DAILY_DASHBOARD_BIND_ADDRESS, port), 0);
+    }
+
     public String urlFor(String userId) {
         if (server == null || userId == null || userId.isBlank()) return "";
+        String token = tokenFor(userId);
+        String value = baseUrl() + "/daily/" + token;
+        saveDashboardUrl(value);
+        return value;
+    }
+
+    /** Loopback URL for embedding in the local Web workspace without broadening frame CSP. */
+    public String loopbackUrlFor(String userId) {
+        if (server == null || userId == null || userId.isBlank()) return "";
+        return "http://127.0.0.1:" + runtimePort + "/daily/" + tokenFor(userId);
+    }
+
+    private String tokenFor(String userId) {
         String normalized = userId.trim();
-        String token = userTokens.computeIfAbsent(normalized, ignored -> {
+        return userTokens.computeIfAbsent(normalized, ignored -> {
             String created = UUID.randomUUID().toString().replace("-", "");
             tokenUsers.put(created, normalized);
             return created;
         });
-        String value = baseUrl() + "/daily/" + token;
-        saveDashboardUrl(value);
-        return value;
     }
 
     public String url() {
         return Config.PERSONAL_OWNER_USER_ID.isBlank() ? "" : urlFor(Config.PERSONAL_OWNER_USER_ID);
     }
 
+    /** 兼容旧分发器调用；日报页面现在通过用户令牌隔离，不再依赖全局当前用户。 */
+    public void useUser(String userId) {
+        if (userId != null && !userId.isBlank()) urlFor(userId);
+    }
+
     private String baseUrl() {
         String base = runtimeBaseUrl;
-        if (base.isBlank()) base = "http://" + localAddress() + ":" + Config.DAILY_DASHBOARD_PORT;
+        if (base.isBlank()) base = "http://" + localAddress() + ":" + runtimePort;
         while (base.endsWith("/")) base = base.substring(0, base.length() - 1);
         return base;
     }
@@ -99,7 +126,7 @@ public final class DailyDashboardServer implements AutoCloseable {
         if (!configured.isBlank()) return configured;
         if (Config.DAILY_DASHBOARD_TUNNEL_ENABLED) {
             tunnel = new CloudflareTunnel(Config.DAILY_DASHBOARD_TUNNEL_COMMAND,
-                    Config.DAILY_DASHBOARD_PORT, Config.DAILY_DASHBOARD_TUNNEL_TIMEOUT);
+                    runtimePort, Config.DAILY_DASHBOARD_TUNNEL_TIMEOUT);
             String publicUrl = tunnel.start();
             if (!publicUrl.isBlank()) {
                 System.out.println("[页面公网访问] Cloudflare 临时隧道已连接：" + publicUrl);

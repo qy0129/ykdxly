@@ -99,7 +99,7 @@ public final class MessageProcessor {
         boolean failed = false;
         try {
             if (message == null) return;
-            chatHistory.setUserSessionId(userId, sessions.getCurrentSession(userId).sessionId());
+            chatHistory.setUserSessionId(userId, sessionId(context, userId));
             client.startTyping(userId);
             List<MessagePart> parts = message.parts();
             if (parts.isEmpty()) return;
@@ -165,6 +165,14 @@ public final class MessageProcessor {
                 System.out.println("[Performance] user=" + userId + ", message_ms=" + elapsedMillis);
             }
         }
+    }
+
+    private String sessionId(AgentContext context, String userId) {
+        return context.channel() == ChannelType.WEB
+                && context.conversationId() != null
+                && !context.conversationId().isBlank()
+                ? context.conversationId()
+                : sessions.getCurrentSession(userId).sessionId();
     }
 
     private String processImage(AgentContext context, MessagePart.Image item,
@@ -323,7 +331,7 @@ public final class MessageProcessor {
                 return;
             }
         }
-        String sessionId = sessions.getCurrentSession(userId).sessionId();
+        String sessionId = sessionId(context, userId);
         chatHistory.setUserSessionId(userId, sessionId);
         chatHistory.addUserMessage(userId, text);
         memoryExtractor.extract(userId, text);

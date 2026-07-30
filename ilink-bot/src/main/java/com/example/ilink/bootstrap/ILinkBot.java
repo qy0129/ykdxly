@@ -160,7 +160,7 @@ public class ILinkBot {
                         System.out.println("[登录] 登录成功");
                         resumeContextStore.save(ILinkBot.this.client.exportResumeContext());
                         // 初次扫码和自动重连都会进入这里，每次登录都触发离线补发和温柔简报。
-                        dispatcher.onClientReady(ILinkBot.this.client);
+                        dispatcher.onClientReady(ILinkBot.this.client, context.getUserId());
                     }
 
                     /** 登录失败时输出 SDK 返回的具体原因。 */

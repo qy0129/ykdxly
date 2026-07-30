@@ -1,5 +1,7 @@
 package com.example.ilink.application.tooling;
 
+import com.example.ilink.application.messaging.AgentEvent;
+import com.example.ilink.application.messaging.RequestLogContext;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
@@ -61,13 +63,18 @@ public final class ToolManager {
     public ToolResult execute(String name, ToolContext context, JsonObject arguments) {
         Tool tool = find(name);
         if (tool == null) {
-            System.err.println("[工具调用] 未找到工具：" + name);
+            System.err.println(RequestLogContext.prefix("工具") + " missing=" + name);
             return ToolResult.failure("未找到工具：" + name);
         }
 
         ToolDefinition definition = tool.definition();
-        System.out.println("[工具调用] 工具=" + definition.displayName()
-                + "，参数=" + arguments);
+        RequestLogContext.publish(new AgentEvent(AgentEvent.Type.TOOL_ACTIVITY,
+                "调用工具：" + definition.displayName(), Map.of(
+                "toolName", definition.name(), "toolLabel", definition.displayName(),
+                "status", "running", "phase", "tool")));
+        System.out.println(RequestLogContext.prefix("工具") + " name=" + definition.name()
+                + " label=" + definition.displayName()
+                + " args=" + RequestLogContext.preview(arguments == null ? "{}" : arguments.toString()));
         try {
             ToolSchemaValidator.Result schemaResult = schemaValidator.validate(definition.parameters(), arguments);
             if (!schemaResult.valid()) {
@@ -76,11 +83,20 @@ public final class ToolManager {
             }
             ToolResult result = tool.execute(context, arguments);
             String status = result.success() ? "成功" : "失败";
-            System.out.println("[工具结果] " + definition.displayName() + "执行" + status);
+            RequestLogContext.publish(new AgentEvent(AgentEvent.Type.TOOL_ACTIVITY,
+                    (result.success() ? "工具完成：" : "工具失败：") + definition.displayName(), Map.of(
+                    "toolName", definition.name(), "toolLabel", definition.displayName(),
+                    "status", result.success() ? "success" : "failed", "phase", "tool")));
+            System.out.println(RequestLogContext.prefix("工具结果") + " name=" + definition.name()
+                    + " status=" + status);
             return result;
         } catch (Exception e) {
-            System.err.println("[工具结果] " + definition.displayName()
-                    + "执行失败：" + e.getMessage());
+            RequestLogContext.publish(new AgentEvent(AgentEvent.Type.TOOL_ACTIVITY,
+                    "工具失败：" + definition.displayName(), Map.of(
+                    "toolName", definition.name(), "toolLabel", definition.displayName(),
+                    "status", "failed", "phase", "tool")));
+            System.err.println(RequestLogContext.prefix("工具结果") + " name=" + definition.name()
+                    + " status=失败 error=" + RequestLogContext.error(e));
             return ToolResult.failure(e.getMessage());
         }
     }

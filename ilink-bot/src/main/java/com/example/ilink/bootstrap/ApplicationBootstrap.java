@@ -5,6 +5,10 @@ import com.example.ilink.adapter.inbound.http.AutomationConsoleServer;
 import com.example.ilink.adapter.inbound.http.ExpressHttpServer;
 import com.example.ilink.adapter.inbound.http.LocationHttpServer;
 import com.example.ilink.adapter.inbound.http.SessionManagementServer;
+import com.example.ilink.adapter.inbound.http.WebChatServer;
+import com.example.ilink.adapter.outbound.web.WebArtifactStore;
+import com.example.ilink.adapter.outbound.web.WebEventBroker;
+import com.example.ilink.adapter.outbound.web.WebReplyChannel;
 import com.example.ilink.adapter.inbound.wechat.LoginQrPage;
 import com.example.ilink.adapter.inbound.wechat.MessageDispatcher;
 import com.example.ilink.adapter.inbound.wechat.WechatMessageAdapter;
@@ -43,6 +47,7 @@ import com.example.ilink.application.messaging.MessageSerialExecutor;
 import com.example.ilink.application.messaging.ReplySender;
 import com.example.ilink.application.messaging.UserRequestHandler;
 import com.example.ilink.application.inbox.InboxApplicationService;
+import com.example.ilink.application.integration.WechatWebBridge;
 import com.example.ilink.application.routing.IntentRecognizer;
 import com.example.ilink.application.routing.RoutePlanReviewer;
 import com.example.ilink.application.skill.SkillManager;
@@ -171,6 +176,9 @@ import com.example.ilink.platform.persistence.DefaultUserSessionStore;
 import com.example.ilink.platform.persistence.MySqlStore;
 import com.example.ilink.platform.persistence.UserRepository;
 import com.example.ilink.platform.sdk.SdkResumeContextStore;
+import com.example.ilink.platform.workspace.WorkspaceApprovalStore;
+import com.example.ilink.platform.workspace.WorkspaceFileService;
+import com.example.ilink.capabilities.workspace.WorkspaceFileTool;
 
 import java.net.http.HttpClient;
 import java.net.URI;
@@ -194,6 +202,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
     private final ExecutiveRuntime executiveRuntime;
     private final AutomationConsoleServer automationConsoleServer;
     private final LocationHttpServer locationHttpServer;
+    private final WebChatServer webChatServer;
 
     private ApplicationBootstrap(MessageDispatcher messageDispatcher,
                                  WechatMessageAdapter messageAdapter,
@@ -205,7 +214,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
                                  SessionManagementServer sessionManagementServer,
                                  ExecutiveRuntime executiveRuntime,
                                  AutomationConsoleServer automationConsoleServer,
-                                 LocationHttpServer locationHttpServer) {
+                                 LocationHttpServer locationHttpServer,
+                                 WebChatServer webChatServer) {
         this.messageDispatcher = messageDispatcher;
         this.messageAdapter = messageAdapter;
         this.messageExecutor = messageExecutor;
@@ -217,6 +227,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         this.executiveRuntime = executiveRuntime;
         this.automationConsoleServer = automationConsoleServer;
         this.locationHttpServer = locationHttpServer;
+        this.webChatServer = webChatServer;
     }
 
     public static ApplicationBootstrap create() {
@@ -265,6 +276,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
         ExpressPageService expressPageService = new ExpressPageService();
         ExpressHttpServer expressHttpServer = new ExpressHttpServer(expressPageService);
         AutomationAnalysisService automationAnalysis = new AutomationAnalysisService(httpClient);
+        WorkspaceFileService workspaceFiles = new WorkspaceFileService();
+        WorkspaceApprovalStore workspaceApprovals = new WorkspaceApprovalStore();
 
         ToolManager toolManager = new ToolManager()
                 .register(new WeatherTool(weatherService))
@@ -304,6 +317,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 .register(new ChineseMoneyTool())
                 .register(new RelationTool())
                 .register(new ExpressTool(expressService, expressPageService))
+                .register(new WorkspaceFileTool(workspaceFiles, workspaceApprovals))
                 .register(new AutomationWebSearchTool(webSearchService))
                 .register(new WebPageFetchTool(httpClient))
                 .register(new ResearchPageFetchTool(httpClient))
@@ -441,21 +455,35 @@ public final class ApplicationBootstrap implements AutoCloseable {
 
         SessionManagementServer sessionManagementServer = new SessionManagementServer(
                 sessionService, sessions, MySqlStore.getInstance());
+        MessageSerialExecutor messageExecutor = new MessageSerialExecutor();
+        DailyDashboardServer dailyDashboardServer = new DailyDashboardServer(dashboardService);
+        LoginQrPage loginQrPage = new LoginQrPage();
+        WebEventBroker webEvents = new WebEventBroker();
+        WechatWebBridge wechatWebBridge = new WechatWebBridge(webEvents);
+        WebArtifactStore webArtifacts = new WebArtifactStore(Config.MEDIA_DIR.resolve("web-artifacts"));
+        WebReplyChannel webReplyChannel = new WebReplyChannel(
+                webEvents, webArtifacts, chatHistory, wechatWebBridge);
+        WebChatServer webChatServer = new WebChatServer(
+                messageProcessor, messageExecutor, sessionService, sessions,
+                chatHistory, MySqlStore.getInstance(), webReplyChannel, webEvents, webArtifacts,
+                wechatWebBridge, workspaceFiles, loginQrPage, dashboardService,
+                dailyDashboardServer, sessionManagementServer);
         MessageDispatcher dispatcher = new MessageDispatcher(
                 messageProcessor, replySender, chatService, calendarService,
                 visualDeckSender, loginBriefingService, welcomeHandler,
-                new DailyDashboardServer(dashboardService), sessionManagementServer,
-                 expressHttpServer, expressPageService, executiveRuntime, reflectionService,
-                 interestRadarService, locationService);
+                dailyDashboardServer, sessionManagementServer,
+                expressHttpServer, expressPageService, wechatWebBridge,
+                executiveRuntime, reflectionService, interestRadarService, locationService);
         AutomationConsoleServer automationConsoleServer = new AutomationConsoleServer(executiveRuntime);
         sessionManagementServer.start();
+        webChatServer.start();
         automationConsoleServer.start();
         executiveRuntime.start();
         return new ApplicationBootstrap(
-                dispatcher, new WechatMessageAdapter(), new MessageSerialExecutor(),
-                 new LoginQrPage(), new SdkResumeContextStore(), chatHistory,
-                 MySqlStore.getInstance(), sessionManagementServer, executiveRuntime, automationConsoleServer,
-                 locationHttpServer);
+                dispatcher, new WechatMessageAdapter(), messageExecutor,
+                loginQrPage, new SdkResumeContextStore(), chatHistory,
+                MySqlStore.getInstance(), sessionManagementServer, executiveRuntime,
+                automationConsoleServer, locationHttpServer, webChatServer);
     }
 
     public MessageDispatcher messageDispatcher() {
@@ -492,6 +520,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
     @Override
     public void close() {
         locationHttpServer.close();
+        webChatServer.close();
         automationConsoleServer.close();
         executiveRuntime.close();
         sessionManagementServer.close();

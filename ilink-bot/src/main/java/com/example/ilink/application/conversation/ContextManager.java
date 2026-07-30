@@ -25,6 +25,10 @@ public final class ContextManager {
         return conversationProvider.build(userId);
     }
 
+    public ConversationContext buildConversation(String userId, String sessionId) {
+        return conversationProvider.build(userId, sessionId);
+    }
+
     public MemoryContext buildMemory(String userId) {
         return memoryProvider.build(userId);
     }

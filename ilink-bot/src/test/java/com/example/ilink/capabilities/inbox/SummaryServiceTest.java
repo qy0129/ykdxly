@@ -148,9 +148,9 @@ class SummaryServiceTest {
     void shouldCreateSummarizedSummary() {
         // When
         MessageSummary summary = MessageSummary.summarized(
-            "摘要内容", 
-            java.util.List.of("关键词"), 
-            MessageSummary.MessageType.TASK, 
+            "摘要内容",
+            java.util.List.of("关键词"),
+            MessageSummary.MessageType.TASK,
             MessageSummary.Priority.HIGH
         );
 

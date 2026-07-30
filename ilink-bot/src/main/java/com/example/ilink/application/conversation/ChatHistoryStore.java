@@ -46,8 +46,10 @@ public final class ChatHistoryStore implements AutoCloseable {
     private final Map<String, List<JsonObject>> chatHistory = new ConcurrentHashMap<>();
     private final Map<String, String> conversationSummary = new ConcurrentHashMap<>();
     private final Map<String, String> userSessionIds = new ConcurrentHashMap<>();
+    private final Map<String, String> historyOwners = new ConcurrentHashMap<>();
     private final Set<String> loadedUsers = ConcurrentHashMap.newKeySet();
     private final Set<String> compressingUsers = ConcurrentHashMap.newKeySet();
+    private final ThreadLocal<SessionBinding> sessionBinding = new ThreadLocal<>();
 
     /** 创建历史存储器，并注入用于摘要压缩的 HTTP 客户端。 */
     public ChatHistoryStore(HttpClient httpClient) {
@@ -67,13 +69,29 @@ public final class ChatHistoryStore implements AutoCloseable {
     /** 绑定用户当前活跃的 sessionId，后续消息写入会带上 session_id。 */
     public void setUserSessionId(String userId, String sessionId) {
         if (userId == null || sessionId == null) return;
-        String previous = userSessionIds.put(userId, sessionId);
+        String historyKey = historyKey(userId);
+        historyOwners.put(historyKey, userId);
+        String previous = userSessionIds.put(historyKey, sessionId);
         if (previous != null && !previous.equals(sessionId)) {
-            chatHistory.remove(userId);
-            conversationSummary.remove(userId);
-            loadedUsers.remove(userId);
-            compressingUsers.remove(userId);
+            clearCache(historyKey);
         }
+    }
+
+    /** Pins all history operations on the current thread to one Web conversation. */
+    public SessionScope bindSession(String userId, String sessionId) {
+        SessionBinding previous = sessionBinding.get();
+        sessionBinding.set(new SessionBinding(userId, sessionId));
+        setUserSessionId(userId, sessionId);
+        return () -> {
+            if (previous == null) sessionBinding.remove();
+            else sessionBinding.set(previous);
+        };
+    }
+
+    /** Drops a conversation cache after history branching or deletion. */
+    public void invalidateSession(String userId, String sessionId) {
+        invalidate(sessionKey(userId, sessionId));
+        if (sessionId.equals(userSessionIds.get(userId))) invalidate(userId);
     }
 
     /** 把图片、音频或文档等媒体事件加入对话历史。 */
@@ -95,34 +113,61 @@ public final class ChatHistoryStore implements AutoCloseable {
         appendMessage(userId, "assistant", content);
     }
 
+    /** Stores generated media as an assistant message without exposing a server path. */
+    public void addAssistantMedia(String userId, String kind, String artifactId, String fileName,
+                                  String contentType, long size, String caption) {
+        String safeKind = "file".equalsIgnoreCase(kind) ? "file" : "image";
+        String safeCaption = caption == null || caption.isBlank()
+                ? ("image".equals(safeKind) ? "图片已生成" : "文件已生成") : caption;
+        JsonObject media = new JsonObject();
+        media.addProperty("version", 1);
+        media.addProperty("kind", safeKind);
+        media.addProperty("artifactId", artifactId);
+        media.addProperty("fileName", fileName);
+        media.addProperty("contentType", contentType);
+        media.addProperty("size", Math.max(0L, size));
+        media.addProperty("caption", safeCaption);
+        appendMessage(userId, "assistant", safeCaption, gson.toJson(media), safeKind.toUpperCase());
+    }
+
     private void appendMessage(String userId, String role, String content) {
+        appendMessage(userId, role, content, content, "TEXT");
+    }
+
+    private void appendMessage(String userId, String role, String content,
+                               String storedContent, String messageType) {
         if (userId == null || userId.isBlank() || content == null || content.isBlank()) return;
-        ensureLoaded(userId);
+        String historyKey = historyKey(userId);
+        ensureLoaded(historyKey);
         List<JsonObject> history = chatHistory.computeIfAbsent(
-                userId, ignored -> Collections.synchronizedList(new LinkedList<>()));
+                historyKey, ignored -> Collections.synchronizedList(new LinkedList<>()));
         boolean shouldCompress;
         synchronized (history) {
             if (!history.isEmpty()) {
                 JsonObject last = history.getLast();
                 if (role.equals(last.get("role").getAsString())
-                        && content.equals(last.get("content").getAsString())) return;
+                        && storedContent.equals(last.has("persistence_key")
+                        ? last.get("persistence_key").getAsString()
+                        : last.get("content").getAsString())) return;
             }
             JsonObject message = new JsonObject();
             message.addProperty("role", role);
             message.addProperty("content", content);
+            message.addProperty("persistence_key", storedContent);
             message.addProperty("created_at", LocalDateTime.now().format(TIMESTAMP_FORMAT));
             history.add(message);
             shouldCompress = history.size() >= MAX_HISTORY;
         }
         if (asyncWriter != null) {
-            String sessionId = userSessionIds.get(userId);
+            String sessionId = userSessionIds.get(historyKey);
             if (sessionId != null) {
-                asyncWriter.submit(() -> database.saveChatMessage(sessionId, role, content, "TEXT"));
+                asyncWriter.submit(() -> database.saveChatMessage(
+                        sessionId, role, storedContent, messageType));
             } else {
                 asyncWriter.submit(() -> database.saveMessage(userId, role, content));
             }
         }
-        if (shouldCompress) scheduleCompression(userId);
+        if (shouldCompress) scheduleCompression(historyKey);
     }
 
     /** 将当前用户的摘要和最近消息复制到模型请求数组。 */
@@ -132,6 +177,7 @@ public final class ChatHistoryStore implements AutoCloseable {
 
     /** 复制历史时可排除已经提前记录的当前用户消息，避免模型收到两份相同输入。 */
     public void addHistoryMessages(JsonArray target, String userId, String currentUserMessage) {
+        userId = historyKey(userId);
         ensureLoaded(userId);
         String summary = conversationSummary.get(userId);
         if (summary != null && !summary.isEmpty()) {
@@ -175,6 +221,7 @@ public final class ChatHistoryStore implements AutoCloseable {
      * @return 第一条匹配的用户消息的创建时间，未找到时返回 null
      */
     public String findUserMessageTime(String userId, String contentKeyword) {
+        userId = historyKey(userId);
         List<JsonObject> history = chatHistory.get(userId);
         if (history == null) return null;
         synchronized (history) {
@@ -192,6 +239,7 @@ public final class ChatHistoryStore implements AutoCloseable {
 
     /** 返回最近一条机器人文字回复，供“重新发一遍”在进程重启后回退使用。 */
     public String lastAssistantMessage(String userId) {
+        userId = historyKey(userId);
         ensureLoaded(userId);
         List<JsonObject> history = chatHistory.get(userId);
         if (history == null) return "";
@@ -287,28 +335,75 @@ public final class ChatHistoryStore implements AutoCloseable {
                 for (MySqlStore.ChatEntry storedMessage : storedMessages) {
                     JsonObject message = new JsonObject();
                     message.addProperty("role", storedMessage.role());
-                    message.addProperty("content", storedMessage.content());
+                    message.addProperty("content", historyContent(storedMessage));
+                    message.addProperty("persistence_key", storedMessage.content());
                     history.add(message);
                 }
                 chatHistory.put(userId, history);
             }
         } else {
-            String summary = database.loadConversationSummary(userId);
+            String ownerId = historyOwners.getOrDefault(userId, userId);
+            String summary = database.loadConversationSummary(ownerId);
             if (summary != null && !summary.isBlank()) {
                 conversationSummary.put(userId, summary);
             }
-            List<MySqlStore.ChatEntry> storedMessages = database.loadRecentMessages(userId, MAX_HISTORY);
+            List<MySqlStore.ChatEntry> storedMessages = database.loadRecentMessages(ownerId, MAX_HISTORY);
             if (storedMessages.isEmpty()) return;
 
             List<JsonObject> history = Collections.synchronizedList(new LinkedList<>());
             for (MySqlStore.ChatEntry storedMessage : storedMessages) {
                 JsonObject message = new JsonObject();
                 message.addProperty("role", storedMessage.role());
-                message.addProperty("content", storedMessage.content());
+                message.addProperty("content", historyContent(storedMessage));
+                message.addProperty("persistence_key", storedMessage.content());
                 history.add(message);
             }
             chatHistory.put(userId, history);
         }
+    }
+
+    private static String historyContent(MySqlStore.ChatEntry message) {
+        if ("TEXT".equalsIgnoreCase(message.messageType())) return message.content();
+        try {
+            JsonObject media = JsonParser.parseString(message.content()).getAsJsonObject();
+            if (media.has("caption") && !media.get("caption").getAsString().isBlank()) {
+                return media.get("caption").getAsString();
+            }
+        } catch (Exception ignored) {
+            // Keep malformed legacy rows useful to the model as plain text.
+        }
+        return message.content();
+    }
+
+    private String historyKey(String userId) {
+        SessionBinding binding = sessionBinding.get();
+        if (binding == null || !binding.userId().equals(userId)) return userId;
+        return sessionKey(userId, binding.sessionId());
+    }
+
+    private static String sessionKey(String userId, String sessionId) {
+        return userId + "\u0000web-session\u0000" + sessionId;
+    }
+
+    private void invalidate(String historyKey) {
+        clearCache(historyKey);
+        userSessionIds.remove(historyKey);
+        historyOwners.remove(historyKey);
+    }
+
+    private void clearCache(String historyKey) {
+        chatHistory.remove(historyKey);
+        conversationSummary.remove(historyKey);
+        loadedUsers.remove(historyKey);
+        compressingUsers.remove(historyKey);
+    }
+
+    public interface SessionScope extends AutoCloseable {
+        @Override
+        void close();
+    }
+
+    private record SessionBinding(String userId, String sessionId) {
     }
 
     /** 调用模型把旧消息整理成简短摘要。 */

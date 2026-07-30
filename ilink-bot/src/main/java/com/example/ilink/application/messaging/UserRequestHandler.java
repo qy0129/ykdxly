@@ -191,6 +191,15 @@ public final class UserRequestHandler {
         this.interestRadarService = interestRadarService;
         this.locationService = locationService;
     }
+
+    /** 提供给消息入口的轻量状态查询，避免把具体工作流状态暴露给路由层。 */
+    public boolean hasPendingInteraction(String userId) {
+        return hasBlockingPending(userId)
+                || sessions.getPendingFileExport(userId) != null
+                || lifeWorkflow.hasPendingStudyPlan(userId)
+                || visualCardWorkflow.hasPending(userId);
+    }
+
     /** 识别用户意图并调用对应功能处理器。 */
     public void handle(AgentContext agentContext, String text) throws Exception {
         ReplyChannel client = agentContext.replyChannel();
@@ -295,8 +304,9 @@ public final class UserRequestHandler {
                         sessions.peekPendingDraw(userId) != null,
                         documentSessions.get(userId) != null,
                         true);
+                publishActivity("正在调用意图模型", "model", "running", Map.of("model", "Qwen"));
                 IntentPlan pendingPlan = intentRecognizer.recognize(userId, text,
-                        buildRoutingContext(userId, pendingContext, text));
+                        buildRoutingContext(agentContext, pendingContext, text));
                 if (pendingPlan != null) {
                     pendingRoute = pendingPlan.actions().stream()
                             .map(IntentAction::route)
@@ -348,8 +358,9 @@ public final class UserRequestHandler {
                 sessions.peekPendingDraw(userId) != null,
                 documentSessions.get(userId) != null,
                 false);
+        publishActivity("正在分析请求", "model", "running", Map.of("model", "Qwen"));
         IntentPlan plan = intentRecognizer.recognize(userId, text,
-                buildRoutingContext(userId, intentContext, text));
+                buildRoutingContext(agentContext, intentContext, text));
         if (plan == null || plan.isEmpty()) {
             replySender.sendReply(client, userId, "网络波动了，请再发一次～");
             return;
@@ -360,6 +371,12 @@ public final class UserRequestHandler {
             return;
         }
         plan = review.plan();
+
+        String recognizedActions = String.join("、", plan.actions().stream()
+                .map(action -> intentName(action.route().intent())).toList());
+        publishActivity("已完成意图分析", "model", "success", Map.of(
+                "model", "Qwen", "actions", recognizedActions,
+                "actionCount", plan.actions().size()));
 
         System.out.println("[意图识别] 共识别 " + plan.actions().size() + " 个动作："
                 + plan.actions().stream().map(action -> intentName(action.route().intent())).toList());
@@ -780,7 +797,11 @@ public final class UserRequestHandler {
                 + "，要求=" + actionText
                 + "，回复方式=" + replyModeName(route.replyMode())
                 + "，音色=" + voiceStyleName(route.voiceStyle()));
-        switch (route.intent()) {
+        String actionName = intentName(route.intent());
+        publishActivity("执行流程：" + actionName, "workflow", "running", Map.of(
+                "intent", route.intent(), "action", actionName));
+        try {
+            switch (route.intent()) {
             case "chat" -> executeChatAction(context, actionText, route);
             case "draw" -> handleDraw(client, userId, actionText, route);
             case "draw_size" -> handleDrawSize(client, userId, route);
@@ -833,9 +854,16 @@ public final class UserRequestHandler {
             }
             case "document_summary", "document_question", "generate_file", "document_edit" ->
                     handleDocumentAction(client, userId, actionText, route);
-            default -> {
-                sendChatReply(client, userId, actionText, route);
+                default -> {
+                    sendChatReply(client, userId, actionText, route);
+                }
             }
+            publishActivity("流程完成：" + actionName, "workflow", "success", Map.of(
+                    "intent", route.intent(), "action", actionName));
+        } catch (Exception error) {
+            publishActivity("流程失败：" + actionName, "workflow", "failed", Map.of(
+                    "intent", route.intent(), "action", actionName));
+            throw error;
         }
     }
 
@@ -853,8 +881,10 @@ public final class UserRequestHandler {
     }
 
     /** 把会话、位置、时间和所有等待状态合并成一次路由快照。 */
-    private RoutingContext buildRoutingContext(String userId, IntentContext mediaContext, String query) {
-        ConversationContext conv = contextManager.buildConversation(userId);
+    private RoutingContext buildRoutingContext(AgentContext agentContext, IntentContext mediaContext, String query) {
+        String userId = agentContext.principalId();
+        ConversationContext conv = contextManager.buildConversation(userId,
+                agentContext.channel() == ChannelType.WEB ? agentContext.conversationId() : null);
         KnowledgeContext kn = needsKnowledgeContext(query)
                 ? contextManager.buildKnowledge(userId, query)
                 : KnowledgeContext.empty(query);
@@ -883,6 +913,14 @@ public final class UserRequestHandler {
     private boolean needsKnowledgeContext(String query) {
         if (query == null || query.isBlank()) return false;
         return query.matches(".*(根据|结合|参考|文件|文档|资料|知识库|我发的|刚才发的|上面的内容).*" );
+    }
+
+    private void publishActivity(String content, String phase, String status,
+                                 Map<String, Object> details) {
+        Map<String, Object> metadata = new LinkedHashMap<>(details);
+        metadata.put("phase", phase);
+        metadata.put("status", status);
+        RequestLogContext.publish(new AgentEvent(AgentEvent.Type.TOOL_ACTIVITY, content, metadata));
     }
 
     private void sendChatReply(ReplyChannel client, String userId, String text,

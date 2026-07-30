@@ -11,6 +11,11 @@ public interface ReplyChannel {
 
     void sendFile(String recipientId, byte[] content, String fileName, String caption) throws Exception;
 
+    /** Whether this channel stores outbound media as structured conversation history. */
+    default boolean persistsOutboundMedia() {
+        return false;
+    }
+
     default void publish(String recipientId, AgentEvent event) throws Exception {
         if (event.type() == AgentEvent.Type.TEXT_DELTA || event.type() == AgentEvent.Type.COMPLETED) {
             sendText(recipientId, event.content());
