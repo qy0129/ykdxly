@@ -15,12 +15,22 @@ public final class TodoStore {
 
     private final Map<String, TodoItem> todos = new ConcurrentHashMap<>();
     private final Set<String> loadedUsers = ConcurrentHashMap.newKeySet();
-    private final MySqlStore database = MySqlStore.getInstance();
+    private final MySqlStore database;
+    private final boolean persistent;
+
+    public TodoStore() {
+        this(true);
+    }
+
+    public TodoStore(boolean persistent) {
+        this.persistent = persistent;
+        this.database = persistent ? MySqlStore.getInstance() : null;
+    }
 
     public void save(TodoItem todo) {
         loadedUsers.add(todo.userId());
         todos.put(todo.id(), todo);
-        database.saveTodo(todo);
+        if (persistent) database.saveTodo(todo);
     }
 
     public List<TodoItem> list(String userId) {
@@ -40,6 +50,8 @@ public final class TodoStore {
 
     private void ensureLoaded(String userId) {
         if (!loadedUsers.add(userId)) return;
-        for (TodoItem todo : database.loadTodos(userId)) todos.put(todo.id(), todo);
+        if (persistent) {
+            for (TodoItem todo : database.loadTodos(userId)) todos.put(todo.id(), todo);
+        }
     }
 }

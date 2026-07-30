@@ -80,6 +80,14 @@ public final class VisualCardWorkflow {
         return fun.hasPending(userId);
     }
 
+    public boolean acceptsPendingReply(String userId, String text) {
+        return fun.acceptsPendingReply(userId, text);
+    }
+
+    public void clearPending(String userId) {
+        fun.clearPending(userId);
+    }
+
     public boolean handle(AgentContext context, String rawText) throws Exception {
         return handle(context.replyChannel(), context.principalId(), rawText);
     }

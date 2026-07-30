@@ -6,6 +6,8 @@ import com.example.ilink.adapter.inbound.http.SessionManagementServer;
 import com.example.ilink.adapter.outbound.wechat.WechatReplyChannel;
 import com.example.ilink.application.integration.WechatWebBridge;
 import com.example.ilink.application.briefing.LoginBriefingService;
+import com.example.ilink.application.executive.ExecutiveRuntime;
+import com.example.ilink.application.executive.OutboxMessage;
 import com.example.ilink.application.messaging.AgentContext;
 import com.example.ilink.application.messaging.IncomingMessage;
 import com.example.ilink.application.messaging.MessageProcessor;
@@ -21,6 +23,7 @@ import com.example.ilink.capabilities.calendar.ReminderDelivery;
 import com.example.ilink.capabilities.calendar.ReminderTextFormatter;
 import com.example.ilink.capabilities.chat.ChatService;
 import com.example.ilink.capabilities.express.ExpressPageService;
+import com.example.ilink.capabilities.life.DailyReflectionService;
 import com.example.ilink.platform.network.CloudflareTunnel;
 import com.github.wechat.ilink.sdk.ILinkClient;
 
@@ -55,6 +58,8 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
     private final ExpressHttpServer expressHttpServer;
     private final ExpressPageService expressPageService;
     private final WechatWebBridge webBridge;
+    private final ExecutiveRuntime executiveRuntime;
+    private final DailyReflectionService reflectionService;
     private final ScheduledExecutorService progressScheduler = Executors.newScheduledThreadPool(1);
     private final ScheduledExecutorService reminderScheduler = Executors.newScheduledThreadPool(1);
     private final ScheduledExecutorService briefingScheduler = Executors.newSingleThreadScheduledExecutor();
@@ -71,7 +76,8 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
                              WelcomeHandler welcomeHandler,
                              DailyDashboardServer dailyDashboardServer, SessionManagementServer sessionManagementServer,
                              ExpressHttpServer expressHttpServer,
-                             ExpressPageService expressPageService, WechatWebBridge webBridge) {
+                             ExpressPageService expressPageService, WechatWebBridge webBridge,
+                             ExecutiveRuntime executiveRuntime, DailyReflectionService reflectionService) {
         this.messageProcessor = messageProcessor;
         this.replySender = replySender;
         this.chatService = chatService;
@@ -84,6 +90,8 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         this.expressHttpServer = expressHttpServer;
         this.expressPageService = expressPageService;
         this.webBridge = webBridge;
+        this.executiveRuntime = executiveRuntime;
+        this.reflectionService = reflectionService;
         webBridge.attach(this);
         dailyDashboardServer.start();
         expressHttpServer.start();
@@ -155,10 +163,10 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         dailyDashboardServer.useUser(userId);
         sessionManagementServer.useUser(userId);
         long startedAtMillis = System.currentTimeMillis();
-        boolean voiceOnly = replySender.isVoiceOnly();
+        boolean voiceOnly = replySender.isVoiceOnly(userId);
         ScheduledFuture<?> progressTask = progressScheduler.schedule(() -> {
             try {
-                if (!voiceOnly && !replySender.hasSentReplySince(startedAtMillis)) {
+                if (!voiceOnly && !replySender.hasSentReplySince(userId, startedAtMillis)) {
                     client.sendText(userId, "正在回复中，请稍等......");
                 }
             } catch (Exception e) {
@@ -205,6 +213,20 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
             } catch (Exception e) {
                 System.err.println("[日历提醒] 发送失败: " + e.getMessage());
                 calendarService.markReminderFailed(delivery, LocalDateTime.now(), e.getMessage());
+            }
+        }
+        sendExecutiveNotifications(client, userId);
+    }
+
+    private void sendExecutiveNotifications(ILinkClient client, String userId) {
+        if (executiveRuntime == null) return;
+        for (OutboxMessage message : executiveRuntime.pendingNotifications(userId, 10)) {
+            try {
+                replySender.sendReply(channel(client), userId, message.content());
+                executiveRuntime.markNotificationSent(message);
+            } catch (Exception error) {
+                System.err.println("[Executive 通知] 发送失败: " + error.getMessage());
+                executiveRuntime.markNotificationFailed(message);
             }
         }
     }

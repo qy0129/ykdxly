@@ -6,10 +6,18 @@ package com.example.ilink.application.routing;
  * @param requestText 从原始话语中提取的当前动作描述，供仍需自然语言输入的工具使用
  * @param route       当前动作的意图名称和结构化参数
  */
-public record IntentAction(String requestText, IntentResult route) {
+public record IntentAction(String requirementId, String requestText,
+                           java.util.List<String> dependsOn, IntentResult route) {
 
     /** 保证动作描述始终可安全传给下游工具。 */
     public IntentAction {
+        requirementId = requirementId == null ? "" : requirementId.trim();
         requestText = requestText == null ? "" : requestText.trim();
+        dependsOn = dependsOn == null ? java.util.List.of() : java.util.List.copyOf(dependsOn);
+    }
+
+    /** 兼容单动作和已有工作流测试。 */
+    public IntentAction(String requestText, IntentResult route) {
+        this("", requestText, java.util.List.of(), route);
     }
 }

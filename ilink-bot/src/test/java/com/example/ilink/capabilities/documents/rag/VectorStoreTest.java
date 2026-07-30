@@ -11,7 +11,7 @@ class VectorStoreTest {
 
     @Test
     void returnsOnlyHighestScoringChunksInDescendingOrder() {
-        VectorStore store = new VectorStore();
+        VectorStore store = new VectorStore(false);
         store.store("user", new TextChunk("a.txt", 0, "first"), List.of(1f, 0f));
         store.store("user", new TextChunk("b.txt", 0, "second"), List.of(0.8f, 0.2f));
         store.store("user", new TextChunk("c.txt", 0, "third"), List.of(0f, 1f));
@@ -26,9 +26,27 @@ class VectorStoreTest {
 
     @Test
     void zeroTopKReturnsNoResults() {
-        VectorStore store = new VectorStore();
+        VectorStore store = new VectorStore(false);
         store.store("user", new TextChunk("a.txt", 0, "first"), List.of(1f));
 
         assertTrue(store.search("user", List.of(1f), 0).isEmpty());
+    }
+
+    @Test
+    void keepsKnowledgeIsolatedByUser() {
+        VectorStore store = new VectorStore(false);
+        store.store("alice", new TextChunk("private.txt", 0, "alice only"), List.of(1f, 0f));
+
+        assertEquals(1, store.search("alice", List.of(1f, 0f), 3).size());
+        assertTrue(store.search("bob", List.of(1f, 0f), 3).isEmpty());
+    }
+
+    @Test
+    void excludesLowScoreAndMismatchedDimensions() {
+        VectorStore store = new VectorStore(false);
+        store.store("user", new TextChunk("irrelevant.txt", 0, "irrelevant"), List.of(0f, 1f));
+        store.store("user", new TextChunk("old-model.txt", 0, "old"), List.of(1f));
+
+        assertTrue(store.search("user", List.of(1f, 0f), 3, 0.55).isEmpty());
     }
 }

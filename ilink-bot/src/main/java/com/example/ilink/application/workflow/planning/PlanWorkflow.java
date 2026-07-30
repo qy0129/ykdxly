@@ -213,7 +213,7 @@ public final class PlanWorkflow {
         if (result.success()) {
             chatHistory.add(userId, userText, result.output());
         }
-        replySender.applyReplyMode(route.replyMode());
+        replySender.applyReplyMode(userId, route.replyMode());
         replySender.sendReply(client, userId, result.output(),
                 route.replyMode(), route.voiceStyle());
     }
@@ -315,7 +315,7 @@ public final class PlanWorkflow {
             }
         }
 
-        replySender.applyReplyMode(options.replyMode());
+        replySender.applyReplyMode(userId, options.replyMode());
         replySender.sendReply(client, userId, planText,
                 options.replyMode(), options.voiceStyle());
     }

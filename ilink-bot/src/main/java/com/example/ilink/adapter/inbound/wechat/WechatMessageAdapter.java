@@ -10,6 +10,7 @@ import com.github.wechat.ilink.sdk.core.model.WeixinMessage;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.time.Instant;
 
 /** Converts WeChat SDK messages into the channel-neutral application protocol. */
 public final class WechatMessageAdapter {
@@ -56,7 +57,9 @@ public final class WechatMessageAdapter {
             }
         }
         String userId = message.getFrom_user_id();
-        return new IncomingMessage(AgentIdentity.direct(userId), parts);
+        return new IncomingMessage(AgentIdentity.direct(userId), parts,
+                readString(message, "getMessage_id", "getMsg_id", "getMessageId"),
+                readInstant(message), "PRIVATE");
     }
 
     private static List<MessageItem> safeItems(WeixinMessage message) {
@@ -65,5 +68,26 @@ public final class WechatMessageAdapter {
 
     private static void requireClient(ILinkClient client) {
         if (client == null) throw new IllegalArgumentException("Media messages require an ILinkClient");
+    }
+
+    private static String readString(Object target, String... methods) {
+        for (String method : methods) {
+            try {
+                Object value = target.getClass().getMethod(method).invoke(target);
+                if (value != null && !value.toString().isBlank()) return value.toString();
+            } catch (ReflectiveOperationException ignored) {
+            }
+        }
+        return "";
+    }
+
+    private static Instant readInstant(Object target) {
+        String value = readString(target, "getCreate_time", "getTimestamp", "getCreateTime");
+        try {
+            long timestamp = Long.parseLong(value);
+            return timestamp > 10_000_000_000L ? Instant.ofEpochMilli(timestamp) : Instant.ofEpochSecond(timestamp);
+        } catch (RuntimeException ignored) {
+            return Instant.now();
+        }
     }
 }

@@ -30,6 +30,24 @@ public final class FunInteractionService {
         return pending.containsKey(userId);
     }
 
+    public boolean acceptsPendingReply(String userId, String text) {
+        Pending state = pending.get(userId);
+        if (state == null) return false;
+        String value = text == null ? "" : text.trim();
+        if (value.matches("取消|结束")) return true;
+        return switch (state.type()) {
+            case "quiz" -> value.matches("(?i)[ABC]");
+            case "story" -> value.matches("[12]");
+            case "song" -> !value.isBlank() && value.length() <= 30;
+            case "idiom" -> value.length() == 4 && value.startsWith(state.answer());
+            default -> false;
+        };
+    }
+
+    public void clearPending(String userId) {
+        pending.remove(userId);
+    }
+
     public Response handle(String userId, String text) {
         String value = text == null ? "" : text.trim();
         Pending state = pending.get(userId);

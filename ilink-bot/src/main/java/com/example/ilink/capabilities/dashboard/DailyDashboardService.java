@@ -6,6 +6,7 @@ import com.example.ilink.application.conversation.UserSessionStore;
 import com.example.ilink.capabilities.calendar.CalendarService;
 import com.example.ilink.capabilities.memory.MemoryService;
 import com.example.ilink.capabilities.planning.TodoService;
+import com.example.ilink.capabilities.life.TaskCheckinService;
 import com.example.ilink.capabilities.weather.WeatherLocation;
 import com.example.ilink.capabilities.weather.WeatherSnapshot;
 import com.example.ilink.capabilities.weather.WeatherService;
@@ -52,18 +53,21 @@ public final class DailyDashboardService {
     private final WeatherService weatherService;
     private final UserSessionStore userSessions;
     private final MemoryService memoryService;
+    private final TaskCheckinService taskCheckins;
     private volatile CachedWeather cachedWeather;
     private volatile String weatherLoadingLocation = "";
 
     public DailyDashboardService(TodoService todoService, CalendarService calendarService,
                                  PlanSessionStore planSessions, WeatherService weatherService,
-                                 UserSessionStore userSessions, MemoryService memoryService) {
+                                 UserSessionStore userSessions, MemoryService memoryService,
+                                 TaskCheckinService taskCheckins) {
         this.todoService = todoService;
         this.calendarService = calendarService;
         this.planSessions = planSessions;
         this.weatherService = weatherService;
         this.userSessions = userSessions;
         this.memoryService = memoryService;
+        this.taskCheckins = taskCheckins;
     }
 
     /** 返回未来七天的完整日报快照。 */
@@ -97,6 +101,10 @@ public final class DailyDashboardService {
 
     public boolean completeTodo(String userId, String todoId) {
         return userId != null && !userId.isBlank() && todoService.completeById(userId, todoId);
+    }
+
+    public boolean completePlanTask(String userId, String taskId) {
+        return userId != null && !userId.isBlank() && taskCheckins.completeById(userId, taskId);
     }
 
     /** 只返回天气区域，供天气后台刷新使用，避免重新计算整张计划表。 */
@@ -176,7 +184,8 @@ public final class DailyDashboardService {
                 for (PlanTask task : plan.tasks()) {
                     if (date.toString().equals(task.scheduledDate())) {
                         items.add(new DashboardItem(task.id(), task.title(), "plan", "计划",
-                                null, task.status(), task.priority(), task.estimatedMinutes(), false, ""));
+                                null, task.status(), task.priority(), task.estimatedMinutes(),
+                                !"completed".equals(task.status()), ""));
                     }
                 }
             }

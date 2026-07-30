@@ -9,7 +9,7 @@ class CommandRouterTest {
     private final CommandRouter router = new CommandRouter();
 
     @Test
-    void bareNumbersAreReservedForActiveBusinessOrSessionSelections() {
+    void leavesBareNumbersForPendingWorkflows() {
         assertEquals(CommandType.NONE, router.route("1"));
         assertEquals(CommandType.NONE, router.route("2"));
         assertEquals(CommandType.NONE, router.route("3"));
@@ -17,10 +17,10 @@ class CommandRouterTest {
     }
 
     @Test
-    void explicitTextCommandsRemainAvailable() {
-        assertEquals(CommandType.NEW_SESSION, router.route("新会话"));
+    void removesMenuCommandsButKeepsExplicitCommands() {
+        assertEquals(CommandType.NONE, router.route("菜单"));
+        assertEquals(CommandType.NONE, router.route("/menu"));
+        assertEquals(CommandType.NEW_SESSION, router.route("新聊天"));
         assertEquals(CommandType.SHOW_MEMORY, router.route("我的记忆"));
-        assertEquals(CommandType.SHOW_TASK, router.route("我的任务"));
-        assertEquals(CommandType.LIST_SESSIONS, router.route("切换会话"));
     }
 }

@@ -1,0 +1,13 @@
+{
+  "name": "core",
+  "description": "通用对话、人格与长期记忆",
+  "version": "1.0.0",
+  "enabled": true,
+  "requiresApproval": false,
+  "toolNames": ["switch_persona"],
+  "capabilities": [
+    {"name":"chat","description":"普通问答、聊天、写作、翻译、建议或最终汇总","parameterHint":"reply_mode, voice_style","interactive":false},
+    {"name":"persona_switch","description":"切换长期说话人设","parameterHint":"persona","interactive":false},
+    {"name":"memory","description":"记住、忘记或查询长期记忆","parameterHint":"action_text","interactive":false}
+  ]
+}

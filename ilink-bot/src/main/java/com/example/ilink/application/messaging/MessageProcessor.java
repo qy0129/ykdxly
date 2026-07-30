@@ -7,12 +7,15 @@ import com.example.ilink.application.conversation.AudioHistoryStore;
 import com.example.ilink.application.conversation.ChatHistoryStore;
 import com.example.ilink.application.conversation.DocumentSessionStore;
 import com.example.ilink.application.conversation.UserSessionStore;
+import com.example.ilink.application.inbox.InboxApplicationService;
 import com.example.ilink.capabilities.memory.MemoryExtractor;
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.capabilities.audio.AudioService;
 import com.example.ilink.capabilities.audio.AudioSource;
 import com.example.ilink.capabilities.documents.DocumentRecord;
 import com.example.ilink.capabilities.documents.DocumentService;
+import com.example.ilink.capabilities.documents.rag.RagContextService;
+import com.example.ilink.capabilities.documents.rag.Retriever;
 import com.example.ilink.capabilities.image.GeneratedImage;
 import com.example.ilink.capabilities.image.ImageService;
 import com.example.ilink.capabilities.memory.MemoryService;
@@ -22,7 +25,6 @@ import java.nio.file.Path;
 import java.util.Base64;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.CancellationException;
 
 /** 处理一条已经适配的入站消息。 */
 public final class MessageProcessor {
@@ -41,6 +43,8 @@ public final class MessageProcessor {
     private final CommandRouter commandRouter;
     private final CommandHandler commandHandler;
     private final MemoryExtractor memoryExtractor;
+    private final RagContextService ragContextService;
+    private final InboxApplicationService inboxService;
 
     public MessageProcessor(ChatHistoryStore chatHistory, UserSessionStore sessions,
                             AudioHistoryStore audioHistory, DocumentSessionStore documentSessions,
@@ -49,7 +53,8 @@ public final class MessageProcessor {
                              MediaStore mediaStore, ReplySender replySender,
                              CapabilityDispatcher capabilityDispatcher,
                              CommandRouter commandRouter, CommandHandler commandHandler,
-                             MemoryExtractor memoryExtractor) {
+                             MemoryExtractor memoryExtractor, RagContextService ragContextService,
+                             InboxApplicationService inboxService) {
         this.chatHistory = chatHistory;
         this.sessions = sessions;
         this.audioHistory = audioHistory;
@@ -64,18 +69,16 @@ public final class MessageProcessor {
         this.commandRouter = commandRouter;
         this.commandHandler = commandHandler;
         this.memoryExtractor = memoryExtractor;
+        this.ragContextService = ragContextService;
+        this.inboxService = inboxService;
     }
 
     public void process(AgentContext context, IncomingMessage message) {
         ReplyChannel client = context.replyChannel();
         String userId = context.principalId();
-        String resolvedSessionId = sessionId(context, userId);
         long startedAt = System.nanoTime();
-        ChatHistoryStore.SessionScope historyScope = context.channel() == ChannelType.WEB
-                ? chatHistory.bindSession(userId, context.conversationId()) : () -> { };
-        try (RequestLogContext.Scope logScope = RequestLogContext.ensure(context, resolvedSessionId)) {
-          try (historyScope) {
-            chatHistory.setUserSessionId(userId, resolvedSessionId);
+        try {
+            chatHistory.setUserSessionId(userId, sessionId(context, userId));
             client.startTyping(userId);
             List<MessagePart> parts = message.parts();
             if (parts.isEmpty()) return;
@@ -89,9 +92,18 @@ public final class MessageProcessor {
                     .filter(MessagePart.Image.class::isInstance)
                     .map(MessagePart.Image.class::cast)
                     .findFirst().orElse(null);
+            MessagePart.File fileMessage = parts.stream()
+                    .filter(MessagePart.File.class::isInstance)
+                    .map(MessagePart.File.class::cast)
+                    .findFirst().orElse(null);
 
             if (imageMessage != null) {
-                processImage(context, imageMessage);
+                String description = processImage(context, imageMessage, textMessage == null);
+                if (textMessage != null) {
+                    String enriched = description == null || description.isBlank() ? textMessage.text()
+                            : textMessage.text() + "\n\n图片识别内容：\n" + description;
+                    processText(context, enriched, message);
+                }
                 return;
             }
 
@@ -100,8 +112,9 @@ public final class MessageProcessor {
                 return;
             }
 
-            if (first instanceof MessagePart.File file) {
-                processFile(context, file);
+            if (fileMessage != null) {
+                processFile(context, fileMessage, textMessage == null);
+                if (textMessage != null) processText(context, textMessage.text(), message);
                 return;
             }
 
@@ -111,18 +124,13 @@ public final class MessageProcessor {
             }
 
             if (textMessage != null) {
-                processText(context, textMessage.text());
+                processText(context, textMessage.text(), message);
                 return;
             }
 
-            System.out.println(RequestLogContext.prefix("消息接收") + " type=unknown");
+            System.out.println("[" + userId + "] [未知消息类型]");
         } catch (Exception error) {
-            if (Thread.currentThread().isInterrupted() || error instanceof CancellationException) {
-                throw error instanceof CancellationException cancellation
-                        ? cancellation : new CancellationException("Message processing interrupted");
-            }
-            System.err.println(RequestLogContext.prefix("消息异常")
-                    + " error=" + RequestLogContext.error(error));
+            System.err.println("处理消息异常: " + error.getMessage());
             try {
                 replySender.sendReply(client, userId, "网络波动了，请再发一次～");
             } catch (Exception ignored) {
@@ -130,19 +138,27 @@ public final class MessageProcessor {
         } finally {
             long elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000;
             if (elapsedMillis >= 1_000) {
-                System.out.println(RequestLogContext.prefix("性能") + " message_ms=" + elapsedMillis);
+                System.out.println("[Performance] user=" + userId + ", message_ms=" + elapsedMillis);
             }
-          }
         }
     }
 
-    private void processImage(AgentContext context, MessagePart.Image item) throws Exception {
+    private String sessionId(AgentContext context, String userId) {
+        return context.channel() == ChannelType.WEB
+                && context.conversationId() != null
+                && !context.conversationId().isBlank()
+                ? context.conversationId()
+                : sessions.getCurrentSession(userId).sessionId();
+    }
+
+    private String processImage(AgentContext context, MessagePart.Image item,
+                                boolean replyImmediately) throws Exception {
         ReplyChannel client = context.replyChannel();
         String userId = context.principalId();
         byte[] image = item.content();
         if (image == null || image.length == 0) {
             replySender.sendReply(client, userId, "图片下载失败");
-            return;
+            return "";
         }
 
         GeneratedImage receivedImage = GeneratedImage.from(image, null);
@@ -164,13 +180,18 @@ public final class MessageProcessor {
         if (description != null && !description.isBlank()) {
             sessions.setLastImageAnalysis(userId, description);
             chatHistory.addMedia(userId, "图片", saved.toString(), description);
-            replySender.sendReply(client, userId, "收到图片。我看了一下："
-                    + imageAnalysisPreview(description)
-                    + "。你可以让我生成表格、整理成文档、分析内容或修改图片。");
+            if (replyImmediately) {
+                replySender.sendReply(client, userId, "收到图片。我看了一下："
+                        + imageAnalysisPreview(description)
+                        + "。你可以让我生成表格、整理成文档、分析内容或修改图片。");
+            }
         } else {
-            replySender.sendReply(client, userId,
-                    "我已经收到这张图片。你想让我做什么：分析内容、解答题目，还是修改图片？");
+            if (replyImmediately) {
+                replySender.sendReply(client, userId,
+                        "我已经收到这张图片。你想让我做什么：分析内容、解答题目，还是修改图片？");
+            }
         }
+        return description;
     }
 
     private void processVoice(AgentContext context, MessagePart.Voice item) throws Exception {
@@ -202,7 +223,8 @@ public final class MessageProcessor {
         processText(context, text);
     }
 
-    private void processFile(AgentContext context, MessagePart.File item) throws Exception {
+    private void processFile(AgentContext context, MessagePart.File item,
+                             boolean replyImmediately) throws Exception {
         ReplyChannel client = context.replyChannel();
         String userId = context.principalId();
         String fileName = item.fileName();
@@ -227,9 +249,20 @@ public final class MessageProcessor {
             DocumentService.ParsedDocument parsed = documentService.parse(saved, fileName);
             documentSessions.set(userId, new DocumentRecord(
                     parsed.fileName(), parsed.extension(), saved.toString(), parsed.text()));
+            try {
+                Retriever.IndexResult index = ragContextService.indexDocument(
+                        userId, parsed.fileName(), parsed.indexText());
+                System.out.println(index.indexed()
+                        ? "[RAG] 已索引文件：" + fileName + "，片段数=" + index.chunkCount()
+                        : "[RAG] 文件内容已存在，跳过重复索引：" + fileName);
+            } catch (Exception error) {
+                System.err.println("[RAG] 文件索引失败，文件问答继续使用全文模式: " + error.getMessage());
+            }
             chatHistory.addMedia(userId, "文件 " + fileName, saved.toString(), "文件已解析，可进行总结或问答");
-            replySender.sendReply(client, userId, "已收到并解析文件：" + fileName
-                    + "。你可以让我总结文件，或直接提问文件内容。");
+            if (replyImmediately) {
+                replySender.sendReply(client, userId, "已收到并解析文件：" + fileName
+                        + "。你可以让我总结文件，或直接提问文件内容。");
+            }
         } catch (Exception error) {
             System.err.println("[Document] 解析失败: " + error.getMessage());
             replySender.sendReply(client, userId, "文件已收到，但暂时无法解析其中的文字内容");
@@ -250,30 +283,34 @@ public final class MessageProcessor {
     }
 
     private void processText(AgentContext context, String text) throws Exception {
+        processText(context, text, null);
+    }
+
+    private void processText(AgentContext context, String text, IncomingMessage message) throws Exception {
         if (text == null || text.isBlank()) return;
         String userId = context.principalId();
-        System.out.println(RequestLogContext.prefix("消息接收") + " type=text chars=" + text.length()
-                + " preview=" + RequestLogContext.preview(text));
-        boolean allowBareSessionSelection = context.channel() == ChannelType.WECHAT;
-        boolean hasPendingBusinessInteraction = capabilityDispatcher.hasPendingInteraction(userId);
-        if (commandHandler.trySwitchSession(context.replyChannel(), userId, text,
-                allowBareSessionSelection, hasPendingBusinessInteraction)) return;
+        System.out.println("[" + userId + "] " + text);
+        if (commandHandler.trySwitchSession(context.replyChannel(), userId, text)) return;
         CommandType commandType = commandRouter.route(text);
         if (commandType != CommandType.NONE) {
-            commandHandler.handle(context.replyChannel(), userId, commandType, allowBareSessionSelection);
+            commandHandler.handle(context.replyChannel(), userId, commandType);
             return;
         }
-        String sessionId = sessionId(context, userId);
+        if (message != null) {
+            InboxApplicationService.HandleResult inbox = inboxService.handle(userId, message.messageId(),
+                    message.receivedAt(), message.sourceType(), text);
+            if (inbox.consumed()) {
+                if (!inbox.response().isBlank()) {
+                    replySender.sendReply(context.replyChannel(), userId, inbox.response());
+                }
+                return;
+            }
+        }
+        String sessionId = sessions.getCurrentSession(userId).sessionId();
         chatHistory.setUserSessionId(userId, sessionId);
         chatHistory.addUserMessage(userId, text);
         memoryExtractor.extract(userId, text);
         capabilityDispatcher.dispatch(context, text);
-    }
-
-    private String sessionId(AgentContext context, String userId) {
-        return context.channel() == ChannelType.WEB && context.conversationId() != null
-                && !context.conversationId().isBlank()
-                ? context.conversationId() : sessions.getCurrentSession(userId).sessionId();
     }
 
     private static String imageAnalysisPreview(String analysis) {

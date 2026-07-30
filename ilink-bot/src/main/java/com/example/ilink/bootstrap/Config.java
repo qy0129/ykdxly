@@ -66,6 +66,8 @@ public class Config {
     public static final String DATABASE_USERNAME = loadProperty("database.username", "root");
     public static final String DATABASE_PASSWORD = loadProperty("database.password", "");
     public static final String DATABASE_BOT_ID = loadProperty("database.bot.id", "ilink-bot-1");
+    /** Personal Agent 的唯一使用者；为空时进程会锁定首位发消息的用户。 */
+    public static final String PERSONAL_OWNER_USER_ID = loadProperty("personal.owner.user.id", "").trim();
     /** 高德 Web 服务 Key；为空时保留文字出行建议，不生成地图图片。 */
     public static final String AMAP_API_KEY = loadProperty("amap.api.key", "");
     /**embedding配置。*/
@@ -73,6 +75,7 @@ public class Config {
             "https://api.siliconflow.cn/v1/embeddings");
     public static final String EMBEDDING_MODEL = loadProperty("embedding.model", "BAAI/bge-large-zh-v1.5");
     public static final int EMBEDDING_DIMENSION = Integer.parseInt(loadProperty("embedding.dimension", "1024"));
+    public static final double RAG_MIN_SCORE = Double.parseDouble(loadProperty("rag.min.score", "0.55"));
     /** 百度地图 AK，用于快递 H5 和服务端出行规划。 */
     public static final String BAIDU_MAP_AK = loadProperty("baidu.map.ak", "");
     /** 滴滴 MCP Key；优先从环境变量 DIDI_MCP_KEY 读取，避免把密钥写入配置文件。 */
@@ -105,7 +108,7 @@ public class Config {
     public static final boolean DAILY_DASHBOARD_ENABLED =
             Boolean.parseBoolean(loadProperty("dashboard.enabled", "true"));
     public static final String DAILY_DASHBOARD_BIND_ADDRESS =
-            loadProperty("dashboard.bind.address", "0.0.0.0");
+            loadProperty("dashboard.bind.address", "127.0.0.1");
     public static final int DAILY_DASHBOARD_PORT =
             Integer.parseInt(loadProperty("dashboard.port", "8787"));
     public static final String DAILY_DASHBOARD_PUBLIC_URL =
@@ -132,12 +135,19 @@ public class Config {
             Integer.parseInt(loadProperty("web.chat.port", "8792"));
     public static final long WEB_CHAT_MAX_UPLOAD_BYTES = Math.max(1L, Long.parseLong(
             loadProperty("web.chat.max.upload.mb", "25"))) * 1024L * 1024L;
-    /** Roots exposed by the local Web workspace browser; absolute paths outside this list are rejected. */
+    /** Roots exposed by the local Web workspace browser; paths outside these roots are rejected. */
     public static final List<Path> WORKSPACE_ROOTS = Arrays.stream(
                     loadProperty("workspace.roots", "").split(";"))
             .map(String::trim).filter(value -> !value.isBlank()).map(Path::of).toList();
     public static final long WORKSPACE_MAX_SEND_BYTES = Math.max(1L, Long.parseLong(
             loadProperty("workspace.max.send.mb", "20"))) * 1024L * 1024L;
+    /** Executive Automation 本机控制台。 */
+    public static final boolean AUTOMATION_CONSOLE_ENABLED =
+            Boolean.parseBoolean(loadProperty("automation.console.enabled", "true"));
+    public static final String AUTOMATION_CONSOLE_BIND_ADDRESS =
+            loadProperty("automation.console.bind.address", "127.0.0.1");
+    public static final int AUTOMATION_CONSOLE_PORT =
+            Integer.parseInt(loadProperty("automation.console.port", "8790"));
     public static final boolean VISUAL_CARDS_ENABLED =
             Boolean.parseBoolean(loadProperty("visual.cards.enabled", "true"));
     public static final String VISUAL_CARDS_MODE = loadProperty("visual.cards.mode", "image");
@@ -188,8 +198,6 @@ public class Config {
 
     /** 读取普通配置项，文件不存在或读取失败时返回默认值。 */
     private static String loadProperty(String name, String defaultValue) {
-        String systemValue = System.getProperty(name);
-        if (systemValue != null && !systemValue.isBlank()) return systemValue.trim();
         try {
             Properties props = new Properties();
             Path path = configPath();

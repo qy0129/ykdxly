@@ -296,7 +296,7 @@ public final class DefaultUserSessionStore implements UserSessionStore {
         ChatSession active = loadActiveSession(userId);
         if (active != null) {
             ConversationSession session = new ConversationSession(userId, active.sessionId(),
-                    active.createdTime(), active.lastActiveTime(), List.of(), Map.of());
+                    active.createdTime(), active.lastActiveTime());
             activeSessions.put(userId, session);
             return session;
         }
@@ -311,7 +311,7 @@ public final class DefaultUserSessionStore implements UserSessionStore {
             database.createSession(sessionId, userId, null);
             database.deactivateOtherSessions(sessionId, userId);
         }
-        ConversationSession session = new ConversationSession(userId, sessionId, now, now, List.of(), Map.of());
+        ConversationSession session = new ConversationSession(userId, sessionId, now, now);
         activeSessions.put(userId, session);
         return session;
     }
@@ -320,7 +320,7 @@ public final class DefaultUserSessionStore implements UserSessionStore {
     public void refreshSession(String userId) {
         ConversationSession current = getCurrentSession(userId);
         ConversationSession refreshed = new ConversationSession(current.userId(), current.sessionId(),
-                current.createdAt(), LocalDateTime.now(), current.messages(), current.taskState());
+                current.createdAt(), LocalDateTime.now());
         activeSessions.put(userId, refreshed);
         if (database.isAvailable()) database.updateSessionActiveTime(current.sessionId());
     }
@@ -332,7 +332,7 @@ public final class DefaultUserSessionStore implements UserSessionStore {
         if (row == null || !userId.equals(row.wechatId())) return false;
         database.switchActiveSession(sessionId, userId);
         activeSessions.put(userId, new ConversationSession(userId, sessionId,
-                row.createdTime(), LocalDateTime.now(), List.of(), Map.of()));
+                row.createdTime(), LocalDateTime.now()));
         return true;
     }
 

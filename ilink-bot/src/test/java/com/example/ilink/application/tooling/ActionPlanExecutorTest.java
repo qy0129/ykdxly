@@ -54,6 +54,17 @@ class ActionPlanExecutorTest {
         assertEquals(List.of("weather", "news", "weather"), executed);
     }
 
+    @Test
+    void planOrdersDependentActionAfterItsRequirement() {
+        IntentAction total = new IntentAction("r2", "计算总费用", List.of("r1"), null);
+        IntentAction taxi = new IntentAction("r1", "查询打车报价", List.of(), null);
+
+        IntentPlan plan = new IntentPlan(List.of(total, taxi));
+
+        assertEquals(List.of("r1", "r2"),
+                plan.actions().stream().map(IntentAction::requirementId).toList());
+    }
+
     private IntentAction action(String text) {
         return new IntentAction(text, null);
     }

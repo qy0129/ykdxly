@@ -3,13 +3,13 @@ package com.example.ilink.application.routing;
 /** 修正模型返回的未知意图。 */
 public final class IntentNormalizer {
 
-    private final SkillRegistry skills;
+    private final CapabilityRegistry capabilities;
 
-    public IntentNormalizer(SkillRegistry skills) {
-        this.skills = skills;
+    public IntentNormalizer(CapabilityRegistry capabilities) {
+        this.capabilities = capabilities;
     }
 
     public String normalizeIntent(String intent) {
-        return skills.names().contains(intent) ? intent : "chat";
+        return capabilities.contains(intent) ? intent : "chat";
     }
 }
