@@ -4,28 +4,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="7ef5a97d-8ab3-4de2-b2a0-cd0206c2ce50" name="更改" comment="">
-      <change afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/adapter/inbound/http/WebChatServer.java" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/adapter/inbound/http/WebTaskRegistry.java" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/adapter/outbound/web/WebArtifactStore.java" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/adapter/outbound/web/WebEventBroker.java" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/adapter/outbound/web/WebReplyChannel.java" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ilink-bot/src/main/resources/static/css/web-chat.css" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ilink-bot/src/main/resources/static/js/web-chat.js" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/ilink-bot/src/main/resources/templates/web-chat.html" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ilink-bot/config.properties.example" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/config.properties.example" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/agent/AgentLoop.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/agent/AgentLoop.java" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/conversation/ChatHistoryStore.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/conversation/ChatHistoryStore.java" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/conversation/SessionService.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/conversation/SessionService.java" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/messaging/AgentContext.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/messaging/AgentContext.java" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/messaging/MessageProcessor.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/messaging/MessageProcessor.java" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/messaging/MessageSerialExecutor.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/application/messaging/MessageSerialExecutor.java" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/bootstrap/ApplicationBootstrap.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/bootstrap/ApplicationBootstrap.java" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/bootstrap/Config.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/bootstrap/Config.java" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/platform/persistence/MySqlStore.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/main/java/com/example/ilink/platform/persistence/MySqlStore.java" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ilink-bot/src/test/java/com/example/ilink/application/messaging/MessageSerialExecutorTest.java" beforeDir="false" afterPath="$PROJECT_DIR$/ilink-bot/src/test/java/com/example/ilink/application/messaging/MessageSerialExecutorTest.java" afterDir="false" />
-    </list>
+    <list default="true" id="7ef5a97d-8ab3-4de2-b2a0-cd0206c2ce50" name="更改" comment="" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -55,12 +34,12 @@
     &quot;assignee&quot;: &quot;ChenYanzhou-719&quot;
   }
 }</component>
-  <component name="GithubPullRequestsUISettings">{
-  &quot;selectedUrlAndAccountId&quot;: {
-    &quot;url&quot;: &quot;https://github.com/qy0129/ykdxly.git&quot;,
-    &quot;accountId&quot;: &quot;605a2ad9-6cd5-4ae5-8eba-6a58c913c478&quot;
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "https://github.com/qy0129/ykdxly.git",
+    "accountId": "932dbead-d820-4911-bfb0-968d96419ddf"
   }
-}</component>
+}]]></component>
   <component name="ProjectColorInfo">{
   &quot;associatedIndex&quot;: 0
 }</component>
@@ -75,10 +54,10 @@
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.git.unshallow": "true",
     "SHARE_PROJECT_CONFIGURATION_FILES": "true",
-    "git-widget-placeholder": "kangjiaye-1",
+    "git-widget-placeholder": "Chen",
     "ignore.virus.scanning.warn.message": "true",
     "kotlin-language-version-configured": "true",
-    "last_opened_file_path": "D:/idea/ykdxly2",
+    "last_opened_file_path": "D:/.BB/ykdxly/ilink-bot/pom.xml",
     "nodejs_package_manager_path": "npm",
     "project.structure.last.edited": "项目",
     "project.structure.proportion": "0.0",
@@ -122,14 +101,6 @@
         <item itemvalue="应用程序.ILinkBot" />
       </list>
     </recent_temporary>
-  </component>
-  <component name="SharedIndexes">
-    <attachedChunks>
-      <set>
-        <option value="bundled-jdk-9823dce3aa75-fbdcb00ec9e3-intellij.indexing.shared.core-IU-251.25410.129" />
-        <option value="bundled-js-predefined-d6986cc7102b-6a121458b545-JavaScript-IU-251.25410.129" />
-      </set>
-    </attachedChunks>
   </component>
   <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="应用程序级" UseSingleDictionary="true" transferred="true" />
   <component name="TaskManager">
