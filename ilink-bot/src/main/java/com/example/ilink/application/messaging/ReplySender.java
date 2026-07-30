@@ -29,6 +29,7 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -47,9 +48,9 @@ public final class ReplySender {
     private final ToolManager toolManager;
     private final UserSessionStore sessions;
     private final ChatHistoryStore chatHistory;
-    private volatile boolean voiceReplyEnabled;
-    private volatile long lastReplyTime;
-    private volatile String lastTextReply = "";
+    private final ConcurrentHashMap<String, Boolean> voiceReplyEnabled = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> lastReplyTimes = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> lastTextReplies = new ConcurrentHashMap<>();
 
     /** 创建回复发送器并注入音频、媒体和语音历史依赖。 */
     public ReplySender(
@@ -75,18 +76,19 @@ public final class ReplySender {
     public void sendReply(ReplyChannel client, String userId, String text,
                            String replyMode, String voiceStyle) throws Exception {
         String displayText = TextLinkFormatter.format(text);
-        boolean voice = voiceReplyEnabled
+        boolean userVoiceEnabled = voiceReplyEnabled.getOrDefault(userId, false);
+        boolean voice = userVoiceEnabled
                 || "voice".equalsIgnoreCase(Config.REPLY_MODE)
                 || "both".equalsIgnoreCase(Config.REPLY_MODE)
                 || "both".equalsIgnoreCase(replyMode)
                 || "voice".equalsIgnoreCase(replyMode);
-        boolean both = voiceReplyEnabled
+        boolean both = userVoiceEnabled
                 || "both".equalsIgnoreCase(Config.REPLY_MODE)
                 || "both".equalsIgnoreCase(replyMode);
 
         if (!voice || both) {
             client.sendText(userId, displayText);
-            markReplySent();
+            markReplySent(userId);
             rememberText(userId, displayText);
         }
         if (voice) {
@@ -117,7 +119,7 @@ public final class ReplySender {
             } catch (Exception e) {
                 if (!both) {
                     client.sendText(userId, displayText);
-                    markReplySent();
+                    markReplySent(userId);
                     rememberText(userId, displayText);
                 }
                 System.err.println("[TTS] 语音回复失败: " + e.getMessage());
@@ -138,7 +140,7 @@ public final class ReplySender {
     public void sendImage(ReplyChannel client, String userId, byte[] imageBytes,
                           String fileName, String caption) throws Exception {
         client.sendImage(userId, imageBytes, fileName, caption);
-        markReplySent();
+        markReplySent(userId);
     }
 
     /** 发送实际格式的音频，并在发送成功后保存历史记录。 */
@@ -148,7 +150,7 @@ public final class ReplySender {
         System.out.println("[TTS] 准备发送 " + audio.format().toUpperCase()
                 + " 文件，字节数=" + audio.bytes().length);
         client.sendFile(userId, audio.bytes(), fileName, "语音回复");
-        markReplySent();
+        markReplySent(userId);
         rememberText(userId, text);
         try {
             Path savedAudio = mediaStore.save(userId, "audio", audio.bytes(), audio.format());
@@ -159,41 +161,43 @@ public final class ReplySender {
     }
 
     /** 保存路由结果中的回复模式，供后续回复使用。 */
-    public void applyReplyMode(String replyMode) {
+    public void applyReplyMode(String userId, String replyMode) {
+        if (userId == null || userId.isBlank()) return;
         if ("both".equals(replyMode) || "voice".equals(replyMode)) {
-            voiceReplyEnabled = true;
+            voiceReplyEnabled.put(userId, true);
         } else if ("text".equals(replyMode)) {
-            voiceReplyEnabled = false;
+            voiceReplyEnabled.put(userId, false);
         }
     }
 
     /** 判断当前会话是否只发送语音回复。 */
-    public boolean isVoiceOnly() {
-        return voiceReplyEnabled || "voice".equalsIgnoreCase(Config.REPLY_MODE);
+    public boolean isVoiceOnly(String userId) {
+        return voiceReplyEnabled.getOrDefault(userId, false)
+                || "voice".equalsIgnoreCase(Config.REPLY_MODE);
     }
 
     /** 判断当前处理开始后是否已经成功发出回复。 */
-    public boolean hasSentReplySince(long startedAtMillis) {
-        return lastReplyTime >= startedAtMillis;
+    public boolean hasSentReplySince(String userId, long startedAtMillis) {
+        return lastReplyTimes.getOrDefault(userId, 0L) >= startedAtMillis;
     }
 
-    private void markReplySent() {
-        markSent();
+    private void markReplySent(String userId) {
+        markSent(userId);
     }
 
     /** 供非文字回复链路标记已经开始发送，避免处理中提示插入图片组。 */
-    public void markSent() {
-        lastReplyTime = System.currentTimeMillis();
+    public void markSent(String userId) {
+        if (userId != null && !userId.isBlank()) lastReplyTimes.put(userId, System.currentTimeMillis());
     }
 
     /** 保存最后一条可重发的文字内容。 */
     public void rememberText(String userId, String text) {
         if (userId == null || text == null || text.isBlank()) return;
-        lastTextReply = text;
+        lastTextReplies.put(userId, text);
         if (chatHistory != null) chatHistory.addAssistantMessage(userId, text);
     }
 
-    public String lastText() {
-        return lastTextReply;
+    public String lastText(String userId) {
+        return userId == null ? "" : lastTextReplies.getOrDefault(userId, "");
     }
 }

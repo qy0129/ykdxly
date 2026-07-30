@@ -46,6 +46,45 @@ public final class ExecutiveDatabase {
         return database != null && database.isAvailable();
     }
 
+    /** 原子创建任务和步骤；去重冲突时返回已经存在的任务，不覆盖原任务。 */
+    public ExecutiveTask createTask(ExecutiveTask task, List<ExecutiveStep> steps) {
+        if (!available()) return task;
+        String taskSql = "INSERT INTO executive_tasks (id, bot_id, user_id, goal, source_type, source_id, dedup_key, "
+                + "status, priority, deadline_at, next_run_at, schedule_rule, current_step, plan_version, "
+                + "retry_count, max_retries, last_error, lock_owner, locked_until, created_at, updated_at) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        String stepSql = "INSERT INTO executive_steps (id, task_id, bot_id, sequence_no, title, capability, tool_name, "
+                + "input_json, output_text, status, depends_on, requires_approval, risk_level, attempts, "
+                + "max_attempts, next_run_at, verification_rule, last_error, started_at, finished_at) "
+                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        try (Connection connection = database.openConnection()) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement taskStatement = connection.prepareStatement(taskSql);
+                 PreparedStatement stepStatement = connection.prepareStatement(stepSql)) {
+                bindTask(taskStatement, task);
+                taskStatement.executeUpdate();
+                for (ExecutiveStep step : steps) {
+                    bindStep(stepStatement, step);
+                    stepStatement.addBatch();
+                }
+                stepStatement.executeBatch();
+                connection.commit();
+                return task;
+            } catch (SQLException error) {
+                connection.rollback();
+                if (error.getErrorCode() == 1062 || "23000".equals(error.getSQLState())) {
+                    ExecutiveTask existing = findByDedupKey(task.userId(), task.dedupKey());
+                    if (existing != null) return existing;
+                }
+                throw new IllegalStateException("原子创建 ExecutiveTask 失败", error);
+            } finally {
+                connection.setAutoCommit(true);
+            }
+        } catch (SQLException error) {
+            throw new IllegalStateException("原子创建 ExecutiveTask 失败", error);
+        }
+    }
+
     public void saveTask(ExecutiveTask task) {
         if (!available()) return;
         String sql = "INSERT INTO executive_tasks (id, bot_id, user_id, goal, source_type, source_id, dedup_key, "
@@ -181,6 +220,41 @@ public final class ExecutiveDatabase {
         }
     }
 
+    public boolean renewLease(String taskId, String owner, LocalDateTime until) {
+        if (!available()) return true;
+        String sql = "UPDATE executive_tasks SET locked_until=?, updated_at=? "
+                + "WHERE bot_id=? AND id=? AND lock_owner=? AND status IN ('READY','RETRYING','RUNNING','VERIFYING')";
+        try (Connection connection = database.openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setTimestamp(1, Timestamp.valueOf(until));
+            statement.setTimestamp(2, Timestamp.valueOf(LocalDateTime.now()));
+            statement.setString(3, Config.DATABASE_BOT_ID);
+            statement.setString(4, taskId);
+            statement.setString(5, owner);
+            return statement.executeUpdate() == 1;
+        } catch (SQLException error) {
+            failure("续期任务租约", error);
+            return false;
+        }
+    }
+
+    /** 将进程中断遗留的执行中任务恢复为可重试状态。 */
+    public void recoverExpiredExecutions(LocalDateTime now) {
+        if (!available()) return;
+        String sql = "UPDATE executive_tasks SET status='RETRYING', lock_owner='', locked_until=NULL, "
+                + "last_error='执行进程中断，已自动恢复', updated_at=? WHERE bot_id=? "
+                + "AND status IN ('RUNNING','VERIFYING') AND locked_until IS NOT NULL AND locked_until<=?";
+        try (Connection connection = database.openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setTimestamp(1, Timestamp.valueOf(now));
+            statement.setString(2, Config.DATABASE_BOT_ID);
+            statement.setTimestamp(3, Timestamp.valueOf(now));
+            statement.executeUpdate();
+        } catch (SQLException error) {
+            failure("恢复过期执行任务", error);
+        }
+    }
+
     public void saveStep(ExecutiveStep step) {
         if (!available()) return;
         String sql = "INSERT INTO executive_steps (id, task_id, bot_id, sequence_no, title, capability, tool_name, "
@@ -301,6 +375,27 @@ public final class ExecutiveDatabase {
             statement.executeUpdate();
         } catch (SQLException error) {
             failure("保存审批请求", error);
+        }
+    }
+
+    /** 使用状态和过期时间做 CAS，防止重复或过期审批。 */
+    public boolean decideApproval(ApprovalRequest approval, LocalDateTime now) {
+        if (!available()) return true;
+        String sql = "UPDATE approval_requests SET status=?, acted_at=? "
+                + "WHERE bot_id=? AND id=? AND user_id=? AND status='PENDING' "
+                + "AND (expires_at IS NULL OR expires_at>?)";
+        try (Connection connection = database.openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, approval.status());
+            statement.setTimestamp(2, Timestamp.valueOf(now));
+            statement.setString(3, Config.DATABASE_BOT_ID);
+            statement.setString(4, approval.id());
+            statement.setString(5, approval.userId());
+            statement.setTimestamp(6, Timestamp.valueOf(now));
+            return statement.executeUpdate() == 1;
+        } catch (SQLException error) {
+            failure("处理审批请求", error);
+            return false;
         }
     }
 
@@ -470,6 +565,53 @@ public final class ExecutiveDatabase {
     private static void timestamp(PreparedStatement statement, int index, LocalDateTime value) throws SQLException {
         if (value == null) statement.setNull(index, java.sql.Types.TIMESTAMP);
         else statement.setTimestamp(index, Timestamp.valueOf(value));
+    }
+
+    private void bindTask(PreparedStatement statement, ExecutiveTask task) throws SQLException {
+        statement.setString(1, task.id());
+        statement.setString(2, Config.DATABASE_BOT_ID);
+        statement.setString(3, task.userId());
+        statement.setString(4, task.goal());
+        statement.setString(5, task.sourceType());
+        statement.setString(6, task.sourceId());
+        statement.setString(7, task.dedupKey());
+        statement.setString(8, task.status().name());
+        statement.setString(9, task.priority());
+        timestamp(statement, 10, task.deadlineAt());
+        timestamp(statement, 11, task.nextRunAt());
+        statement.setString(12, task.scheduleRule().name());
+        statement.setInt(13, task.currentStep());
+        statement.setInt(14, task.planVersion());
+        statement.setInt(15, task.retryCount());
+        statement.setInt(16, task.maxRetries());
+        statement.setString(17, task.lastError());
+        statement.setString(18, task.lockOwner());
+        timestamp(statement, 19, task.lockedUntil());
+        timestamp(statement, 20, task.createdAt());
+        timestamp(statement, 21, task.updatedAt());
+    }
+
+    private void bindStep(PreparedStatement statement, ExecutiveStep step) throws SQLException {
+        statement.setString(1, step.id());
+        statement.setString(2, step.taskId());
+        statement.setString(3, Config.DATABASE_BOT_ID);
+        statement.setInt(4, step.sequence());
+        statement.setString(5, step.title());
+        statement.setString(6, step.capability());
+        statement.setString(7, step.toolName());
+        statement.setString(8, step.inputJson());
+        statement.setString(9, step.outputText());
+        statement.setString(10, step.status().name());
+        statement.setString(11, gson.toJson(step.dependsOn()));
+        statement.setBoolean(12, step.requiresApproval());
+        statement.setString(13, step.riskLevel().name());
+        statement.setInt(14, step.attempts());
+        statement.setInt(15, step.maxAttempts());
+        timestamp(statement, 16, step.nextRunAt());
+        statement.setString(17, step.verificationRule());
+        statement.setString(18, step.lastError());
+        timestamp(statement, 19, step.startedAt());
+        timestamp(statement, 20, step.finishedAt());
     }
 
     private static LocalDateTime time(ResultSet result, String column) throws SQLException {

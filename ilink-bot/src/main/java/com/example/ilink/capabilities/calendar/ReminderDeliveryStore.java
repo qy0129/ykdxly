@@ -22,12 +22,21 @@ public final class ReminderDeliveryStore {
 
     private final Map<String, ReminderDelivery> deliveries = new ConcurrentHashMap<>();
     private final NavigableMap<LocalDateTime, Set<String>> dueIndex = new TreeMap<>();
-    private final MySqlStore database = MySqlStore.getInstance();
+    private final MySqlStore database;
+    private final boolean persistent;
 
     public ReminderDeliveryStore() {
-        for (ReminderDelivery delivery : database.loadActiveReminderDeliveries()) {
-            deliveries.put(delivery.id(), delivery);
-            addToDueIndex(delivery);
+        this(true);
+    }
+
+    public ReminderDeliveryStore(boolean persistent) {
+        this.persistent = persistent;
+        this.database = persistent ? MySqlStore.getInstance() : null;
+        if (persistent) {
+            for (ReminderDelivery delivery : database.loadActiveReminderDeliveries()) {
+                deliveries.put(delivery.id(), delivery);
+                addToDueIndex(delivery);
+            }
         }
     }
 
@@ -37,7 +46,7 @@ public final class ReminderDeliveryStore {
         boolean exists = deliveries.values().stream()
                 .anyMatch(delivery -> dedupKey.equals(delivery.dedupKey())
                         && !"cancelled".equals(delivery.status()));
-        if (exists || database.reminderDeliveryExists(dedupKey)) return;
+        if (exists || persistent && database.reminderDeliveryExists(dedupKey)) return;
         ReminderDelivery delivery = new ReminderDelivery(UUID.randomUUID().toString(), event.id(), event.userId(),
                 event.nextReminderAt(), "pending", 0, null, null, "", dedupKey, null);
         save(delivery);
@@ -120,7 +129,7 @@ public final class ReminderDeliveryStore {
         ReminderDelivery previous = deliveries.put(delivery.id(), delivery);
         removeFromDueIndex(previous);
         addToDueIndex(delivery);
-        database.saveReminderDelivery(delivery);
+        if (persistent) database.saveReminderDelivery(delivery);
     }
 
     private void addToDueIndex(ReminderDelivery delivery) {

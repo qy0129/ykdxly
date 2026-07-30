@@ -31,6 +31,8 @@ import java.util.regex.Pattern;
 public final class TaskPlanningService {
 
     private static final Pattern DURATION_PATTERN = Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*(小时|分钟)");
+    private static final Pattern WEEKDAY_DURATION = Pattern.compile("工作日.{0,12}?(\\d+(?:\\.\\d+)?)\\s*(小时|分钟)");
+    private static final Pattern WEEKEND_DURATION = Pattern.compile("周末.{0,12}?(\\d+(?:\\.\\d+)?)\\s*(小时|分钟)");
 
     private final HttpClient httpClient;
     private final Gson gson = new Gson();
@@ -100,27 +102,84 @@ public final class TaskPlanningService {
         LocalDate safeDeadline = deadline.isBefore(today) ? today : deadline;
         int dayCount = (int) Math.max(1, ChronoUnit.DAYS.between(today, safeDeadline) + 1);
         List<Integer> dailyCapacities = parseDailyCapacities(availableTime, dayCount);
+        String planId = "PLAN-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
 
-        List<PlanTask> orderedTasks = new ArrayList<>(sourceTasks);
-        orderedTasks.sort(Comparator.comparingInt(task -> priorityOrder(task.priority())));
+        List<PlanTask> orderedTasks = splitOversizedTasks(sourceTasks,
+                dailyCapacities.stream().mapToInt(Integer::intValue).max().orElse(120));
+        boolean fixedOrder = !orderedTasks.isEmpty()
+                && orderedTasks.stream().allMatch(task -> task.id().startsWith("DRAFT-"));
+        if (!fixedOrder) orderedTasks.sort(Comparator.comparingInt(task -> priorityOrder(task.priority())));
+
+        int totalMinutes = orderedTasks.stream().mapToInt(PlanTask::estimatedMinutes).sum();
+        int fullCapacity = dailyCapacities.stream().mapToInt(Integer::intValue).sum();
+        if (totalMinutes > fullCapacity) {
+            throw new IllegalArgumentException("当前可用时间不足：任务约需 " + totalMinutes
+                    + " 分钟，但截止日前只有 " + fullCapacity + " 分钟。请延长周期或增加每日时间。");
+        }
+        int usableDays = dayCount;
+        if (dayCount >= 4) {
+            int capacityWithoutBuffer = dailyCapacities.subList(0, dayCount - 1).stream()
+                    .mapToInt(Integer::intValue).sum();
+            if (totalMinutes <= capacityWithoutBuffer) usableDays = dayCount - 1;
+        }
 
         List<PlanTask> scheduledTasks = new ArrayList<>();
         int dayIndex = 0;
         int usedMinutes = 0;
+        int scheduledIndex = 0;
         for (PlanTask task : orderedTasks) {
-            int capacity = dailyCapacities.get(dayIndex);
-            if (usedMinutes > 0 && usedMinutes + task.estimatedMinutes() > capacity && dayIndex < dayCount - 1) {
-                dayIndex++;
-                usedMinutes = 0;
-                capacity = dailyCapacities.get(dayIndex);
+            int remaining = task.estimatedMinutes();
+            int part = 1;
+            while (remaining > 0) {
+                while (dayIndex < usableDays
+                        && dailyCapacities.get(dayIndex) - usedMinutes < Math.min(15, remaining)) {
+                    dayIndex++;
+                    usedMinutes = 0;
+                }
+                if (dayIndex >= usableDays) {
+                    throw new IllegalArgumentException("每日容量无法容纳当前任务，请增加可用时间或延长截止日期。");
+                }
+                int free = dailyCapacities.get(dayIndex) - usedMinutes;
+                int minutes = Math.min(remaining, free);
+                if (remaining - minutes > 0 && remaining - minutes < 15) minutes -= 15;
+                if (minutes < 15) {
+                    dayIndex++;
+                    usedMinutes = 0;
+                    continue;
+                }
+                String suffix = remaining == task.estimatedMinutes() && minutes == remaining
+                        ? "" : "（第" + part++ + "部分）";
+                String taskId = planId + "-T" + (++scheduledIndex);
+                scheduledTasks.add(new PlanTask(taskId, task.title() + suffix, task.description(),
+                        minutes, task.priority(), today.plusDays(dayIndex).toString(), task.status()));
+                usedMinutes += minutes;
+                remaining -= minutes;
             }
-            scheduledTasks.add(task.scheduleOn(today.plusDays(dayIndex).toString()));
-            usedMinutes += Math.min(task.estimatedMinutes(), capacity);
         }
 
-        String planId = "PLAN-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(Locale.ROOT);
         return new TaskPlan(planId, goal, safeDeadline.toString(),
                 availableTime, today.toString(), scheduledTasks);
+    }
+
+    /** 把超过单日容量的任务拆成多个可排期片段。 */
+    private List<PlanTask> splitOversizedTasks(List<PlanTask> tasks, int maxDailyMinutes) {
+        int chunkSize = Math.max(30, maxDailyMinutes);
+        List<PlanTask> result = new ArrayList<>();
+        for (PlanTask task : tasks == null ? List.<PlanTask>of() : tasks) {
+            int partCount = (int) Math.ceil(task.estimatedMinutes() / (double) chunkSize);
+            if (partCount <= 1) {
+                result.add(task);
+                continue;
+            }
+            int remaining = task.estimatedMinutes();
+            for (int part = 1; part <= partCount; part++) {
+                int minutes = Math.min(chunkSize, remaining);
+                result.add(new PlanTask(task.id(), task.title() + "（" + part + "/" + partCount + "）",
+                        task.description(), minutes, task.priority(), "", task.status()));
+                remaining -= minutes;
+            }
+        }
+        return result;
     }
 
     /**
@@ -153,6 +212,46 @@ public final class TaskPlanningService {
             adjustedTasks.add(adjusted);
         }
         return plan.withTasks(adjustedTasks);
+    }
+
+    /** 从指定任务开始重新排期，已完成任务和更早任务保持不动。 */
+    public TaskPlan replanFrom(TaskPlan plan, String taskId, LocalDate earliestDate) {
+        PlanTask target = plan.tasks().stream().filter(task -> task.id().equals(taskId))
+                .findFirst().orElseThrow(() -> new IllegalArgumentException("没有找到需要调整的任务。"));
+        LocalDate targetDate = parseDate(target.scheduledDate(), LocalDate.now());
+        LocalDate start = earliestDate.isBefore(LocalDate.now()) ? LocalDate.now() : earliestDate;
+        LocalDate deadline = LocalDate.parse(plan.deadline());
+        if (start.isAfter(deadline)) throw new IllegalArgumentException("已经超过计划截止日期，无法继续自动重排。");
+
+        int dayCount = (int) ChronoUnit.DAYS.between(LocalDate.now(), deadline) + 1;
+        List<Integer> capacities = parseDailyCapacities(plan.availableTime(), dayCount);
+        java.util.Map<LocalDate, Integer> remaining = new java.util.LinkedHashMap<>();
+        for (int day = 0; day < dayCount; day++) {
+            remaining.put(LocalDate.now().plusDays(day), capacities.get(day));
+        }
+
+        List<PlanTask> movable = new ArrayList<>();
+        for (PlanTask task : plan.tasks()) {
+            LocalDate date = parseDate(task.scheduledDate(), LocalDate.now());
+            boolean affected = !"completed".equals(task.status())
+                    && (task.id().equals(taskId) || !date.isBefore(targetDate));
+            if (affected) movable.add(task);
+            else remaining.computeIfPresent(date, (ignored, value) -> value - task.estimatedMinutes());
+        }
+
+        java.util.Map<String, PlanTask> replacements = new java.util.HashMap<>();
+        LocalDate cursor = start;
+        for (PlanTask task : movable) {
+            while (!cursor.isAfter(deadline)
+                    && remaining.getOrDefault(cursor, 0) < task.estimatedMinutes()) cursor = cursor.plusDays(1);
+            if (cursor.isAfter(deadline)) {
+                throw new IllegalArgumentException("剩余时间不足以完成自动重排，请延长截止日期或增加每日学习时间。");
+            }
+            replacements.put(task.id(), task.scheduleOn(cursor.toString()).withStatus("pending"));
+            remaining.put(cursor, remaining.get(cursor) - task.estimatedMinutes());
+        }
+        return plan.withTasks(plan.tasks().stream()
+                .map(task -> replacements.getOrDefault(task.id(), task)).toList());
     }
 
     /** 生成当前计划完成率、下一项任务和逾期情况。 */
@@ -226,8 +325,9 @@ public final class TaskPlanningService {
 
     /** 从用户可用时间说明中提取每天可使用的分钟数。 */
     private List<Integer> parseDailyCapacities(String availableTime, int dayCount) {
+        String description = availableTime == null ? "" : availableTime;
         List<Integer> parsed = new ArrayList<>();
-        Matcher matcher = DURATION_PATTERN.matcher(availableTime == null ? "" : availableTime);
+        Matcher matcher = DURATION_PATTERN.matcher(description);
         while (matcher.find()) {
             double amount = Double.parseDouble(matcher.group(1));
             int minutes = "小时".equals(matcher.group(2))
@@ -236,11 +336,25 @@ public final class TaskPlanningService {
         }
         if (parsed.isEmpty()) parsed.add(120);
 
+        Integer weekdayMinutes = duration(WEEKDAY_DURATION.matcher(description));
+        Integer weekendMinutes = duration(WEEKEND_DURATION.matcher(description));
         List<Integer> capacities = new ArrayList<>();
         for (int day = 0; day < dayCount; day++) {
-            capacities.add(parsed.get(Math.min(day, parsed.size() - 1)));
+            java.time.DayOfWeek dayOfWeek = LocalDate.now().plusDays(day).getDayOfWeek();
+            boolean weekend = dayOfWeek == java.time.DayOfWeek.SATURDAY
+                    || dayOfWeek == java.time.DayOfWeek.SUNDAY;
+            Integer specific = weekend ? weekendMinutes : weekdayMinutes;
+            capacities.add(specific == null ? parsed.getFirst() : specific);
         }
         return capacities;
+    }
+
+    private Integer duration(Matcher matcher) {
+        if (!matcher.find()) return null;
+        double amount = Double.parseDouble(matcher.group(1));
+        int minutes = "小时".equals(matcher.group(2))
+                ? (int) Math.round(amount * 60) : (int) Math.round(amount);
+        return Math.max(30, minutes);
     }
 
     /** 将模型给出的优先级转换为固定枚举值。 */

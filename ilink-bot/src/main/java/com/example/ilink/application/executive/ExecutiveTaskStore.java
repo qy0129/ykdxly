@@ -35,9 +35,16 @@ public final class ExecutiveTaskStore {
     public synchronized ExecutiveTask create(ExecutiveTask task, List<ExecutiveStep> taskSteps) {
         ExecutiveTask existing = findByDedupKey(task.userId(), task.dedupKey());
         if (existing != null) return existing;
-        saveTask(task);
-        for (ExecutiveStep step : taskSteps) saveStep(step);
-        return task;
+        ExecutiveTask persisted = database.createTask(task, taskSteps);
+        if (!persisted.id().equals(task.id())) {
+            tasks.put(persisted.id(), persisted);
+            return persisted;
+        }
+        tasks.put(task.id(), task);
+        Map<String, ExecutiveStep> taskValues = steps.computeIfAbsent(
+                task.id(), ignored -> new ConcurrentHashMap<>());
+        taskSteps.forEach(step -> taskValues.put(step.id(), step));
+        return persisted;
     }
 
     public void saveTask(ExecutiveTask task) {
@@ -87,6 +94,11 @@ public final class ExecutiveTaskStore {
 
     public synchronized List<ExecutiveTask> claimDue(LocalDateTime now, String owner,
                                                       Duration lease, int limit) {
+        database.recoverExpiredExecutions(now);
+        tasks.replaceAll((id, task) -> expiredExecution(task, now)
+                ? task.withProgress(TaskStatus.RETRYING, task.currentStep(), now,
+                        task.retryCount(), "执行进程中断，已自动恢复")
+                : task);
         Map<String, ExecutiveTask> candidates = new LinkedHashMap<>();
         for (ExecutiveTask task : database.dueTasks(now, limit)) candidates.put(task.id(), task);
         tasks.values().stream().filter(task -> due(task, now)).forEach(task -> candidates.put(task.id(), task));
@@ -103,6 +115,14 @@ public final class ExecutiveTaskStore {
             claimed.add(locked);
         }
         return claimed;
+    }
+
+    public synchronized boolean renewLease(String taskId, String owner, LocalDateTime until) {
+        ExecutiveTask current = findTask(taskId);
+        if (current == null || !owner.equals(current.lockOwner())) return false;
+        if (!database.renewLease(taskId, owner, until)) return false;
+        tasks.put(taskId, current.claimed(owner, until));
+        return true;
     }
 
     public void addLog(ExecutionLog log) {
@@ -139,6 +159,18 @@ public final class ExecutiveTaskStore {
         return stored;
     }
 
+    public synchronized ApprovalRequest decideApproval(String userId, String approvalId,
+                                                        boolean approved, LocalDateTime now) {
+        ApprovalRequest current = findApproval(approvalId);
+        if (current == null || !current.userId().equals(userId) || !current.pending()) return null;
+        ApprovalRequest decided = new ApprovalRequest(current.id(), current.taskId(), current.stepId(),
+                current.userId(), current.riskLevel(), current.actionSummary(),
+                approved ? "APPROVED" : "REJECTED", current.expiresAt(), now, current.createdAt());
+        if (!database.decideApproval(decided, now)) return null;
+        approvals.put(decided.id(), decided);
+        return decided;
+    }
+
     public void saveOutbox(OutboxMessage message) {
         outbox.put(message.id(), message);
         database.saveOutbox(message);
@@ -158,5 +190,10 @@ public final class ExecutiveTaskStore {
         if (task == null || !(task.status() == TaskStatus.READY || task.status() == TaskStatus.RETRYING)) return false;
         if (task.nextRunAt() == null || task.nextRunAt().isAfter(now)) return false;
         return task.lockedUntil() == null || !task.lockedUntil().isAfter(now);
+    }
+
+    private boolean expiredExecution(ExecutiveTask task, LocalDateTime now) {
+        return task != null && (task.status() == TaskStatus.RUNNING || task.status() == TaskStatus.VERIFYING)
+                && task.lockedUntil() != null && !task.lockedUntil().isAfter(now);
     }
 }

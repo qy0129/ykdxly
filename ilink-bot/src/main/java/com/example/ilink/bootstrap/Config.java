@@ -64,6 +64,8 @@ public class Config {
     public static final String DATABASE_USERNAME = loadProperty("database.username", "root");
     public static final String DATABASE_PASSWORD = loadProperty("database.password", "");
     public static final String DATABASE_BOT_ID = loadProperty("database.bot.id", "ilink-bot-1");
+    /** Personal Agent 的唯一使用者；为空时进程会锁定首位发消息的用户。 */
+    public static final String PERSONAL_OWNER_USER_ID = loadProperty("personal.owner.user.id", "").trim();
     /** 高德 Web 服务 Key；为空时保留文字出行建议，不生成地图图片。 */
     public static final String AMAP_API_KEY = loadProperty("amap.api.key", "");
     /**embedding配置。*/
@@ -71,6 +73,7 @@ public class Config {
             "https://api.siliconflow.cn/v1/embeddings");
     public static final String EMBEDDING_MODEL = loadProperty("embedding.model", "BAAI/bge-large-zh-v1.5");
     public static final int EMBEDDING_DIMENSION = Integer.parseInt(loadProperty("embedding.dimension", "1024"));
+    public static final double RAG_MIN_SCORE = Double.parseDouble(loadProperty("rag.min.score", "0.55"));
     /** 百度地图 AK，用于快递 H5 和服务端出行规划。 */
     public static final String BAIDU_MAP_AK = loadProperty("baidu.map.ak", "");
     /** 滴滴 MCP Key；优先从环境变量 DIDI_MCP_KEY 读取，避免把密钥写入配置文件。 */
@@ -103,7 +106,7 @@ public class Config {
     public static final boolean DAILY_DASHBOARD_ENABLED =
             Boolean.parseBoolean(loadProperty("dashboard.enabled", "true"));
     public static final String DAILY_DASHBOARD_BIND_ADDRESS =
-            loadProperty("dashboard.bind.address", "0.0.0.0");
+            loadProperty("dashboard.bind.address", "127.0.0.1");
     public static final int DAILY_DASHBOARD_PORT =
             Integer.parseInt(loadProperty("dashboard.port", "8787"));
     public static final String DAILY_DASHBOARD_PUBLIC_URL =

@@ -13,7 +13,8 @@ public final class ApprovalService {
 
     public ApprovalRequest ensurePending(ExecutiveTask task, ExecutiveStep step) {
         ApprovalRequest existing = store.findApprovalByStep(step.id());
-        if (existing != null) return existing;
+        if (existing != null && (existing.pending() || "APPROVED".equals(existing.status())
+                || "REJECTED".equals(existing.status()))) return existing;
         ApprovalRequest approval = new ApprovalRequest("APR-" + shortId(), task.id(), step.id(), task.userId(),
                 step.riskLevel(), step.title(), "PENDING", LocalDateTime.now().plusHours(24),
                 null, LocalDateTime.now());
@@ -22,13 +23,7 @@ public final class ApprovalService {
     }
 
     public ApprovalRequest decide(String userId, String approvalId, boolean approved) {
-        ApprovalRequest current = store.findApproval(approvalId);
-        if (current == null || !current.userId().equals(userId) || !current.pending()) return null;
-        ApprovalRequest decided = new ApprovalRequest(current.id(), current.taskId(), current.stepId(),
-                current.userId(), current.riskLevel(), current.actionSummary(),
-                approved ? "APPROVED" : "REJECTED", current.expiresAt(), LocalDateTime.now(), current.createdAt());
-        store.saveApproval(decided);
-        return decided;
+        return store.decideApproval(userId, approvalId, approved, LocalDateTime.now());
     }
 
     public ApprovalRequest forStep(String stepId) {

@@ -24,10 +24,15 @@ public class EmbeddingService {
     }
 
     public List<Float> embed(String text) throws Exception {
+        return embedBatch(List.of(text)).get(0);
+    }
+
+    public List<List<Float>> embedBatch(List<String> texts) throws Exception {
+        if (texts == null || texts.isEmpty()) return List.of();
         JsonObject body = new JsonObject();
         body.addProperty("model", Config.EMBEDDING_MODEL);
         JsonArray input = new JsonArray();
-        input.add(text);
+        texts.forEach(input::add);
         body.add("input", input);
         body.addProperty("encoding_format", "float");
 
@@ -52,11 +57,14 @@ public class EmbeddingService {
             throw new RuntimeException("Embedding API returned empty data");
         }
 
-        JsonArray values = data.get(0).getAsJsonObject().getAsJsonArray("embedding");
-        List<Float> vector = new ArrayList<>(values.size());
-        for (var v : values) {
-            vector.add(v.getAsFloat());
+        List<List<Float>> vectors = new ArrayList<>(data.size());
+        for (var item : data) {
+            JsonArray values = item.getAsJsonObject().getAsJsonArray("embedding");
+            List<Float> vector = new ArrayList<>(values.size());
+            for (var value : values) vector.add(value.getAsFloat());
+            vectors.add(vector);
         }
-        return vector;
+        if (vectors.size() != texts.size()) throw new RuntimeException("Embedding API returned incomplete data");
+        return vectors;
     }
 }

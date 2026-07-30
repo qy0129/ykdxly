@@ -45,6 +45,11 @@ database.url=jdbc:mysql://127.0.0.1:3306/ilink_bot?useUnicode=true&characterEnco
 database.username=root
 database.password=你的MySQL密码
 database.bot.id=ilink-bot-1
+personal.owner.user.id=
+embedding.api.url=https://api.siliconflow.cn/v1/embeddings
+embedding.model=BAAI/bge-large-zh-v1.5
+embedding.dimension=1024
+rag.min.score=0.55
 amap.api.key=你的高德Web服务Key
 baidu.map.ak=你的百度地图AK（需开通JavaScript API和Web服务API）
 express.port=8089

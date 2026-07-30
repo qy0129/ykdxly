@@ -26,14 +26,18 @@ public final class AutomationPlanBuilder {
         search.addProperty("limit", 8);
         JsonObject analysis = new JsonObject();
         analysis.addProperty("goal", spec.goal());
-        analysis.addProperty("research", "{{step:1}}");
-        JsonObject report = report(spec.goal(), "{{step:1}}", "{{step:2}}");
+        analysis.addProperty("research", "{{step:2}}");
+        JsonObject fetch = new JsonObject();
+        fetch.addProperty("research", "{{step:1}}");
+        JsonObject report = report(spec.goal(), "{{step:2}}", "{{step:3}}");
         return List.of(step("检索公开资料", "automation_research", AutomationWebSearchTool.NAME,
                         search, List.of(), "contains_url"),
+                step("抓取来源正文", "automation_research", ResearchPageFetchTool.NAME,
+                        fetch, List.of(1), "contains_url"),
                 step("综合分析资料", "automation_research", ResearchAnalysisTool.NAME,
-                        analysis, List.of(1), "research_report"),
+                        analysis, List.of(2), "research_report"),
                 step("整理调研报告", "automation_research", AutomationReportTool.NAME,
-                        report, List.of(1, 2), "research_report"));
+                        report, List.of(2, 3), "research_report"));
     }
 
     private List<ExecutiveStepSpec> jobSearch(AutomationSpec spec) {
@@ -62,7 +66,8 @@ public final class AutomationPlanBuilder {
             JsonObject match = new JsonObject();
             match.addProperty("resume_text", spec.resumeText());
             match.addProperty("jd_text", "{{step:3}}");
-            steps.add(step("匹配简历与岗位", "resume_match", ResumeMatchTool.NAME, match, List.of(3)));
+            steps.add(sensitiveStep("匹配简历与岗位", "resume_match", ResumeMatchTool.NAME,
+                    match, List.of(3), RiskLevel.DATA_EGRESS));
             steps.add(step("生成岗位报告", "job_search", JobReportTool.NAME,
                     jobReport(spec.goal(), "{{step:3}}", "{{step:4}}"), List.of(3, 4), "job_report"));
         } else {
@@ -84,7 +89,8 @@ public final class AutomationPlanBuilder {
         JsonObject match = new JsonObject();
         match.addProperty("resume_text", spec.resumeText());
         match.addProperty("jd_text", spec.jdText());
-        return List.of(step("对比简历与岗位", "resume_match", ResumeMatchTool.NAME, match, List.of()),
+        return List.of(sensitiveStep("对比简历与岗位", "resume_match", ResumeMatchTool.NAME,
+                        match, List.of(), RiskLevel.DATA_EGRESS),
                 step("生成匹配报告", "resume_match", AutomationReportTool.NAME,
                         report(spec.goal(), spec.jdText(), "{{step:1}}"), List.of(1)));
     }
@@ -115,5 +121,12 @@ public final class AutomationPlanBuilder {
                                    String verificationRule) {
         return new ExecutiveStepSpec(title, capability, tool, arguments, dependencies,
                 false, RiskLevel.READ_ONLY, 3, verificationRule);
+    }
+
+    private ExecutiveStepSpec sensitiveStep(String title, String capability, String tool,
+                                              JsonObject arguments, List<Integer> dependencies,
+                                              RiskLevel riskLevel) {
+        return new ExecutiveStepSpec(title, capability, tool, arguments, dependencies,
+                true, riskLevel, 3, "non_empty");
     }
 }

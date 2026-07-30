@@ -20,7 +20,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.Enumeration;
+import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -33,9 +35,9 @@ public final class DailyDashboardServer implements AutoCloseable {
     private static final Path PUBLIC_URL_FILE = Path.of("data", "dashboard-public-url.txt");
 
     private final DailyDashboardService dashboardService;
-    private final String accessToken = UUID.randomUUID().toString().replace("-", "");
+    private final Map<String, String> userTokens = new ConcurrentHashMap<>();
+    private final Map<String, String> tokenUsers = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newFixedThreadPool(3);
-    private volatile String ownerUserId = "";
     private volatile String runtimeBaseUrl = "";
     private HttpServer server;
     private CloudflareTunnel tunnel;
@@ -54,26 +56,31 @@ public final class DailyDashboardServer implements AutoCloseable {
             server.setExecutor(executor);
             server.start();
             runtimeBaseUrl = resolveBaseUrl();
-            saveDashboardUrl();
-            System.out.println("[日报页面] 已启动：" + url());
+            if (!Config.PERSONAL_OWNER_USER_ID.isBlank()) {
+                saveDashboardUrl(urlFor(Config.PERSONAL_OWNER_USER_ID));
+            }
+            System.out.println("[日报页面] 已启动：" + baseUrl());
         } catch (Exception error) {
             System.err.println("[日报页面] 启动失败，继续使用文字简报: " + error.getMessage());
             server = null;
         }
     }
 
-    public void useUser(String userId) {
-        if (userId != null && !userId.isBlank()) ownerUserId = userId;
-    }
-
     public String urlFor(String userId) {
-        useUser(userId);
-        return url();
+        if (server == null || userId == null || userId.isBlank()) return "";
+        String normalized = userId.trim();
+        String token = userTokens.computeIfAbsent(normalized, ignored -> {
+            String created = UUID.randomUUID().toString().replace("-", "");
+            tokenUsers.put(created, normalized);
+            return created;
+        });
+        String value = baseUrl() + "/daily/" + token;
+        saveDashboardUrl(value);
+        return value;
     }
 
     public String url() {
-        if (server == null) return "";
-        return baseUrl() + "/daily/" + accessToken;
+        return Config.PERSONAL_OWNER_USER_ID.isBlank() ? "" : urlFor(Config.PERSONAL_OWNER_USER_ID);
     }
 
     private String baseUrl() {
@@ -100,10 +107,10 @@ public final class DailyDashboardServer implements AutoCloseable {
         return "";
     }
 
-    private void saveDashboardUrl() {
+    private void saveDashboardUrl(String value) {
         try {
             Files.createDirectories(PUBLIC_URL_FILE.getParent());
-            Files.writeString(PUBLIC_URL_FILE, url(), StandardCharsets.UTF_8);
+            Files.writeString(PUBLIC_URL_FILE, value, StandardCharsets.UTF_8);
         } catch (IOException ignored) {
             // 状态文件只用于本机排查，不影响页面服务。
         }
@@ -112,7 +119,9 @@ public final class DailyDashboardServer implements AutoCloseable {
     private void handle(HttpExchange exchange) throws IOException {
         try {
             String path = exchange.getRequestURI().getPath();
-            if (path.equals("/daily/" + accessToken) && "GET".equals(exchange.getRequestMethod())) {
+            String pageToken = tokenAfter(path, "/daily/");
+            if (!pageToken.isBlank() && tokenUsers.containsKey(pageToken)
+                    && "GET".equals(exchange.getRequestMethod())) {
                 sendResource(exchange, 200, "text/html; charset=utf-8", PAGE_RESOURCE);
                 return;
             }
@@ -124,19 +133,31 @@ public final class DailyDashboardServer implements AutoCloseable {
                 sendResource(exchange, 200, "text/javascript; charset=utf-8", JS_RESOURCE);
                 return;
             }
-            if (path.equals("/api/daily/" + accessToken) && "GET".equals(exchange.getRequestMethod())) {
-                sendJson(exchange, 200, dashboardService.snapshot(ownerUserId));
+            String dailyToken = tokenAfter(path, "/api/daily/");
+            if (!dailyToken.isBlank() && tokenUsers.containsKey(dailyToken)
+                    && "GET".equals(exchange.getRequestMethod())) {
+                sendJson(exchange, 200, dashboardService.snapshot(tokenUsers.get(dailyToken)));
                 return;
             }
-            if (path.equals("/api/weather/" + accessToken) && "GET".equals(exchange.getRequestMethod())) {
-                sendJson(exchange, 200, dashboardService.weatherSnapshot(ownerUserId));
+            String weatherToken = tokenAfter(path, "/api/weather/");
+            if (!weatherToken.isBlank() && tokenUsers.containsKey(weatherToken)
+                    && "GET".equals(exchange.getRequestMethod())) {
+                sendJson(exchange, 200, dashboardService.weatherSnapshot(tokenUsers.get(weatherToken)));
                 return;
             }
-            String completePrefix = "/api/todos/" + accessToken + "/";
-            if (path.startsWith(completePrefix) && path.endsWith("/complete")
+            String[] todoParts = actionParts(path, "/api/todos/");
+            if (todoParts != null && tokenUsers.containsKey(todoParts[0])
                     && "POST".equals(exchange.getRequestMethod())) {
-                String todoId = path.substring(completePrefix.length(), path.length() - "/complete".length());
-                boolean completed = dashboardService.completeTodo(ownerUserId, todoId);
+                boolean completed = dashboardService.completeTodo(tokenUsers.get(todoParts[0]), todoParts[1]);
+                JsonObject response = new JsonObject();
+                response.addProperty("success", completed);
+                sendJson(exchange, completed ? 200 : 404, response);
+                return;
+            }
+            String[] planParts = actionParts(path, "/api/plan-tasks/");
+            if (planParts != null && tokenUsers.containsKey(planParts[0])
+                    && "POST".equals(exchange.getRequestMethod())) {
+                boolean completed = dashboardService.completePlanTask(tokenUsers.get(planParts[0]), planParts[1]);
                 JsonObject response = new JsonObject();
                 response.addProperty("success", completed);
                 sendJson(exchange, completed ? 200 : 404, response);
@@ -150,6 +171,20 @@ public final class DailyDashboardServer implements AutoCloseable {
         } finally {
             exchange.close();
         }
+    }
+
+    private String tokenAfter(String path, String prefix) {
+        if (!path.startsWith(prefix)) return "";
+        String value = path.substring(prefix.length());
+        return value.isBlank() || value.contains("/") ? "" : value;
+    }
+
+    private String[] actionParts(String path, String prefix) {
+        if (!path.startsWith(prefix) || !path.endsWith("/complete")) return null;
+        String value = path.substring(prefix.length(), path.length() - "/complete".length());
+        int separator = value.indexOf('/');
+        if (separator <= 0 || separator == value.length() - 1) return null;
+        return new String[]{value.substring(0, separator), value.substring(separator + 1)};
     }
 
     private void sendResource(HttpExchange exchange, int status, String contentType, String resource)

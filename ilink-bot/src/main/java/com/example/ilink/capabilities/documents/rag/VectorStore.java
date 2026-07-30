@@ -22,7 +22,7 @@ public final class VectorStore {
         this(true);
     }
 
-    VectorStore(boolean persistent) {
+    public VectorStore(boolean persistent) {
         this.database = persistent ? MySqlStore.getInstance() : null;
     }
 
@@ -68,6 +68,10 @@ public final class VectorStore {
     }
 
     public List<ScoredChunk> search(String userId, List<Float> queryVector, int topK) {
+        return search(userId, queryVector, topK, 0);
+    }
+
+    public List<ScoredChunk> search(String userId, List<Float> queryVector, int topK, double minScore) {
         ensureLoaded(userId);
         List<ChunkWithVector> chunks = vectors(userId);
         if (chunks.isEmpty() || topK <= 0) return List.of();
@@ -76,7 +80,9 @@ public final class VectorStore {
                 topK, (a, b) -> Double.compare(a.score, b.score));
         synchronized (chunks) {
             for (ChunkWithVector cwv : chunks) {
+                if (queryVector.size() != cwv.vector.size()) continue;
                 double score = cosineSimilarity(queryVector, cwv.vector);
+                if (score < minScore) continue;
                 ScoredChunk candidate = new ScoredChunk(cwv.chunk, score);
                 if (topResults.size() < topK) {
                     topResults.offer(candidate);

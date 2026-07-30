@@ -54,8 +54,12 @@ public final class TaskPlanTool implements Tool {
         String availableTime = ToolArguments.string(arguments, "available_time", "每天2小时");
         PlanTask[] tasks = gson.fromJson(
                 ToolArguments.requireString(arguments, "tasks_json"), PlanTask[].class);
-        TaskPlan plan = planningService.createPlan(
-                goal, deadline, availableTime, tasks == null ? List.of() : List.of(tasks));
-        return ToolResult.success(plan.toDisplayText(), plan);
+        try {
+            TaskPlan plan = planningService.createPlan(
+                    goal, deadline, availableTime, tasks == null ? List.of() : List.of(tasks));
+            return ToolResult.success(plan.toDisplayText(), plan);
+        } catch (IllegalArgumentException error) {
+            return ToolResult.failure(error.getMessage());
+        }
     }
 }

@@ -40,6 +40,7 @@ import com.example.ilink.application.messaging.MessageProcessor;
 import com.example.ilink.application.messaging.MessageSerialExecutor;
 import com.example.ilink.application.messaging.ReplySender;
 import com.example.ilink.application.messaging.UserRequestHandler;
+import com.example.ilink.application.inbox.InboxApplicationService;
 import com.example.ilink.application.routing.IntentRecognizer;
 import com.example.ilink.application.routing.RoutePlanReviewer;
 import com.example.ilink.application.skill.SkillManager;
@@ -62,6 +63,7 @@ import com.example.ilink.capabilities.automation.JobAnalysisTool;
 import com.example.ilink.capabilities.automation.JobReportTool;
 import com.example.ilink.capabilities.automation.ResumeMatchTool;
 import com.example.ilink.capabilities.automation.ResearchAnalysisTool;
+import com.example.ilink.capabilities.automation.ResearchPageFetchTool;
 import com.example.ilink.capabilities.automation.WebPageFetchTool;
 import com.example.ilink.capabilities.calculator.AreaTool;
 import com.example.ilink.capabilities.calculator.BMITool;
@@ -112,6 +114,8 @@ import com.example.ilink.capabilities.image.DrawTool;
 import com.example.ilink.capabilities.image.ImageAnalysisTool;
 import com.example.ilink.capabilities.image.ImageEditTool;
 import com.example.ilink.capabilities.image.ImageService;
+import com.example.ilink.capabilities.inbox.InboxModule;
+import com.example.ilink.capabilities.inbox.config.InboxConfig;
 import com.example.ilink.capabilities.image.VisionService;
 import com.example.ilink.capabilities.mail.QqMailService;
 import com.example.ilink.capabilities.media.BangumiService;
@@ -127,6 +131,12 @@ import com.example.ilink.capabilities.planning.DeadlineCountdownTool;
 import com.example.ilink.capabilities.planning.PlanAdjustTool;
 import com.example.ilink.capabilities.planning.PlanProgressTool;
 import com.example.ilink.application.workflow.planning.PlanWorkflow;
+import com.example.ilink.application.workflow.life.LifeWorkflow;
+import com.example.ilink.capabilities.life.DailyReflectionService;
+import com.example.ilink.capabilities.life.LifeStateStore;
+import com.example.ilink.capabilities.life.PlanReminderService;
+import com.example.ilink.capabilities.life.StudyPlanBuilder;
+import com.example.ilink.capabilities.life.TaskCheckinService;
 import com.example.ilink.capabilities.planning.TaskDecompositionTool;
 import com.example.ilink.capabilities.planning.TaskPlanTool;
 import com.example.ilink.capabilities.planning.TaskPlanningService;
@@ -278,6 +288,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 .register(new ExpressTool(expressService, expressPageService))
                 .register(new AutomationWebSearchTool(webSearchService))
                 .register(new WebPageFetchTool(httpClient))
+                .register(new ResearchPageFetchTool(httpClient))
                 .register(new JobSearchTool(webSearchService))
                 .register(new JobPageFetchTool(httpClient))
                 .register(new JobAnalysisTool())
@@ -317,6 +328,12 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 new VisualCardRenderer(new QrCodeService()), replySender::markSent, replySender::rememberText);
         CalendarService calendarService = new CalendarService(new CalendarEventStore());
         TodoService todoService = new TodoService(new TodoStore(), calendarService);
+        LifeStateStore lifeStates = new LifeStateStore();
+        PlanReminderService planReminders = new PlanReminderService(planSessions, calendarService);
+        TaskCheckinService taskCheckins = new TaskCheckinService(
+                planSessions, planningService, planReminders, lifeStates);
+        DailyReflectionService reflectionService = new DailyReflectionService(
+                planSessions, todoService, calendarService, lifeStates);
         UserRepository userRepository = new UserRepository(MySqlStore.getInstance());
         WelcomeHandler welcomeHandler = new WelcomeHandler(userRepository);
         CommandRouter commandRouter = new CommandRouter();
@@ -336,6 +353,9 @@ public final class ApplicationBootstrap implements AutoCloseable {
         TaxiWorkflow taxiWorkflow = new TaxiWorkflow(new DidiMcpClient(), replySender);
         PlanWorkflow planWorkflow = new PlanWorkflow(
                 toolManager, planSessions, chatHistory, replySender, documentService, calendarService);
+        LifeWorkflow lifeWorkflow = new LifeWorkflow(
+                planSessions, planningService, webSearchService, new StudyPlanBuilder(),
+                planReminders, taskCheckins, reflectionService, lifeStates, replySender);
         VisualCardWorkflow visualCardWorkflow = new VisualCardWorkflow(
                 visualDeckSender, visualCardFactory, planSessions, calendarService, todoService,
                 toolManager, foodOrderService, qqMailService, newsSearchService,
@@ -344,24 +364,27 @@ public final class ApplicationBootstrap implements AutoCloseable {
         UserRequestHandler requestHandler = new UserRequestHandler(
                 chatHistory, sessions, documentSessions,
                 intentRecognizer, chatService, weatherService,
-                mediaStore, replySender, toolManager, new RoutePlanReviewer(), contextManager, planWorkflow,
+                mediaStore, replySender, toolManager, new RoutePlanReviewer(), contextManager,
+                planWorkflow, lifeWorkflow,
                 new CalculatorService(httpClient, toolManager), calendarWorkflow,
                 healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, foodOrderWorkflow,
                 taxiWorkflow, memoryService, todoService,
                 webSearchService, newsSearchService, bilibiliSearchService, mediaKnowledgeService,
-                qqMailService, visualCardWorkflow, ragContextService, executiveRuntime, automationWorkflow);
-                qqMailService, visualCardWorkflow);
+                qqMailService, visualCardWorkflow, executiveRuntime, automationWorkflow);
         MessageProcessor messageProcessor = new MessageProcessor(
                 chatHistory, sessions, audioHistory, documentSessions,
                 audioService, imageService, documentService, memoryService,
                 mediaStore, replySender, new CapabilityDispatcher(requestHandler),
-                commandRouter, commandHandler, memoryExtractor, ragContextService);
+                commandRouter, commandHandler, memoryExtractor, ragContextService,
+                new InboxApplicationService(new InboxModule(InboxConfig.defaultConfig()),
+                        todoService, calendarService));
 
         LoginBriefingService loginBriefingService = new LoginBriefingService(
                 weatherService, calendarService, todoService, planSessions, sessions,
                 new HolidayService(), memoryService, qqMailService, newsSearchService, webSearchService);
         DailyDashboardService dashboardService = new DailyDashboardService(
-                todoService, calendarService, planSessions, weatherService, sessions, memoryService);
+                todoService, calendarService, planSessions, weatherService, sessions, memoryService,
+                taskCheckins);
 
         SessionManagementServer sessionManagementServer = new SessionManagementServer(
                 sessionService, sessions, MySqlStore.getInstance());
@@ -369,7 +392,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 messageProcessor, replySender, chatService, calendarService,
                 visualDeckSender, loginBriefingService, welcomeHandler,
                 new DailyDashboardServer(dashboardService), sessionManagementServer,
-                expressHttpServer, expressPageService, executiveRuntime);
+                expressHttpServer, expressPageService, executiveRuntime, reflectionService);
         AutomationConsoleServer automationConsoleServer = new AutomationConsoleServer(executiveRuntime);
         sessionManagementServer.start();
         automationConsoleServer.start();

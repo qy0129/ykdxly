@@ -6,6 +6,7 @@ import java.util.UUID;
 
 /** 主动通知的可靠 Outbox。 */
 public final class NotificationOutbox {
+    static final int MAX_ATTEMPTS = 5;
     private final ExecutiveTaskStore store;
 
     public NotificationOutbox(ExecutiveTaskStore store) {
@@ -28,8 +29,14 @@ public final class NotificationOutbox {
     }
 
     public void markFailed(OutboxMessage message) {
+        int attempts = message.attempts() + 1;
+        String status = attempts >= MAX_ATTEMPTS ? "DEAD_LETTER" : "PENDING";
         store.saveOutbox(new OutboxMessage(message.id(), message.taskId(), message.userId(),
-                message.type(), message.content(), "PENDING", message.attempts() + 1,
-                LocalDateTime.now().plusMinutes(1), null, message.createdAt()));
+                message.type(), message.content(), status, attempts,
+                LocalDateTime.now().plusMinutes(backoffMinutes(attempts)), null, message.createdAt()));
+    }
+
+    private static int backoffMinutes(int attempts) {
+        return Math.min(30, 1 << Math.min(4, Math.max(0, attempts - 1)));
     }
 }

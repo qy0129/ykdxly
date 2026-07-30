@@ -368,8 +368,18 @@
             day.items.forEach((item) => {
                 if (!item.time) {
                     const block = document.createElement("div");
-                    block.className = "all-day-item";
+                    block.className = `all-day-item${item.status === "completed" ? " completed" : ""}`;
                     block.textContent = item.title;
+                    if (item.kind === "plan" && item.interactive) {
+                        block.classList.add("interactive");
+                        block.title = "标记计划任务完成";
+                        block.setAttribute("role", "button");
+                        block.tabIndex = 0;
+                        block.addEventListener("click", () => completePlanTask(item.id, block));
+                        block.addEventListener("keydown", (event) => {
+                            if (event.key === "Enter" || event.key === " ") completePlanTask(item.id, block);
+                        });
+                    }
                     allDay.appendChild(block);
                     return;
                 }
@@ -427,6 +437,10 @@
                         row.classList.add("linked");
                         row.title = "打开导航";
                         row.addEventListener("click", () => window.open(item.actionUrl, "_blank", "noopener"));
+                    } else if (item.kind === "plan" && item.interactive) {
+                        row.classList.add("linked");
+                        row.title = "标记计划任务完成";
+                        row.addEventListener("click", () => completePlanTask(item.id, row));
                     }
                     items.appendChild(row);
                 });
@@ -475,6 +489,25 @@
             checkbox.checked = false;
             checkbox.disabled = false;
             showToast("暂时没有完成这项待办");
+        }
+    }
+
+    async function completePlanTask(id, row) {
+        if (row.dataset.loading === "true") return;
+        row.dataset.loading = "true";
+        if (state.demo) {
+            row.classList.add("completed");
+            showToast("已在预览中标记完成");
+            return;
+        }
+        try {
+            const response = await fetch(`/api/plan-tasks/${encodeURIComponent(token)}/${encodeURIComponent(id)}/complete`, { method: "POST" });
+            if (!response.ok) throw new Error("complete failed");
+            showToast("计划任务已完成");
+            await loadDashboard();
+        } catch (error) {
+            delete row.dataset.loading;
+            showToast("暂时无法完成这项计划任务");
         }
     }
 

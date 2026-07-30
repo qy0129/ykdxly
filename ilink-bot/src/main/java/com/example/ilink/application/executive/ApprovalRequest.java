@@ -15,6 +15,10 @@ public record ApprovalRequest(String id, String taskId, String stepId, String us
     }
 
     public boolean pending() {
-        return "PENDING".equals(status);
+        return "PENDING".equals(status) && !expired();
+    }
+
+    public boolean expired() {
+        return expiresAt != null && !expiresAt.isAfter(LocalDateTime.now());
     }
 }

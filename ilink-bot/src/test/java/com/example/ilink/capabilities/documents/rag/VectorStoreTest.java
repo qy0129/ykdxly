@@ -40,4 +40,13 @@ class VectorStoreTest {
         assertEquals(1, store.search("alice", List.of(1f, 0f), 3).size());
         assertTrue(store.search("bob", List.of(1f, 0f), 3).isEmpty());
     }
+
+    @Test
+    void excludesLowScoreAndMismatchedDimensions() {
+        VectorStore store = new VectorStore(false);
+        store.store("user", new TextChunk("irrelevant.txt", 0, "irrelevant"), List.of(0f, 1f));
+        store.store("user", new TextChunk("old-model.txt", 0, "old"), List.of(1f));
+
+        assertTrue(store.search("user", List.of(1f, 0f), 3, 0.55).isEmpty());
+    }
 }

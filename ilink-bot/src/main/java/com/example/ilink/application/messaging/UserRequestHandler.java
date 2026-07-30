@@ -6,6 +6,7 @@ import com.example.ilink.application.workflow.food.FoodOrderWorkflow;
 import com.example.ilink.application.workflow.food.HealthDietWorkflow;
 import com.example.ilink.application.workflow.food.NearbyFoodWorkflow;
 import com.example.ilink.application.workflow.planning.PlanWorkflow;
+import com.example.ilink.application.workflow.life.LifeWorkflow;
 import com.example.ilink.application.workflow.travel.TaxiWorkflow;
 import com.example.ilink.application.workflow.travel.TravelWorkflow;
 import com.example.ilink.application.workflow.visual.VisualCardWorkflow;
@@ -105,6 +106,7 @@ public final class UserRequestHandler {
     private final RoutePlanReviewer routePlanReviewer;
     private final ContextManager contextManager;
     private final PlanWorkflow planWorkflow;
+    private final LifeWorkflow lifeWorkflow;
     private final CalculatorService calculatorService;
     private final CalendarWorkflow calendarWorkflow;
     private final HealthDietWorkflow healthDietWorkflow;
@@ -120,7 +122,6 @@ public final class UserRequestHandler {
     private final MediaKnowledgeService mediaKnowledgeService;
     private final QqMailService qqMailService;
     private final VisualCardWorkflow visualCardWorkflow;
-    private final RagContextService ragContextService;
     private final ExecutiveRuntime executiveRuntime;
     private final AutomationWorkflow automationWorkflow;
     private final ActionPlanExecutor actionPlanExecutor = new ActionPlanExecutor();
@@ -134,7 +135,8 @@ public final class UserRequestHandler {
                               ReplySender replySender, ToolManager toolManager,
                               RoutePlanReviewer routePlanReviewer,
                               ContextManager contextManager,
-                              PlanWorkflow planWorkflow, CalculatorService calculatorService,
+                              PlanWorkflow planWorkflow, LifeWorkflow lifeWorkflow,
+                              CalculatorService calculatorService,
                                CalendarWorkflow calendarWorkflow, HealthDietWorkflow healthDietWorkflow,
                                TravelWorkflow travelWorkflow, NearbyFoodWorkflow nearbyFoodWorkflow,
                                FoodOrderWorkflow foodOrderWorkflow,
@@ -143,9 +145,8 @@ public final class UserRequestHandler {
                               WebSearchService webSearchService, NewsSearchService newsSearchService,
                               BilibiliSearchService bilibiliSearchService,
                               MediaKnowledgeService mediaKnowledgeService, QqMailService qqMailService,
-                              VisualCardWorkflow visualCardWorkflow, RagContextService ragContextService,
+                              VisualCardWorkflow visualCardWorkflow,
                               ExecutiveRuntime executiveRuntime, AutomationWorkflow automationWorkflow) {
-                               VisualCardWorkflow visualCardWorkflow) {
         this.chatHistory = chatHistory;
         this.sessions = sessions;
         this.documentSessions = documentSessions;
@@ -158,6 +159,7 @@ public final class UserRequestHandler {
         this.routePlanReviewer = routePlanReviewer;
         this.contextManager = contextManager;
         this.planWorkflow = planWorkflow;
+        this.lifeWorkflow = lifeWorkflow;
         this.calculatorService = calculatorService;
         this.calendarWorkflow = calendarWorkflow;
         this.healthDietWorkflow = healthDietWorkflow;
@@ -173,7 +175,6 @@ public final class UserRequestHandler {
         this.mediaKnowledgeService = mediaKnowledgeService;
         this.qqMailService = qqMailService;
         this.visualCardWorkflow = visualCardWorkflow;
-        this.ragContextService = ragContextService;
         this.executiveRuntime = executiveRuntime;
         this.automationWorkflow = automationWorkflow;
     }
@@ -210,6 +211,13 @@ public final class UserRequestHandler {
         }
 
         if (handlePendingDrawContinuation(agentContext, text)) return;
+
+        if (lifeWorkflow.hasPendingStudyPlan(userId)
+                && lifeWorkflow.acceptsPendingReply(userId, text)) {
+            lifeWorkflow.completePendingStudyPlan(client, userId, text);
+            resumeActionPlan(agentContext);
+            return;
+        }
 
         if (hasBlockingPending(userId) && !acceptsBlockingReply(userId, text)) {
             clearBlockingPending(userId);
@@ -344,13 +352,13 @@ public final class UserRequestHandler {
     /** 重发上一条回复，不调用大模型，避免被误识别为邮箱查询。 */
     private boolean handleRepeatCommand(ReplyChannel client, String userId, String text) throws Exception {
         if (!IntentPolicy.isRepeatRequest(text)) return false;
-        String previous = replySender.lastText();
+        String previous = replySender.lastText(userId);
         if (previous.isBlank()) previous = chatHistory.lastAssistantMessage(userId);
         if (previous.isBlank()) {
             replySender.sendReply(client, userId, "我暂时找不到可以重发的上一条回复。 ");
         } else {
             client.sendText(userId, previous);
-            replySender.markSent();
+            replySender.markSent(userId);
             replySender.rememberText(userId, previous);
         }
         return true;
@@ -722,6 +730,7 @@ public final class UserRequestHandler {
             case "image_action" -> handleImageAction(client, userId, route);
             case "weather" -> handleWeather(client, userId, actionText, route);
             case "task_plan" -> planWorkflow.createPlan(client, userId, actionText, route);
+            case "study_plan" -> lifeWorkflow.startStudyPlan(client, userId, actionText, route);
             case "travel_plan" -> travelWorkflow.handle(client, userId, route);
             case "taxi_trip" -> taxiWorkflow.handle(client, userId, route, actionText);
             case "diet_plan" -> healthDietWorkflow.handle(client, userId, route);
@@ -748,13 +757,19 @@ public final class UserRequestHandler {
                     route.replyMode(), route.voiceStyle());
             case "plan_adjust" -> planWorkflow.adjustPlan(client, userId, actionText, route);
             case "plan_progress" -> planWorkflow.queryProgress(client, userId, actionText, route);
+            case "life_task_update" -> lifeWorkflow.updateTask(client, userId, actionText);
+            case "life_plan_list" -> lifeWorkflow.listPlans(client, userId);
+            case "life_plan_select" -> lifeWorkflow.selectPlan(client, userId, actionText);
+            case "today_learning" -> lifeWorkflow.todayLearning(client, userId);
+            case "daily_reflection" -> lifeWorkflow.reflectToday(client, userId);
+            case "reflection_history" -> lifeWorkflow.reflectionHistory(client, userId);
             case "expense_split" -> handleExpenseSplit(client, userId, actionText, route);
             case "food_order" -> handleFoodOrder(client, userId, actionText, route);
             case "deadline_countdown" -> handleDeadlineCountdown(client, userId, actionText, route);
             case "calculator" -> {
                 String reply = calculatorService.execute(userId, actionText);
                 chatHistory.add(userId, actionText, reply);
-                replySender.applyReplyMode(route.replyMode());
+                replySender.applyReplyMode(userId, route.replyMode());
                 replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
             }
             case "document_summary", "document_question", "generate_file", "document_edit" ->
@@ -809,7 +824,7 @@ public final class UserRequestHandler {
         String reply = chatService.chat(userId, text);
         if (reply == null || reply.isBlank()) reply = "网络波动了，请再发一次～";
         chatHistory.add(userId, text, reply);
-        replySender.applyReplyMode(route.replyMode());
+        replySender.applyReplyMode(userId, route.replyMode());
         System.out.println("[机器人回复] " + reply);
         replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
     }
@@ -967,7 +982,7 @@ public final class UserRequestHandler {
                             IntentResult route) throws Exception {
         sessions.clearPendingDraw(userId);
         chatHistory.add(userId, userText, "[图片] " + route.cnDescription());
-        replySender.applyReplyMode(route.replyMode());
+        replySender.applyReplyMode(userId, route.replyMode());
 
         if ("none".equals(route.imageSize())) {
             sessions.setPendingDraw(userId, route.enPrompt(), route.cnDescription(), userText);
@@ -1013,7 +1028,7 @@ public final class UserRequestHandler {
                     ? "已按你的要求生成" : pending.description();
             chatHistory.addMedia(userId, "图片", saved.toString(), description);
             client.sendImage(userId, image.bytes(), image.fileName("draw"), "");
-            replySender.markSent();
+            replySender.markSent(userId);
         } else {
             String error = result.success() ? "图片服务没有返回有效图片，请稍后重试。" : result.output();
             replySender.sendReply(client, userId, error);
@@ -1079,7 +1094,7 @@ public final class UserRequestHandler {
                 sessions.setLastImage(userId, saved.toString());
                 chatHistory.addMedia(userId, "图片", saved.toString(), "已根据用户要求修改图片");
                 client.sendImage(userId, edited.bytes(), edited.fileName("edited"), "");
-                replySender.markSent();
+                replySender.markSent(userId);
             } else {
                 String error = result.success() ? "图片服务没有返回有效图片，请稍后重试。" : result.output();
                 replySender.sendReply(client, userId, error);
@@ -1095,14 +1110,14 @@ public final class UserRequestHandler {
         ToolResult result = toolManager.execute(
                 ExpenseSplitTool.NAME, new ToolContext(userId), arguments);
         chatHistory.add(userId, userText, result.output());
-        replySender.applyReplyMode(route.replyMode());
+        replySender.applyReplyMode(userId, route.replyMode());
         replySender.sendReply(client, userId, result.output(), route.replyMode(), route.voiceStyle());
     }
 
     /** 根据当前位置查找具体分店，并生成平台门店链接或精确搜索入口。 */
     private void handleFoodOrder(ReplyChannel client, String userId, String userText,
                                  IntentResult route) throws Exception {
-        replySender.applyReplyMode(route.replyMode());
+        replySender.applyReplyMode(userId, route.replyMode());
         foodOrderWorkflow.handle(client, userId, route);
     }
 
@@ -1119,7 +1134,7 @@ public final class UserRequestHandler {
         ToolResult result = toolManager.execute(
                 DeadlineCountdownTool.NAME, new ToolContext(userId), arguments);
         chatHistory.add(userId, userText, result.output());
-        replySender.applyReplyMode(route.replyMode());
+        replySender.applyReplyMode(userId, route.replyMode());
         replySender.sendReply(client, userId, result.output(), route.replyMode(), route.voiceStyle());
     }
 
@@ -1152,7 +1167,7 @@ public final class UserRequestHandler {
             return;
         }
         chatHistory.add(userId, userText, result.output());
-        replySender.applyReplyMode(route.replyMode());
+        replySender.applyReplyMode(userId, route.replyMode());
         replySender.sendReply(client, userId, result.output(), route.replyMode(), route.voiceStyle());
     }
 
@@ -1197,7 +1212,7 @@ public final class UserRequestHandler {
                                   String replyMode, String voiceStyle) throws Exception {
         String reply = weatherService.queryWeather(location, WeatherService.date(weatherDay), WeatherService.period(weatherDay));
         chatHistory.add(userId, userText, reply);
-        replySender.applyReplyMode(replyMode);
+        replySender.applyReplyMode(userId, replyMode);
         replySender.sendReply(client, userId, reply, replyMode, voiceStyle);
     }
 
@@ -1247,7 +1262,7 @@ public final class UserRequestHandler {
                     "document_summary".equals(route.intent()) ? "summary" : "question");
             ToolResult result = toolManager.execute(
                     DocumentQATool.NAME, new ToolContext(userId), arguments);
-            replySender.applyReplyMode(route.replyMode());
+            replySender.applyReplyMode(userId, route.replyMode());
             replySender.sendReply(client, userId, result.output(), route.replyMode(), route.voiceStyle());
             return;
         }
@@ -1384,7 +1399,7 @@ public final class UserRequestHandler {
 
         ToolResult result = toolManager.execute(
                 CalculatorTool.NAME, new ToolContext(userId), arguments);
-        replySender.applyReplyMode(route.replyMode());
+        replySender.applyReplyMode(userId, route.replyMode());
         replySender.sendReply(client, userId, result.output(),
                 route.replyMode(), route.voiceStyle());
     }
@@ -1428,8 +1443,15 @@ public final class UserRequestHandler {
             case "memory" -> "长期记忆";
             case "visual_card" -> "视觉卡片";
             case "task_plan" -> "制定计划";
+            case "study_plan" -> "学习计划";
             case "plan_adjust" -> "调整计划";
             case "plan_progress" -> "查询计划进度";
+            case "life_task_update" -> "更新计划任务";
+            case "life_plan_list" -> "查看全部计划";
+            case "life_plan_select" -> "切换计划";
+            case "today_learning" -> "今日学习";
+            case "daily_reflection" -> "每日复盘";
+            case "reflection_history" -> "复盘历史";
             case "expense_split" -> "费用分摊";
             case "food_order" -> "点餐";
             case "deadline_countdown" -> "截止时间倒计时";

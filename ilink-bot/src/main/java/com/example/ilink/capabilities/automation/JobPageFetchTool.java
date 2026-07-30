@@ -14,14 +14,19 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.charset.Charset;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** 安全抓取候选岗位正文；失败时保留搜索摘要。 */
 public final class JobPageFetchTool implements Tool {
     public static final String NAME = "automation_job_page_fetch";
     private static final int MAX_BYTES = 1024 * 1024;
     private static final Set<Integer> REDIRECTS = Set.of(301, 302, 303, 307, 308);
+    private static final Pattern CHARSET = Pattern.compile("(?i)charset=([a-zA-Z0-9._-]+)");
     private final JobPageGateway pages;
 
     public JobPageFetchTool(HttpClient client) {
@@ -52,8 +57,11 @@ public final class JobPageFetchTool implements Tool {
                 String url = string(job, "url");
                 try {
                     String pageText = pages.fetch(url);
+                    if (blocked(pageText)) throw new IllegalStateException("页面要求登录、验证码或安全验证");
+                    if (!jobContent(pageText)) throw new IllegalStateException("页面不是可识别的岗位正文");
                     job.addProperty("pageText", limit(pageText, 12000));
-                    job.addProperty("sourceLevel", pageText.isBlank() ? "snippet" : "page");
+                    job.addProperty("sourceLevel", "page");
+                    job.addProperty("fetchedAt", Instant.now().toString());
                 } catch (Exception error) {
                     job.addProperty("pageText", "");
                     job.addProperty("sourceLevel", "snippet");
@@ -90,12 +98,17 @@ public final class JobPageFetchTool implements Tool {
                 response.body().close();
                 throw new IllegalStateException("HTTP " + response.statusCode());
             }
+            String contentType = response.headers().firstValue("Content-Type").orElse("text/html");
+            if (!contentType.toLowerCase().matches(".*(?:text/html|text/plain|application/xhtml\\+xml).*")) {
+                response.body().close();
+                throw new IllegalStateException("不支持的网页类型：" + contentType);
+            }
             byte[] bytes;
             try (InputStream input = response.body()) {
                 bytes = input.readNBytes(MAX_BYTES + 1);
             }
             if (bytes.length > MAX_BYTES) throw new IllegalStateException("岗位页面超过 1 MB");
-            return cleanHtml(new String(bytes, StandardCharsets.UTF_8));
+            return cleanHtml(new String(bytes, charset(contentType)));
         }
         return "";
     }
@@ -106,6 +119,26 @@ public final class JobPageFetchTool implements Tool {
                 .replaceAll("(?s)<[^>]+>", " ")
                 .replace("&nbsp;", " ").replace("&amp;", "&")
                 .replaceAll("\\s+", " ").trim();
+    }
+
+    private static boolean blocked(String text) {
+        String value = text == null ? "" : text;
+        return value.matches("(?is).*(登录后查看|请先登录|验证码|安全验证|访问过于频繁|人机验证|异常访问).*" );
+    }
+
+    private static boolean jobContent(String text) {
+        String value = text == null ? "" : text;
+        return value.matches("(?is).*(岗位|职位|实习|招聘|任职要求|工作内容|职位描述|薪资).*" );
+    }
+
+    private static Charset charset(String contentType) {
+        Matcher matcher = CHARSET.matcher(contentType);
+        if (!matcher.find()) return StandardCharsets.UTF_8;
+        try {
+            return Charset.forName(matcher.group(1));
+        } catch (Exception ignored) {
+            return StandardCharsets.UTF_8;
+        }
     }
 
     private static String string(JsonObject object, String name) {
