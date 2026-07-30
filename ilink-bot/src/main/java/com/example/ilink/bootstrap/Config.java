@@ -149,7 +149,7 @@ public class Config {
     public static final String WEB_CHAT_BIND_ADDRESS =
             loadProperty("web.chat.bind.address", "127.0.0.1");
     public static final int WEB_CHAT_PORT =
-            Integer.parseInt(loadProperty("web.chat.port", "8792"));
+            Integer.parseInt(loadProperty("web.chat.port", "8793"));
     public static final long WEB_CHAT_MAX_UPLOAD_BYTES = Math.max(1L, Long.parseLong(
             loadProperty("web.chat.max.upload.mb", "25"))) * 1024L * 1024L;
     /** Roots exposed by the local Web workspace browser; paths outside these roots are rejected. */
