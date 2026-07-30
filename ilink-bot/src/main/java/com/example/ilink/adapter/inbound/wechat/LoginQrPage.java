@@ -28,17 +28,24 @@ public final class LoginQrPage {
             System.getProperty("java.io.tmpdir"), "ilink-bot-login-page");
     private static final Path PAGE_FILE = PAGE_DIRECTORY.resolve("templates").resolve("qrcode-page.html");
     private static final DateTimeFormatter TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss");
+    private volatile String latestQrDataUri = "";
+    private volatile long latestQrGeneratedAtMillis;
+    private volatile String latestPageHtml = "";
 
     /** 写入带二维码数据的 HTML 页面，返回可避免浏览器缓存的本地地址。 */
     public URI render(String qrcode) throws Exception {
         copyStaticResources();
 
         LocalDateTime now = LocalDateTime.now();
+        String dataUri = toDataUri(qrcode);
+        latestQrDataUri = dataUri;
+        latestQrGeneratedAtMillis = System.currentTimeMillis();
         String html = readResource("/templates/qrcode-page.html")
-                .replace("${QR_CODE_DATA}", toDataUri(qrcode))
+                .replace("${QR_CODE_DATA}", dataUri)
                 .replace("${GEN_TIME}", now.format(TIME_FORMAT))
                 .replace("${EXPIRE_TIME}", now.plusSeconds(EXPIRE_SECONDS).format(TIME_FORMAT))
                 .replace("${QR_EXPIRE_SECONDS}", String.valueOf(EXPIRE_SECONDS));
+        latestPageHtml = html;
 
         Files.createDirectories(PAGE_FILE.getParent());
         Files.writeString(PAGE_FILE, html, StandardCharsets.UTF_8);
@@ -61,6 +68,31 @@ public final class LoginQrPage {
         } catch (IOException ignored) {
             // 临时页面删除失败不影响机器人停止。
         }
+    }
+
+    /** Loopback Web UI can display only the rendered image, never SDK credentials. */
+    public String latestQrDataUri() { return latestQrDataUri; }
+
+    public long latestQrGeneratedAtMillis() { return latestQrGeneratedAtMillis; }
+
+    public String latestPageHtml() { return latestPageHtml; }
+
+    /** Reuse the existing QR page while the SDK is still obtaining a fresh code. */
+    public String currentPageHtml() throws IOException {
+        String current = latestPageHtml;
+        if (!current.isBlank()) return current;
+        LocalDateTime now = LocalDateTime.now();
+        return readResource("/templates/qrcode-page.html")
+                .replace("<html lang=\"zh-CN\">", "<html lang=\"zh-CN\" data-qr-pending=\"true\">")
+                .replace("${QR_CODE_DATA}", "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
+                .replace("${GEN_TIME}", now.format(TIME_FORMAT))
+                .replace("${EXPIRE_TIME}", now.plusSeconds(EXPIRE_SECONDS).format(TIME_FORMAT))
+                .replace("${QR_EXPIRE_SECONDS}", String.valueOf(EXPIRE_SECONDS))
+                .replace("QR CODE EXPIRED", "QR CODE LOADING")
+                .replace("二维码已失效，程序正在刷新二维码", "登录二维码正在生成，请稍候")
+                .replace("WAITING FOR MOBILE SCAN", "PREPARING QR CODE")
+                .replace("等待手机微信扫码", "正在连接微信登录服务")
+                .replace("</head>", "<style>#overlay{opacity:1;pointer-events:auto}.scanline{display:none}</style></head>");
     }
 
     /** 将 URL 二维码转成图片；SDK 已返回图片时直接规范为 Data URI。 */

@@ -47,6 +47,8 @@ import com.example.ilink.capabilities.audio.AudioTranscribeTool;
 import com.example.ilink.application.tooling.ToolContext;
 import com.example.ilink.application.tooling.ToolManager;
 import com.example.ilink.application.tooling.ToolResult;
+import com.example.ilink.platform.workspace.WorkspaceApprovalStore;
+import com.example.ilink.platform.workspace.WorkspaceFileService;
 import com.example.ilink.capabilities.documents.DocumentEditTool;
 import com.example.ilink.capabilities.documents.DocumentGenerateTool;
 import com.example.ilink.capabilities.documents.DocumentQATool;
@@ -111,6 +113,8 @@ public final class UserRequestHandler {
     private final MediaKnowledgeService mediaKnowledgeService;
     private final QqMailService qqMailService;
     private final VisualCardWorkflow visualCardWorkflow;
+    private final WorkspaceFileService workspaceFiles;
+    private final WorkspaceApprovalStore workspaceApprovals;
     private final ActionPlanExecutor actionPlanExecutor = new ActionPlanExecutor();
     private final CapabilityContractValidator capabilityValidator = new CapabilityContractValidator();
 
@@ -131,7 +135,9 @@ public final class UserRequestHandler {
                               WebSearchService webSearchService, NewsSearchService newsSearchService,
                               BilibiliSearchService bilibiliSearchService,
                               MediaKnowledgeService mediaKnowledgeService, QqMailService qqMailService,
-                              VisualCardWorkflow visualCardWorkflow) {
+                              VisualCardWorkflow visualCardWorkflow,
+                              WorkspaceFileService workspaceFiles,
+                              WorkspaceApprovalStore workspaceApprovals) {
         this.chatHistory = chatHistory;
         this.sessions = sessions;
         this.documentSessions = documentSessions;
@@ -160,13 +166,17 @@ public final class UserRequestHandler {
         this.mediaKnowledgeService = mediaKnowledgeService;
         this.qqMailService = qqMailService;
         this.visualCardWorkflow = visualCardWorkflow;
+        this.workspaceFiles = workspaceFiles;
+        this.workspaceApprovals = workspaceApprovals;
     }
     /** 识别用户意图并调用对应功能处理器。 */
     public void handle(AgentContext agentContext, String text) throws Exception {
         ReplyChannel client = agentContext.replyChannel();
         String userId = agentContext.principalId();
+        String actionScopeId = agentContext.conversationScopeId();
         contextManager.buildContext(userId);
-        if (handleFailedActionRetry(client, userId, text)) return;
+        if (handleWorkspaceApproval(agentContext, text)) return;
+        if (handleFailedActionRetry(client, userId, actionScopeId, text)) return;
 
         UserSessionStore.PendingFileExport pendingFileExport = sessions.getPendingFileExport(userId);
         if (pendingFileExport != null) {
@@ -174,22 +184,22 @@ public final class UserRequestHandler {
                 sessions.clearPendingFileExport(userId);
                 handleDocumentAction(client, userId, pendingFileExport.userText(),
                         pendingFileExport.route(), IntentPolicy.explicitOutputFileType(text));
-                resumeActionPlan(client, userId);
+                resumeActionPlan(client, userId, actionScopeId);
                 return;
             }
             if ("取消".equals(text.trim())) {
                 sessions.clearPendingFileExport(userId);
-                actionPlanExecutor.cancel(userId);
+                actionPlanExecutor.cancel(actionScopeId);
                 replySender.sendReply(client, userId, "已取消生成文件。");
                 return;
             }
         }
 
-        if (handlePendingDrawContinuation(client, userId, text)) return;
+        if (handlePendingDrawContinuation(client, userId, actionScopeId, text)) return;
 
         if (hasBlockingPending(userId) && !acceptsBlockingReply(userId, text)) {
             clearBlockingPending(userId);
-            actionPlanExecutor.cancel(userId);
+            actionPlanExecutor.cancel(actionScopeId);
         }
 
         if (handleMemoryCommand(client, userId, text)) return;
@@ -217,17 +227,17 @@ public final class UserRequestHandler {
         // 只对未完成会话使用本地状态机；所有新请求都必须先经过大模型语义路由。
         if (sessions.hasPendingWeatherLocations(userId)) {
             handleWeatherLocationSelection(client, userId, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(client, userId, actionScopeId);
             return;
         }
         if (planWorkflow.hasPendingPlan(userId)) {
             planWorkflow.completePendingPlan(agentContext, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(client, userId, actionScopeId);
             return;
         }
         if (planWorkflow.hasPendingCalendarSync(userId)) {
             planWorkflow.completeCalendarSync(agentContext, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(client, userId, actionScopeId);
             return;
         }
         if (calendarWorkflow.hasPending(userId)) {
@@ -249,32 +259,32 @@ public final class UserRequestHandler {
                 }
             }
             calendarWorkflow.completePending(agentContext, text, pendingRoute);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(client, userId, actionScopeId);
             return;
         }
         if (healthDietWorkflow.hasPending(userId)) {
             healthDietWorkflow.handlePending(agentContext, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(client, userId, actionScopeId);
             return;
         }
         if (travelWorkflow.hasPendingLocation(userId)) {
             travelWorkflow.handleLocationSelection(agentContext, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(client, userId, actionScopeId);
             return;
         }
         if (nearbyFoodWorkflow.hasPendingLocation(userId)) {
             nearbyFoodWorkflow.handleLocationSelection(agentContext, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(client, userId, actionScopeId);
             return;
         }
         if (foodOrderWorkflow.hasPending(userId)) {
             foodOrderWorkflow.handlePending(agentContext, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(client, userId, actionScopeId);
             return;
         }
         if (taxiWorkflow.hasPending(userId)) {
             taxiWorkflow.handlePending(agentContext, text);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(client, userId, actionScopeId);
             return;
         }
 
@@ -302,7 +312,7 @@ public final class UserRequestHandler {
         }
         plan = review.plan();
 
-        System.out.println("[意图识别] 共识别 " + plan.actions().size() + " 个动作："
+        System.out.println(RequestLogContext.prefix("意图识别") + " actions=" + plan.actions().size() + " names="
                 + plan.actions().stream().map(action -> intentName(action.route().intent())).toList());
         plan = coalesceDependentActions(plan);
         if (plan.actions().size() > 1) {
@@ -311,14 +321,61 @@ public final class UserRequestHandler {
             replySender.sendReply(client, userId, "我识别到 " + plan.actions().size()
                     + " 项要求：" + actionNames + "。现在依次处理。");
         }
-        actionPlanExecutor.start(userId, plan,
+        actionPlanExecutor.start(actionScopeId, plan,
                 action -> executeAction(client, userId, action),
                 () -> hasBlockingPending(userId),
                 (action, error) -> handleActionFailure(client, userId, action, error));
     }
 
+    private boolean handleWorkspaceApproval(AgentContext context, String text) throws Exception {
+        String command = text == null ? "" : text.trim();
+        String userId = context.principalId();
+        String sessionId = context.conversationId();
+        if ("取消文件操作".equals(command)) {
+            boolean cancelled = workspaceApprovals.cancel(userId, sessionId);
+            replySender.sendReply(context.replyChannel(), userId,
+                    cancelled ? "已取消待确认的文件操作。" : "当前没有等待确认的文件操作。" );
+            return true;
+        }
+
+        WorkspaceApprovalStore.Action expected;
+        if ("确认修改".equals(command)) expected = WorkspaceApprovalStore.Action.WRITE;
+        else if ("确认发送".equals(command)) expected = WorkspaceApprovalStore.Action.SEND;
+        else return false;
+
+        WorkspaceApprovalStore.Pending pending = workspaceApprovals.consume(userId, sessionId, expected);
+        if (pending == null) {
+            replySender.sendReply(context.replyChannel(), userId,
+                    "当前没有对应的待确认文件操作，可能已过期，请重新提出文件要求。" );
+            return true;
+        }
+
+        try {
+            if (expected == WorkspaceApprovalStore.Action.WRITE) {
+                workspaceFiles.confirmWrite(WorkspaceApprovalStore.scope(userId, sessionId), pending.token());
+                replySender.sendReply(context.replyChannel(), userId,
+                        "已完成文件修改：" + pending.path() + "。修改前版本已备份。" );
+            } else {
+                byte[] content = workspaceFiles.readForDelivery(pending.rootId(), pending.path());
+                context.replyChannel().sendFile(userId, content,
+                        workspaceFiles.fileName(pending.rootId(), pending.path()), "来自本地工作空间");
+                replySender.sendReply(context.replyChannel(), userId,
+                        "已发送文件：" + pending.path());
+            }
+        } catch (Exception error) {
+            replySender.sendReply(context.replyChannel(), userId,
+                    "文件操作失败：" + (error.getMessage() == null ? "未知错误" : error.getMessage()));
+        }
+        return true;
+    }
+
     private boolean isAgentControlSignal(String reply) {
         return reply != null && "DELEGATE".equalsIgnoreCase(reply.trim());
+    }
+
+    /** Allows command routing to leave numeric replies to an active business workflow. */
+    public boolean hasPendingInteraction(String userId) {
+        return hasBlockingPending(userId) || visualCardWorkflow.hasPending(userId);
     }
 
     /** 重发上一条回复，不调用大模型，避免被误识别为邮箱查询。 */
@@ -338,7 +395,7 @@ public final class UserRequestHandler {
 
     /** 待选尺寸属于封闭状态，直接本地续办，不再请求路由模型。 */
     private boolean handlePendingDrawContinuation(ReplyChannel client, String userId,
-                                                  String text) throws Exception {
+                                                  String actionScopeId, String text) throws Exception {
         UserSessionStore.PendingDrawRequest pending = sessions.getPendingDraw(userId);
         if (pending == null) return false;
 
@@ -346,19 +403,19 @@ public final class UserRequestHandler {
         if (!"none".equals(imageSize)) {
             sessions.clearPendingDraw(userId);
             generatePendingImage(client, userId, pending, imageSize);
-            resumeActionPlan(client, userId);
+            resumeActionPlan(client, userId, actionScopeId);
             return true;
         }
         if (DrawSizeParser.isCancel(text)) {
             sessions.clearPendingDraw(userId);
-            actionPlanExecutor.cancel(userId);
+            actionPlanExecutor.cancel(actionScopeId);
             replySender.sendReply(client, userId, "已取消这次绘图。");
             return true;
         }
 
         // 不符合尺寸选项时按新请求处理，防止旧状态劫持后续对话。
         sessions.clearPendingDraw(userId);
-        actionPlanExecutor.cancel(userId);
+        actionPlanExecutor.cancel(actionScopeId);
         return false;
     }
 
@@ -736,7 +793,8 @@ public final class UserRequestHandler {
                         hasCurrentImage(userId),
                         documentSessions.get(userId) != null));
         if (!validation.allowed()) {
-            System.out.println("[能力校验] 拒绝意图=" + route.intent() + "，要求=" + actionText);
+            System.out.println(RequestLogContext.prefix("能力校验") + " result=rejected intent="
+                    + route.intent() + " request=" + RequestLogContext.preview(actionText));
             if (validation.decision() == CapabilityContractValidator.Decision.FALLBACK_CHAT) {
                 sendChatReply(client, userId, actionText, route);
             } else {
@@ -744,10 +802,10 @@ public final class UserRequestHandler {
             }
             return;
         }
-        System.out.println("[动作执行] 意图=" + intentName(route.intent())
-                + "，要求=" + actionText
-                + "，回复方式=" + replyModeName(route.replyMode())
-                + "，音色=" + voiceStyleName(route.voiceStyle()));
+        System.out.println(RequestLogContext.prefix("动作执行") + " intent=" + intentName(route.intent())
+                + " reply_mode=" + replyModeName(route.replyMode())
+                + " voice=" + voiceStyleName(route.voiceStyle())
+                + " request=" + RequestLogContext.preview(actionText));
         switch (route.intent()) {
             case "draw" -> handleDraw(client, userId, actionText, route);
             case "draw_size" -> handleDrawSize(client, userId, route);
@@ -791,14 +849,16 @@ public final class UserRequestHandler {
         if (reply == null || reply.isBlank()) reply = "网络波动了，请再发一次～";
         chatHistory.add(userId, text, reply);
         replySender.applyReplyMode(route.replyMode());
-        System.out.println("[机器人回复] " + reply);
+        System.out.println(RequestLogContext.prefix("回复生成") + " kind=text chars=" + reply.length()
+                + " preview=" + RequestLogContext.preview(reply));
         replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
     }
 
     /** 当前补充会话结束后继续执行同一段话中尚未完成的动作。 */
-    private void resumeActionPlan(ReplyChannel client, String userId) throws Exception {
+    private void resumeActionPlan(ReplyChannel client, String userId,
+                                  String actionScopeId) throws Exception {
         if (hasBlockingPending(userId)) return;
-        actionPlanExecutor.resume(userId,
+        actionPlanExecutor.resume(actionScopeId,
                 action -> executeAction(client, userId, action),
                 () -> hasBlockingPending(userId),
                 (action, error) -> handleActionFailure(client, userId, action, error));
@@ -820,10 +880,11 @@ public final class UserRequestHandler {
                 || sessions.hasPendingFileExport(userId);
     }
 
-    private boolean handleFailedActionRetry(ReplyChannel client, String userId, String text) throws Exception {
-        if (!actionPlanExecutor.hasFailedAction(userId)
+    private boolean handleFailedActionRetry(ReplyChannel client, String userId,
+                                            String actionScopeId, String text) throws Exception {
+        if (!actionPlanExecutor.hasFailedAction(actionScopeId)
                 || !text.trim().matches("(重试|再试一次|重试刚才失败的.*)")) return false;
-        actionPlanExecutor.retryFailed(userId,
+        actionPlanExecutor.retryFailed(actionScopeId,
                 action -> executeAction(client, userId, action),
                 (action, error) -> handleActionFailure(client, userId, action, error));
         replySender.sendReply(client, userId, "已重试刚才失败的" + "操作。" );
@@ -930,7 +991,8 @@ public final class UserRequestHandler {
     private void handleActionFailure(ReplyChannel client, String userId,
                                      IntentAction action, Exception error) throws Exception {
         String actionName = intentName(action.route().intent());
-        System.err.println("[动作执行] " + actionName + "失败: " + error.getMessage());
+        System.err.println(RequestLogContext.prefix("动作失败") + " action=" + actionName
+                + " error=" + RequestLogContext.error(error));
         replySender.sendReply(client, userId, actionName + "执行失败，已继续处理其他要求。");
     }
 
@@ -938,7 +1000,6 @@ public final class UserRequestHandler {
     private void handleDraw(ReplyChannel client, String userId, String userText,
                             IntentResult route) throws Exception {
         sessions.clearPendingDraw(userId);
-        chatHistory.add(userId, userText, "[图片] " + route.cnDescription());
         replySender.applyReplyMode(route.replyMode());
 
         if ("none".equals(route.imageSize())) {
@@ -983,8 +1044,9 @@ public final class UserRequestHandler {
             sessions.setLastImage(userId, saved.toString());
             String description = pending.description().isBlank()
                     ? "已按你的要求生成" : pending.description();
-            chatHistory.addMedia(userId, "图片", saved.toString(), description);
-            client.sendImage(userId, image.bytes(), image.fileName("draw"), "");
+            if (!client.persistsOutboundMedia()) chatHistory.addAssistantMessage(userId, description);
+            client.sendImage(userId, image.bytes(), image.fileName("draw"),
+                    client.persistsOutboundMedia() ? description : "");
             replySender.markSent();
         } else {
             String error = result.success() ? "图片服务没有返回有效图片，请稍后重试。" : result.output();
@@ -1049,8 +1111,10 @@ public final class UserRequestHandler {
                 Path saved = mediaStore.save(userId, "image", edited.bytes(), edited.extension());
                 documentSessions.clear(userId);
                 sessions.setLastImage(userId, saved.toString());
-                chatHistory.addMedia(userId, "图片", saved.toString(), "已根据用户要求修改图片");
-                client.sendImage(userId, edited.bytes(), edited.fileName("edited"), "");
+                String description = "已根据用户要求修改图片";
+                if (!client.persistsOutboundMedia()) chatHistory.addAssistantMessage(userId, description);
+                client.sendImage(userId, edited.bytes(), edited.fileName("edited"),
+                        client.persistsOutboundMedia() ? description : "");
                 replySender.markSent();
             } else {
                 String error = result.success() ? "图片服务没有返回有效图片，请稍后重试。" : result.output();

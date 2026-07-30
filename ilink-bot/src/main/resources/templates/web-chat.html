@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="system">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>iLink Workspace</title>
+  <link rel="stylesheet" href="/static/css/web-chat.css">
+  <link rel="stylesheet" href="/static/css/web-shell.css">
+  <script defer src="/static/js/web-chat.js"></script>
+  <script defer src="/static/js/web-shell.js"></script>
+</head>
+<body>
+  <svg class="icon-sprite" aria-hidden="true">
+    <symbol id="icon-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="icon-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="icon-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+    <symbol id="icon-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    <symbol id="icon-message" viewBox="0 0 24 24"><path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4Z"/></symbol>
+    <symbol id="icon-edit" viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/></symbol>
+    <symbol id="icon-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"/></symbol>
+    <symbol id="icon-palette" viewBox="0 0 24 24"><path d="M12 3a9 9 0 0 0 0 18h1.4a1.6 1.6 0 0 0 1.2-2.7 1.6 1.6 0 0 1 1.2-2.7H18a3 3 0 0 0 3-3A9 9 0 0 0 12 3Z"/><circle cx="7.5" cy="10.5" r=".8"/><circle cx="10" cy="7" r=".8"/><circle cx="14" cy="7" r=".8"/><circle cx="16.5" cy="10.5" r=".8"/></symbol>
+    <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="icon-paperclip" viewBox="0 0 24 24"><path d="m21.4 11.6-8.9 8.9a6 6 0 0 1-8.5-8.5l9.5-9.5a4 4 0 0 1 5.7 5.7l-9.5 9.5a2 2 0 0 1-2.8-2.8l8.8-8.8"/></symbol>
+    <symbol id="icon-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1"/></symbol>
+    <symbol id="icon-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z"/></symbol>
+    <symbol id="icon-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></symbol>
+    <symbol id="icon-download" viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></symbol>
+    <symbol id="icon-file" viewBox="0 0 24 24"><path d="M6 2h8l4 4v16H6Z"/><path d="M14 2v5h5"/></symbol>
+    <symbol id="icon-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></symbol>
+    <symbol id="icon-loader" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4"/></symbol>
+    <symbol id="icon-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></symbol>
+    <symbol id="icon-alert" viewBox="0 0 24 24"><path d="M12 3 2 21h20Z"/><path d="M12 9v5M12 18h.01"/></symbol>
+    <symbol id="icon-tool" viewBox="0 0 24 24"><path d="M14.7 6.3a4 4 0 0 0-5-5L7.5 3.5l3 3L8 9 5 6 2.8 8.2a4 4 0 0 0 5 5L17.5 23l5.5-5.5-9.7-9.7Z"/></symbol>
+    <symbol id="icon-eraser" viewBox="0 0 24 24"><path d="m7 21-4-4L15 5l4 4Z"/><path d="m14 6 4 4M7 21h14"/></symbol>
+    <symbol id="icon-external" viewBox="0 0 24 24"><path d="M15 4h5v5M20 4l-9 9M18 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h6"/></symbol>
+    <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  </svg>
+
+  <div class="app-shell">
+    <aside id="sidebar" class="sidebar" aria-label="会话导航">
+      <header class="brand-row">
+        <div class="brand-mark" aria-hidden="true"><span>i</span></div>
+        <div class="brand-copy"><strong>iLink</strong><span>Local Workspace</span></div>
+        <button id="close-sidebar" class="icon-button mobile-only has-tooltip" type="button" title="关闭会话列表" aria-label="关闭会话列表" data-tooltip="关闭侧栏">
+          <svg class="icon"><use href="#icon-x"/></svg>
+        </button>
+      </header>
+
+      <button id="new-session" class="new-session-button" type="button">
+        <svg class="icon"><use href="#icon-plus"/></svg><span>新建会话</span>
+      </button>
+      <nav class="module-nav" aria-label="工作台导航">
+        <span class="module-heading">工作台</span>
+        <button type="button" class="module-link is-active" data-route="/web"><svg class="icon"><use href="#icon-message"/></svg><span>AI 工作台</span></button>
+        <button type="button" class="module-link" data-existing-view="wechat"><svg class="icon"><use href="#icon-tool"/></svg><span>微信 Bot</span></button>
+        <span class="module-heading">任务与空间</span>
+        <button type="button" class="module-link" data-existing-view="plan"><svg class="icon"><use href="#icon-check"/></svg><span>七日计划</span></button>
+        <button type="button" class="module-link" data-existing-view="sessions"><svg class="icon"><use href="#icon-message"/></svg><span>微信会话管理</span></button>
+        <button type="button" class="module-link" data-route="/web/files"><svg class="icon"><use href="#icon-file"/></svg><span>工作空间文件</span></button>
+        <span class="module-heading">系统</span>
+        <button type="button" class="module-link" data-existing-view="login"><svg class="icon"><use href="#icon-image"/></svg><span>微信扫码登录</span></button>
+      </nav>
+      <div class="section-heading"><span>最近会话</span><span id="session-count">0</span></div>
+      <nav id="session-list" class="session-list" aria-label="会话列表"></nav>
+      <footer class="sidebar-footer">
+        <span id="storage-dot" class="connection-dot"></span>
+        <span id="storage-status">正在连接</span>
+      </footer>
+    </aside>
+
+    <button id="sidebar-backdrop" class="sidebar-backdrop" type="button" aria-label="关闭会话列表"></button>
+    <button id="activity-backdrop" class="activity-backdrop" type="button" aria-label="关闭 Agent 活动"></button>
+
+    <main class="chat-workspace">
+      <header class="chat-header">
+        <button id="open-sidebar" class="icon-button mobile-only has-tooltip" type="button" title="打开会话列表" aria-label="打开会话列表" data-tooltip="会话列表">
+          <svg class="icon"><use href="#icon-menu"/></svg>
+        </button>
+        <div class="chat-title">
+          <strong id="conversation-title">新会话</strong>
+          <span><span id="agent-dot" class="agent-dot"></span><span id="agent-status">就绪</span></span>
+        </div>
+        <div class="header-actions">
+          <span class="model-label">Qwen · Agent</span>
+          <button id="open-activity" class="icon-button compact-only has-tooltip" type="button" title="查看 Agent 活动" aria-label="查看 Agent 活动" aria-expanded="false" data-tooltip="Agent 活动">
+            <svg class="icon"><use href="#icon-tool"/></svg>
+          </button>
+          <div class="theme-control">
+            <button id="theme-button" class="icon-button has-tooltip" type="button" title="选择配色" aria-label="选择配色" aria-haspopup="menu" aria-expanded="false" data-tooltip="配色">
+              <svg class="icon"><use href="#icon-palette"/></svg>
+            </button>
+            <div id="theme-menu" class="theme-menu" role="menu" aria-label="配色选择" hidden>
+              <div class="theme-menu-title">界面配色</div>
+              <button type="button" role="menuitemradio" data-theme-value="system"><span class="theme-swatch swatch-system"></span><span>跟随系统</span><svg class="icon theme-check"><use href="#icon-check"/></svg></button>
+              <button type="button" role="menuitemradio" data-theme-value="light"><span class="theme-swatch swatch-light"></span><span>浅色</span><svg class="icon theme-check"><use href="#icon-check"/></svg></button>
+              <button type="button" role="menuitemradio" data-theme-value="dark"><span class="theme-swatch swatch-dark"></span><span>深色</span><svg class="icon theme-check"><use href="#icon-check"/></svg></button>
+              <button type="button" role="menuitemradio" data-theme-value="graphite"><span class="theme-swatch swatch-graphite"></span><span>石墨灰</span><svg class="icon theme-check"><use href="#icon-check"/></svg></button>
+              <button type="button" role="menuitemradio" data-theme-value="forest"><span class="theme-swatch swatch-forest"></span><span>森林绿</span><svg class="icon theme-check"><use href="#icon-check"/></svg></button>
+              <button type="button" role="menuitemradio" data-theme-value="ocean"><span class="theme-swatch swatch-ocean"></span><span>海洋蓝</span><svg class="icon theme-check"><use href="#icon-check"/></svg></button>
+              <button type="button" role="menuitemradio" data-theme-value="warm"><span class="theme-swatch swatch-warm"></span><span>暖灰</span><svg class="icon theme-check"><use href="#icon-check"/></svg></button>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <section id="messages" class="messages" aria-live="polite">
+        <div id="empty-state" class="empty-state">
+          <div class="empty-mark" aria-hidden="true"><span>i</span></div>
+          <h1>开始对话</h1>
+          <p>发送文字，或上传图片和 PDF 文件</p>
+        </div>
+      </section>
+
+      <section id="task-list" class="task-list" hidden aria-label="当前会话任务"></section>
+      <section id="attachment-tray" class="attachment-tray" hidden aria-label="待上传文件"></section>
+
+      <footer class="composer-zone">
+        <form id="composer" class="composer">
+          <textarea id="message-input" rows="1" maxlength="20000" placeholder="输入消息" aria-label="消息"></textarea>
+          <div class="composer-toolbar">
+            <div class="composer-tools">
+              <input id="file-input" type="file" multiple hidden accept="image/*,.pdf,.doc,.docx,.txt,.md,.csv,.xlsx,.xls,.pptx">
+              <button id="attach-button" class="icon-button has-tooltip" type="button" title="添加附件" aria-label="添加附件" data-tooltip="添加附件">
+                <svg class="icon"><use href="#icon-paperclip"/></svg>
+              </button>
+              <span id="upload-status" class="upload-status"></span>
+            </div>
+            <div class="composer-actions">
+              <button id="resume-button" class="icon-button resume-button has-tooltip" type="button" title="继续任务" aria-label="继续任务" data-tooltip="继续任务" hidden>
+                <svg class="icon"><use href="#icon-play"/></svg>
+              </button>
+              <button id="stop-button" class="icon-button stop-button has-tooltip" type="button" title="停止生成" aria-label="停止生成" data-tooltip="停止生成" disabled>
+                <svg class="icon"><use href="#icon-stop"/></svg>
+              </button>
+              <button id="send-button" class="send-button has-tooltip" type="submit" title="发送" aria-label="发送" data-tooltip="发送" disabled>
+                <svg class="icon"><use href="#icon-send"/></svg>
+              </button>
+            </div>
+          </div>
+        </form>
+      </footer>
+    </main>
+
+    <main id="console-views" class="console-views" hidden>
+      <button id="console-open-sidebar" class="console-menu-button icon-button mobile-only has-tooltip" type="button" title="打开导航" aria-label="打开导航"><svg class="icon"><use href="#icon-menu"/></svg></button>
+      <section class="console-view" data-view="wechat" hidden>
+        <header class="view-header wechat-header"><div><h1>微信 Bot</h1><p>电脑与手机共用当前微信 Bot 身份、会话、工具和记忆。</p></div><div class="inline-actions"><button class="secondary-command" type="button" data-existing-view="sessions">会话管理</button><button class="secondary-command" type="button" data-route="/web/files">电脑文件</button><span id="wechat-connection" class="status-badge">检查连接中</span></div></header>
+        <section class="wechat-chat-surface">
+          <div id="wechat-messages" class="mirror-messages wechat-conversation" aria-live="polite"><p class="muted-copy">正在加载同步对话。</p></div>
+          <form id="wechat-composer" class="wechat-composer">
+            <textarea id="wechat-input" rows="1" maxlength="20000" placeholder="发送消息到微信 Bot" aria-label="微信 Bot 消息"></textarea>
+            <button id="wechat-send" class="send-button" type="submit" title="发送到微信 Bot" aria-label="发送到微信 Bot"><svg class="icon"><use href="#icon-send"/></svg></button>
+          </form>
+        </section>
+      </section>
+
+      <section class="console-view" data-view="files" hidden><header class="view-header"><div><h1>工作空间文件</h1><p>文件仅限已配置根目录。修改和发送到微信均需明确确认。</p></div></header><div class="workspace-layout"><section class="surface-panel workspace-browser"><div class="workspace-toolbar"><select id="workspace-root" aria-label="工作空间根目录"></select><input id="workspace-search" type="search" placeholder="按名称或文本内容搜索"><button id="workspace-search-button" class="secondary-command" type="button">搜索</button></div><p id="workspace-path" class="path-label">/</p><div id="workspace-entries" class="workspace-entries"></div></section><section class="surface-panel workspace-preview"><header><h2 id="workspace-file-name">选择一个文件</h2><div class="inline-actions"><button id="workspace-edit" class="secondary-command" type="button" disabled>修改</button><button id="workspace-send" class="primary-command" type="button" disabled>发送到微信</button></div></header><p id="workspace-meta" class="muted-copy">预览文本、图片和 PDF，或使用搜索定位文件。</p><textarea id="workspace-editor" hidden aria-label="文件内容"></textarea><div id="workspace-media" class="workspace-media" hidden></div><pre id="workspace-content" class="file-content">尚未选择文件。</pre><div id="workspace-confirm" class="confirm-area" hidden></div></section></div></section>
+    </main>
+
+    <aside class="activity-panel" aria-label="Agent 活动">
+      <header>
+        <div><strong>Agent 活动</strong><span>实时事件</span></div>
+        <div class="activity-header-actions">
+          <button id="clear-activity" class="icon-button subtle-button has-tooltip" type="button" title="清空活动" aria-label="清空活动" data-tooltip="清空">
+            <svg class="icon"><use href="#icon-eraser"/></svg>
+          </button>
+          <button id="close-activity" class="icon-button subtle-button compact-only has-tooltip" type="button" title="关闭 Agent 活动" aria-label="关闭 Agent 活动" data-tooltip="关闭">
+            <svg class="icon"><use href="#icon-x"/></svg>
+          </button>
+        </div>
+      </header>
+      <div id="activity-list" class="activity-list">
+        <div class="activity-entry is-ready"><span class="activity-icon"><svg class="icon"><use href="#icon-check"/></svg></span><div><strong>就绪</strong><time>现在</time></div></div>
+      </div>
+    </aside>
+  </div>
+
+  <template id="session-template">
+    <div class="session-row">
+      <button class="session-item" type="button">
+        <span class="session-state" aria-hidden="true"><svg class="icon"><use href="#icon-message"/></svg></span>
+        <span class="session-copy"><strong></strong><small></small></span>
+      </button>
+      <button class="session-more has-tooltip" type="button" title="会话操作" aria-label="会话操作" aria-haspopup="menu" aria-expanded="false" data-tooltip="会话操作">
+        <svg class="icon"><use href="#icon-more"/></svg>
+      </button>
+      <div class="session-menu" role="menu" hidden>
+        <button data-action="rename" type="button"><svg class="icon"><use href="#icon-edit"/></svg><span>重命名</span></button>
+        <button data-action="delete" class="is-danger" type="button"><svg class="icon"><use href="#icon-trash"/></svg><span>删除</span></button>
+      </div>
+    </div>
+  </template>
+
+  <template id="message-template">
+    <article class="message">
+      <div class="message-author"></div>
+      <div class="message-content"></div>
+      <div class="message-actions" hidden>
+        <button class="message-edit" type="button" title="修改并重新运行"><svg class="icon"><use href="#icon-edit"/></svg><span>修改</span></button>
+      </div>
+    </article>
+  </template>
+
+  <template id="task-template">
+    <details class="task-entry">
+      <summary>
+        <span class="task-status-icon"><svg class="icon"><use href="#icon-loader"/></svg></span>
+        <span class="task-copy"><strong class="task-title">正在处理</strong><span class="task-hint">点击查看处理详情</span></span>
+        <time class="task-elapsed">0 秒</time>
+        <svg class="icon task-chevron"><use href="#icon-chevron"/></svg>
+      </summary>
+      <div class="task-details"></div>
+      <button class="task-resume" type="button"><svg class="icon"><use href="#icon-play"/></svg><span>继续任务</span></button>
+    </details>
+  </template>
+
+  <dialog id="session-dialog" class="session-dialog">
+    <form method="dialog">
+      <header>
+        <strong id="session-dialog-title">会话操作</strong>
+        <button id="session-dialog-close" class="dialog-close icon-button" type="button" title="关闭" aria-label="关闭"><svg class="icon"><use href="#icon-x"/></svg></button>
+      </header>
+      <p id="session-dialog-message"></p>
+      <label id="session-title-field"><span>会话名称</span><input id="session-title-input" type="text" maxlength="100" autocomplete="off"></label>
+      <footer>
+        <button value="cancel" class="dialog-secondary" type="submit">取消</button>
+        <button id="session-dialog-confirm" value="confirm" class="dialog-primary" type="submit">保存</button>
+      </footer>
+    </form>
+  </dialog>
+</body>
+</html>

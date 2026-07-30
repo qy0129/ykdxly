@@ -3,6 +3,11 @@ package com.example.ilink.bootstrap;
 import com.example.ilink.adapter.inbound.http.DailyDashboardServer;
 import com.example.ilink.adapter.inbound.http.ExpressHttpServer;
 import com.example.ilink.adapter.inbound.http.SessionManagementServer;
+import com.example.ilink.adapter.inbound.http.WebChatServer;
+import com.example.ilink.adapter.outbound.web.WebArtifactStore;
+import com.example.ilink.adapter.outbound.web.WebEventBroker;
+import com.example.ilink.adapter.outbound.web.WebReplyChannel;
+import com.example.ilink.application.integration.WechatWebBridge;
 import com.example.ilink.adapter.inbound.wechat.LoginQrPage;
 import com.example.ilink.adapter.inbound.wechat.MessageDispatcher;
 import com.example.ilink.adapter.inbound.wechat.WechatMessageAdapter;
@@ -117,12 +122,15 @@ import com.example.ilink.capabilities.web.BilibiliSearchService;
 import com.example.ilink.capabilities.web.NewsSearchService;
 import com.example.ilink.capabilities.web.ShortLinkService;
 import com.example.ilink.capabilities.web.WebSearchService;
+import com.example.ilink.capabilities.workspace.WorkspaceFileTool;
 import com.example.ilink.platform.media.MediaStore;
 import com.example.ilink.platform.http.HttpClientFactory;
 import com.example.ilink.platform.persistence.DefaultUserSessionStore;
 import com.example.ilink.platform.persistence.MySqlStore;
 import com.example.ilink.platform.persistence.UserRepository;
 import com.example.ilink.platform.sdk.SdkResumeContextStore;
+import com.example.ilink.platform.workspace.WorkspaceFileService;
+import com.example.ilink.platform.workspace.WorkspaceApprovalStore;
 
 import java.net.http.HttpClient;
 import java.net.URI;
@@ -139,6 +147,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
     private final ChatHistoryStore chatHistory;
     private final MySqlStore database;
     private final SessionManagementServer sessionManagementServer;
+    private final WebChatServer webChatServer;
 
     private ApplicationBootstrap(MessageDispatcher messageDispatcher,
                                  WechatMessageAdapter messageAdapter,
@@ -147,7 +156,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
                                  SdkResumeContextStore resumeContextStore,
                                  ChatHistoryStore chatHistory,
                                  MySqlStore database,
-                                 SessionManagementServer sessionManagementServer) {
+                                 SessionManagementServer sessionManagementServer,
+                                 WebChatServer webChatServer) {
         this.messageDispatcher = messageDispatcher;
         this.messageAdapter = messageAdapter;
         this.messageExecutor = messageExecutor;
@@ -156,6 +166,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         this.chatHistory = chatHistory;
         this.database = database;
         this.sessionManagementServer = sessionManagementServer;
+        this.webChatServer = webChatServer;
     }
 
     public static ApplicationBootstrap create() {
@@ -163,6 +174,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
 
         ChatHistoryStore chatHistory = new ChatHistoryStore(httpClient);
         UserSessionStore sessions = new DefaultUserSessionStore();
+        MessageSerialExecutor messageExecutor = new MessageSerialExecutor();
         AudioHistoryStore audioHistory = new AudioHistoryStore();
         DocumentSessionStore documentSessions = new DocumentSessionStore();
         PlanSessionStore planSessions = new PlanSessionStore();
@@ -196,6 +208,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
         ExpressPageService expressPageService = new ExpressPageService();
         ExpressHttpServer expressHttpServer = new ExpressHttpServer(expressPageService);
 
+        WorkspaceFileService workspaceFiles = new WorkspaceFileService();
+        WorkspaceApprovalStore workspaceApprovals = new WorkspaceApprovalStore();
         ToolManager toolManager = new ToolManager()
                 .register(new WeatherTool(weatherService))
                 .register(new DrawTool(imageService))
@@ -233,7 +247,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 .register(new MortgageTool())
                 .register(new ChineseMoneyTool())
                 .register(new RelationTool())
-                .register(new ExpressTool(expressService, expressPageService));
+                .register(new ExpressTool(expressService, expressPageService))
+                .register(new WorkspaceFileTool(workspaceFiles, workspaceApprovals));
 
         SkillRegistry skillRegistry = SkillRegistry.defaults();
         installConfiguredMcpTools(httpClient, toolManager);
@@ -278,7 +293,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, foodOrderWorkflow,
                 taxiWorkflow, memoryService, todoService,
                 webSearchService, newsSearchService, bilibiliSearchService, mediaKnowledgeService,
-                qqMailService, visualCardWorkflow);
+                qqMailService, visualCardWorkflow, workspaceFiles, workspaceApprovals);
         MessageProcessor messageProcessor = new MessageProcessor(
                 chatHistory, sessions, audioHistory, documentSessions,
                 audioService, imageService, documentService, memoryService,
@@ -290,19 +305,33 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 new HolidayService(), memoryService, qqMailService, newsSearchService, webSearchService);
         DailyDashboardService dashboardService = new DailyDashboardService(
                 todoService, calendarService, planSessions, weatherService, sessions, memoryService);
+        DailyDashboardServer dailyDashboardServer = new DailyDashboardServer(dashboardService);
 
+        LoginQrPage loginQrPage = new LoginQrPage();
         SessionManagementServer sessionManagementServer = new SessionManagementServer(
                 sessionService, sessions, MySqlStore.getInstance());
+        WebEventBroker webEvents = new WebEventBroker();
+        WechatWebBridge wechatWebBridge = new WechatWebBridge(webEvents);
+        WebArtifactStore webArtifacts = new WebArtifactStore(
+                Config.MEDIA_DIR.resolve("web-artifacts"));
+        WebReplyChannel webReplyChannel = new WebReplyChannel(
+                webEvents, webArtifacts, chatHistory, wechatWebBridge);
+        WebChatServer webChatServer = new WebChatServer(
+                messageProcessor, messageExecutor, sessionService, sessions,
+                chatHistory, MySqlStore.getInstance(), webReplyChannel, webEvents, webArtifacts,
+                wechatWebBridge, workspaceFiles, loginQrPage, dashboardService,
+                dailyDashboardServer, sessionManagementServer);
         MessageDispatcher dispatcher = new MessageDispatcher(
                 messageProcessor, replySender, chatService, calendarService,
                 visualDeckSender, loginBriefingService, welcomeHandler,
-                new DailyDashboardServer(dashboardService), sessionManagementServer,
-                expressHttpServer, expressPageService);
+                dailyDashboardServer, sessionManagementServer,
+                expressHttpServer, expressPageService, wechatWebBridge);
         sessionManagementServer.start();
+        webChatServer.start();
         return new ApplicationBootstrap(
-                dispatcher, new WechatMessageAdapter(), new MessageSerialExecutor(),
-                new LoginQrPage(), new SdkResumeContextStore(), chatHistory,
-                MySqlStore.getInstance(), sessionManagementServer);
+                dispatcher, new WechatMessageAdapter(), messageExecutor,
+                loginQrPage, new SdkResumeContextStore(), chatHistory,
+                MySqlStore.getInstance(), sessionManagementServer, webChatServer);
     }
 
     public MessageDispatcher messageDispatcher() {
@@ -338,6 +367,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
 
     @Override
     public void close() {
+        webChatServer.close();
         sessionManagementServer.close();
         messageExecutor.close();
         messageDispatcher.close();

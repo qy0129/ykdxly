@@ -24,12 +24,7 @@ public final class EmbeddingService {
     }
 
     public List<Float> embed(String text) throws Exception {
-        JsonObject body = new JsonObject();
-        body.addProperty("model", Config.EMBEDDING_MODEL);
-        JsonArray input = new JsonArray();
-        input.add(text);
-        body.add("input", input);
-        body.addProperty("encoding_format", "float");
+        JsonObject body = requestBody(Config.EMBEDDING_MODEL, text);
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(Config.EMBEDDING_API_URL))
@@ -58,5 +53,14 @@ public final class EmbeddingService {
             vector.add(v.getAsFloat());
         }
         return vector;
+    }
+
+    /** SiliconFlow's compatible endpoint accepts one document as a string, not a one-item array. */
+    static JsonObject requestBody(String model, String text) {
+        JsonObject body = new JsonObject();
+        body.addProperty("model", model);
+        body.addProperty("input", text == null ? "" : text);
+        body.addProperty("encoding_format", "float");
+        return body;
     }
 }

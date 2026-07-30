@@ -19,7 +19,20 @@ public record AgentContext(AgentIdentity identity, ChannelType channel,
                 ChannelCapabilities.wechat(), replyChannel, null);
     }
 
+    public static AgentContext web(String userId, String conversationId,
+                                   ReplyChannel replyChannel, String workspaceId) {
+        return new AgentContext(new AgentIdentity(userId, conversationId), ChannelType.WEB,
+                ChannelCapabilities.web(), replyChannel, workspaceId);
+    }
+
     public String principalId() { return identity.principalId(); }
 
     public String conversationId() { return identity.conversationId(); }
+
+    /** Isolates mutable workflow state between Web conversations without changing user ownership. */
+    public String conversationScopeId() {
+        return channel == ChannelType.WEB
+                ? principalId() + "|web-conversation|" + conversationId()
+                : principalId();
+    }
 }

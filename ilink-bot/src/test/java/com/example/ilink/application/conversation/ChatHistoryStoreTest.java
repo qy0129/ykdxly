@@ -7,6 +7,10 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Field;
 import java.net.http.HttpClient;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -59,6 +63,44 @@ class ChatHistoryStoreTest {
                 .contains("用户偏好清淡食物"));
         assertEquals(1, countRole(messages, "system"));
         assertEquals("user", messages.get(1).getAsJsonObject().get("role").getAsString());
+    }
+
+    @Test
+    void concurrentWebSessionScopesKeepHistoriesIsolated() throws Exception {
+        try (ChatHistoryStore history = new ChatHistoryStore(HttpClient.newHttpClient(), null);
+             ExecutorService workers = Executors.newFixedThreadPool(2)) {
+            CountDownLatch ready = new CountDownLatch(2);
+            CountDownLatch start = new CountDownLatch(1);
+
+            Future<JsonArray> first = workers.submit(() -> scopedTurn(
+                    history, ready, start, "session-a", "question-a", "answer-a"));
+            Future<JsonArray> second = workers.submit(() -> scopedTurn(
+                    history, ready, start, "session-b", "question-b", "answer-b"));
+
+            ready.await();
+            start.countDown();
+            assertTurn(first.get(), "question-a", "answer-a");
+            assertTurn(second.get(), "question-b", "answer-b");
+        }
+    }
+
+    private static JsonArray scopedTurn(ChatHistoryStore history, CountDownLatch ready,
+                                        CountDownLatch start, String sessionId,
+                                        String question, String answer) throws Exception {
+        try (ChatHistoryStore.SessionScope ignored = history.bindSession("web-user", sessionId)) {
+            ready.countDown();
+            start.await();
+            history.add("web-user", question, answer);
+            JsonArray messages = new JsonArray();
+            history.addHistoryMessages(messages, "web-user");
+            return messages;
+        }
+    }
+
+    private static void assertTurn(JsonArray messages, String question, String answer) {
+        assertEquals(2, messages.size());
+        assertEquals(question, messages.get(0).getAsJsonObject().get("content").getAsString());
+        assertEquals(answer, messages.get(1).getAsJsonObject().get("content").getAsString());
     }
 
     @SuppressWarnings("unchecked")

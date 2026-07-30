@@ -6,11 +6,6 @@ public final class CommandRouter {
         if (message == null || message.isBlank()) return CommandType.NONE;
         String text = message.strip();
 
-        if ("1".equals(text)) return CommandType.NEW_SESSION;
-        if ("2".equals(text)) return CommandType.SHOW_MEMORY;
-        if ("3".equals(text)) return CommandType.SHOW_TASK;
-        if ("4".equals(text)) return CommandType.SHOW_PLAN;
-
         if (text.matches("\\u65B0\\u804A\\u5929|\\u65B0\\u4F1A\\u8BDD|\\u91CD\\u65B0\\u5F00\\u59CB|\\u91CD\\u7F6E\\u4F1A\\u8BDD|/new")) {
             return CommandType.NEW_SESSION;
         }

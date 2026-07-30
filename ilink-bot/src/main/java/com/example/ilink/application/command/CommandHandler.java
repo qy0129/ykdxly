@@ -11,7 +11,15 @@ import com.example.ilink.capabilities.planning.TaskPlan;
 import com.example.ilink.capabilities.planning.TodoService;
 import com.example.ilink.platform.persistence.MySqlStore;
 
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 public final class CommandHandler {
+
+    private static final Pattern EXPLICIT_SESSION_SWITCH = Pattern.compile(
+            "(?:切换会话|切换聊天)\\s*(\\d+)");
+    private static final Pattern SESSION_LIST_REQUEST = Pattern.compile(
+            "(?:查看历史聊天|历史聊天|历史会话|切换会话|切换聊天)");
 
     private final SessionService sessionService;
     private final MemoryService memoryService;
@@ -19,15 +27,18 @@ public final class CommandHandler {
     private final PlanSessionStore planSessions;
     private final WelcomeHandler welcomeHandler;
     private final ReplySender replySender;
+    private final UserSessionStore sessions;
+    private final SessionSelectionContext sessionSelection = new SessionSelectionContext();
 
     public CommandHandler(SessionService sessionService,
-                          UserSessionStore ignoredSessions,
+                          UserSessionStore sessions,
                           MemoryService memoryService,
                           TodoService todoService,
                           PlanSessionStore planSessions,
                           WelcomeHandler welcomeHandler,
                           ReplySender replySender) {
         this.sessionService = sessionService;
+        this.sessions = sessions;
         this.memoryService = memoryService;
         this.todoService = todoService;
         this.planSessions = planSessions;
@@ -35,7 +46,9 @@ public final class CommandHandler {
         this.replySender = replySender;
     }
 
-    public void handle(ReplyChannel client, String userId, CommandType command) throws Exception {
+    public void handle(ReplyChannel client, String userId, CommandType command,
+                       boolean allowBareSessionSelection) throws Exception {
+        if (command != CommandType.LIST_SESSIONS) sessionSelection.clear(userId);
         switch (command) {
             case NEW_SESSION -> {
                 sessionService.createNewSession(userId);
@@ -48,19 +61,34 @@ public final class CommandHandler {
                 replySender.sendReply(client, userId,
                         plan == null ? "你目前还没有制定计划。" : plan.toDisplayText());
             }
-            case LIST_SESSIONS -> handleListSessions(client, userId);
+            case LIST_SESSIONS -> handleListSessions(client, userId, allowBareSessionSelection);
             case HELP, MENU -> welcomeHandler.sendMenu(client, userId);
             case NONE -> { }
         }
     }
 
-    public boolean trySwitchSession(ReplyChannel client, String userId, String text) throws Exception {
-        java.util.regex.Matcher matcher = java.util.regex.Pattern
-                .compile("(?:切换会话|切换聊天)\\s*(\\d+)")
-                .matcher(text == null ? "" : text.trim());
-        if (!matcher.matches()) return false;
+    public boolean trySwitchSession(ReplyChannel client, String userId, String text,
+                                    boolean allowBareSessionSelection,
+                                    boolean hasPendingBusinessInteraction) throws Exception {
+        String normalized = text == null ? "" : text.trim();
+        Matcher explicit = EXPLICIT_SESSION_SWITCH.matcher(normalized);
+        if (explicit.matches()) {
+            sessionSelection.clear(userId);
+            return switchSession(client, userId, Integer.parseInt(explicit.group(1)));
+        }
+        if (!allowBareSessionSelection) return false;
+        if (normalized.matches("\\d+")) {
+            if (!sessionSelection.permitsBareNumber(userId,
+                    sessions.getCurrentSession(userId).sessionId(), hasPendingBusinessInteraction)) return false;
+            return switchSession(client, userId, Integer.parseInt(normalized));
+        }
+        if (!SESSION_LIST_REQUEST.matcher(normalized).matches()) {
+            sessionSelection.clear(userId);
+        }
+        return false;
+    }
 
-        int index = Integer.parseInt(matcher.group(1));
+    private boolean switchSession(ReplyChannel client, String userId, int index) throws Exception {
         java.util.List<MySqlStore.SessionRow> items = sessionService.listSessions(userId);
         if (index < 1 || index > items.size()) {
             replySender.sendReply(client, userId, "没有这个会话序号，请先查看历史会话。");
@@ -69,6 +97,7 @@ public final class CommandHandler {
 
         MySqlStore.SessionRow target = items.get(index - 1);
         if (sessionService.switchSession(userId, target.sessionId())) {
+            sessionSelection.clear(userId);
             String title = target.title() == null || target.title().isBlank()
                     ? "聊天 " + index : target.title();
             replySender.sendReply(client, userId, "已切换到会话：" + title);
@@ -78,7 +107,8 @@ public final class CommandHandler {
         return true;
     }
 
-    private void handleListSessions(ReplyChannel client, String userId) throws Exception {
+    private void handleListSessions(ReplyChannel client, String userId,
+                                    boolean allowBareSessionSelection) throws Exception {
         java.util.List<MySqlStore.SessionRow> items = sessionService.listSessions(userId);
         if (items.isEmpty()) {
             replySender.sendReply(client, userId, "暂无历史会话。");
@@ -91,7 +121,12 @@ public final class CommandHandler {
             text.append(i + 1).append(". ").append(title)
                     .append("ACTIVE".equals(row.status()) ? " [当前]" : "").append('\n');
         }
-        text.append("\n发送“切换会话 序号”可继续历史聊天。");
+        if (allowBareSessionSelection) {
+            sessionSelection.open(userId, sessions.getCurrentSession(userId).sessionId());
+            text.append("\n5 分钟内回复会话序号，或发送“切换会话 序号”可继续历史聊天。");
+        } else {
+            text.append("\n请使用左侧会话列表切换聊天。");
+        }
         replySender.sendReply(client, userId, text.toString());
     }
 }

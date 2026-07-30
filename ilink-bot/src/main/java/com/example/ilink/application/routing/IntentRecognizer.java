@@ -1,6 +1,7 @@
 package com.example.ilink.application.routing;
 
 import com.example.ilink.application.messaging.UserRequestHandler;
+import com.example.ilink.application.messaging.RequestLogContext;
 
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.application.conversation.ChatHistoryStore;
@@ -64,8 +65,9 @@ public final class IntentRecognizer {
             try {
                 result = parseJsonObject(content);
             } catch (IllegalArgumentException firstError) {
-                System.err.println("[意图识别] 首次返回格式异常，自动重试："
-                        + summarizeModelOutput(content));
+                System.err.println(RequestLogContext.prefix("意图识别")
+                        + " result=invalid_format retry=true model_output="
+                        + RequestLogContext.preview(summarizeModelOutput(content)));
                 content = requestRoute(buildRequestBody(userId, userMessage, context, false, true));
                 result = parseJsonObject(content);
             }
@@ -102,7 +104,8 @@ public final class IntentRecognizer {
             appendLearningResources(userMessage, actions);
             return new IntentPlan(actions);
         } catch (Exception e) {
-            System.err.println("[意图识别] 识别失败：" + e.getMessage());
+            System.err.println(RequestLogContext.prefix("意图识别")
+                    + " result=failed error=" + RequestLogContext.error(e));
             return fallbackChatPlan(userMessage);
         }
     }
@@ -204,8 +207,9 @@ public final class IntentRecognizer {
     /** 记录被规则层纠正的模型意图，方便复盘误判而不输出完整用户上下文。 */
     private void logCorrection(String modelIntent, String normalizedIntent, String actionText) {
         if (!modelIntent.equals(normalizedIntent)) {
-            System.out.println("[意图校验] " + modelIntent + " -> " + normalizedIntent
-                    + "，动作=" + actionText);
+            System.out.println(RequestLogContext.prefix("意图校验") + " model=" + modelIntent
+                    + " normalized=" + normalizedIntent
+                    + " action=" + RequestLogContext.preview(actionText));
         }
     }
 

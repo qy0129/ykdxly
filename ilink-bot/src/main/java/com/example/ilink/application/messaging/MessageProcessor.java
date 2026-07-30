@@ -22,6 +22,7 @@ import java.nio.file.Path;
 import java.util.Base64;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 
 /** 处理一条已经适配的入站消息。 */
 public final class MessageProcessor {
@@ -68,9 +69,13 @@ public final class MessageProcessor {
     public void process(AgentContext context, IncomingMessage message) {
         ReplyChannel client = context.replyChannel();
         String userId = context.principalId();
+        String resolvedSessionId = sessionId(context, userId);
         long startedAt = System.nanoTime();
-        try {
-            chatHistory.setUserSessionId(userId, sessions.getCurrentSession(userId).sessionId());
+        ChatHistoryStore.SessionScope historyScope = context.channel() == ChannelType.WEB
+                ? chatHistory.bindSession(userId, context.conversationId()) : () -> { };
+        try (RequestLogContext.Scope logScope = RequestLogContext.ensure(context, resolvedSessionId)) {
+          try (historyScope) {
+            chatHistory.setUserSessionId(userId, resolvedSessionId);
             client.startTyping(userId);
             List<MessagePart> parts = message.parts();
             if (parts.isEmpty()) return;
@@ -110,9 +115,14 @@ public final class MessageProcessor {
                 return;
             }
 
-            System.out.println("[" + userId + "] [未知消息类型]");
+            System.out.println(RequestLogContext.prefix("消息接收") + " type=unknown");
         } catch (Exception error) {
-            System.err.println("处理消息异常: " + error.getMessage());
+            if (Thread.currentThread().isInterrupted() || error instanceof CancellationException) {
+                throw error instanceof CancellationException cancellation
+                        ? cancellation : new CancellationException("Message processing interrupted");
+            }
+            System.err.println(RequestLogContext.prefix("消息异常")
+                    + " error=" + RequestLogContext.error(error));
             try {
                 replySender.sendReply(client, userId, "网络波动了，请再发一次～");
             } catch (Exception ignored) {
@@ -120,8 +130,9 @@ public final class MessageProcessor {
         } finally {
             long elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000;
             if (elapsedMillis >= 1_000) {
-                System.out.println("[Performance] user=" + userId + ", message_ms=" + elapsedMillis);
+                System.out.println(RequestLogContext.prefix("性能") + " message_ms=" + elapsedMillis);
             }
+          }
         }
     }
 
@@ -241,18 +252,28 @@ public final class MessageProcessor {
     private void processText(AgentContext context, String text) throws Exception {
         if (text == null || text.isBlank()) return;
         String userId = context.principalId();
-        System.out.println("[" + userId + "] " + text);
-        if (commandHandler.trySwitchSession(context.replyChannel(), userId, text)) return;
+        System.out.println(RequestLogContext.prefix("消息接收") + " type=text chars=" + text.length()
+                + " preview=" + RequestLogContext.preview(text));
+        boolean allowBareSessionSelection = context.channel() == ChannelType.WECHAT;
+        boolean hasPendingBusinessInteraction = capabilityDispatcher.hasPendingInteraction(userId);
+        if (commandHandler.trySwitchSession(context.replyChannel(), userId, text,
+                allowBareSessionSelection, hasPendingBusinessInteraction)) return;
         CommandType commandType = commandRouter.route(text);
         if (commandType != CommandType.NONE) {
-            commandHandler.handle(context.replyChannel(), userId, commandType);
+            commandHandler.handle(context.replyChannel(), userId, commandType, allowBareSessionSelection);
             return;
         }
-        String sessionId = sessions.getCurrentSession(userId).sessionId();
+        String sessionId = sessionId(context, userId);
         chatHistory.setUserSessionId(userId, sessionId);
         chatHistory.addUserMessage(userId, text);
         memoryExtractor.extract(userId, text);
         capabilityDispatcher.dispatch(context, text);
+    }
+
+    private String sessionId(AgentContext context, String userId) {
+        return context.channel() == ChannelType.WEB && context.conversationId() != null
+                && !context.conversationId().isBlank()
+                ? context.conversationId() : sessions.getCurrentSession(userId).sessionId();
     }
 
     private static String imageAnalysisPreview(String analysis) {

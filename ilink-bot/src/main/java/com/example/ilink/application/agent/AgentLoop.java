@@ -1,6 +1,8 @@
 package com.example.ilink.application.agent;
 
 import com.example.ilink.application.messaging.AgentContext;
+import com.example.ilink.application.messaging.AgentEvent;
+import com.example.ilink.application.messaging.RequestLogContext;
 import com.example.ilink.application.routing.BotSkill;
 import com.example.ilink.application.routing.SkillRegistry;
 import com.example.ilink.application.tooling.ToolContext;
@@ -20,7 +22,9 @@ import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 
 /**
  * 工具调用循环：模型查看全部已注册工具和 Skills，获取工具结果后再决定下一步。
@@ -48,11 +52,12 @@ public final class AgentLoop {
     public boolean shouldAttempt(String text) {
         if (text == null || text.isBlank()) return false;
         String value = text.toLowerCase(Locale.ROOT);
-        return value.matches(".*(天气|计算|换算|汇率|倒计时|画图|图片|文档|语音|计划|待办|日历|路线|打车|外卖|快递|搜索|新闻|邮箱|播放|整理|生成|转换).*" );
+        return value.matches(".*(天气|计算|换算|汇率|倒计时|画图|图片|文档|文件|电脑|工作空间|语音|计划|待办|日历|路线|打车|外卖|快递|搜索|新闻|邮箱|播放|整理|生成|转换|修改).*" );
     }
 
     public Outcome run(AgentContext context, String request) {
         if (!shouldAttempt(request)) return Outcome.delegate("普通对话");
+        publishProgress(context, "正在分析任务", Map.of("phase", "analysis", "status", "running"));
         try {
             JsonArray messages = new JsonArray();
             messages.add(message("system", systemPrompt()));
@@ -60,6 +65,8 @@ public final class AgentLoop {
             List<Step> steps = new ArrayList<>();
 
             for (int step = 0; step < MAX_STEPS; step++) {
+                publishProgress(context, "正在规划下一步", Map.of(
+                        "phase", "model", "step", step + 1, "status", "running"));
                 JsonObject response = call(messages, true);
                 JsonObject assistant = response.getAsJsonArray("choices").get(0).getAsJsonObject()
                         .getAsJsonObject("message");
@@ -75,7 +82,15 @@ public final class AgentLoop {
                     JsonObject call = item.getAsJsonObject();
                     JsonObject function = call.getAsJsonObject("function");
                     String name = string(function, "name");
-                    ToolResult result = execute(context, name, string(function, "arguments"));
+                    String arguments = string(function, "arguments");
+                    long toolStartedAt = System.nanoTime();
+                    publishProgress(context, "正在使用工具：" + name, Map.of(
+                            "phase", "tool", "step", step + 1, "tool", name, "status", "running"));
+                    ToolResult result = execute(context, name, arguments);
+                    publishProgress(context, (result.success() ? "工具完成：" : "工具失败：") + name, Map.of(
+                            "phase", "tool", "step", step + 1, "tool", name,
+                            "status", result.success() ? "completed" : "failed",
+                            "elapsedMs", (System.nanoTime() - toolStartedAt) / 1_000_000L));
                     steps.add(new Step(name, result.success(), truncate(result.output())));
                     JsonObject toolMessage = message("tool", toolOutput(result));
                     toolMessage.addProperty("tool_call_id", string(call, "id"));
@@ -87,15 +102,35 @@ public final class AgentLoop {
                     ? Outcome.delegate("工具执行完成但没有生成最终答复")
                     : Outcome.completed(finalReply, steps);
         } catch (Exception error) {
+            if (Thread.currentThread().isInterrupted() || error instanceof CancellationException
+                    || error instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+                throw new CancellationException("Agent task interrupted");
+            }
             System.err.println("[AgentLoop] " + error.getMessage());
             return Outcome.delegate("调用失败");
         }
     }
 
+    private void publishProgress(AgentContext context, String content, Map<String, Object> metadata) {
+        try {
+            context.replyChannel().publish(context.principalId(),
+                    new AgentEvent(AgentEvent.Type.TOOL_ACTIVITY, content, metadata));
+        } catch (CancellationException error) {
+            throw error;
+        } catch (Exception error) {
+            if (Thread.currentThread().isInterrupted()) {
+                throw new CancellationException("Agent task interrupted");
+            }
+        }
+    }
+
     private ToolResult execute(AgentContext context, String name, String rawArguments) {
         if ("select_skill".equals(name)) {
+            logToolCall(name, rawArguments);
             try {
                 String skillName = JsonParser.parseString(rawArguments).getAsJsonObject().get("skill").getAsString();
+                System.out.println(RequestLogContext.prefix("意图") + " skill=" + skillName);
                 return skills.names().contains(skillName)
                         ? ToolResult.success("已选择 Skill：" + skillName)
                         : ToolResult.failure("未知或已禁用 Skill：" + skillName);
@@ -103,8 +138,14 @@ public final class AgentLoop {
                 return ToolResult.failure("Skill 参数不合法");
             }
         }
-        if (tools.find(name) == null) return ToolResult.failure("未注册工具：" + name);
-        if (isDeliveryTool(name)) return ToolResult.failure("该工具需要现有工作流投递结果，请委托工作流处理。");
+        if (tools.find(name) == null) {
+            logToolCall(name, rawArguments);
+            return ToolResult.failure("未注册工具：" + name);
+        }
+        if (isDeliveryTool(name)) {
+            logToolCall(name, rawArguments);
+            return ToolResult.failure("该工具需要现有工作流投递结果，请委托工作流处理。");
+        }
         try {
             JsonObject arguments = rawArguments == null || rawArguments.isBlank()
                     ? new JsonObject() : JsonParser.parseString(rawArguments).getAsJsonObject();
@@ -112,6 +153,11 @@ public final class AgentLoop {
         } catch (Exception error) {
             return ToolResult.failure("参数不合法：" + error.getMessage());
         }
+    }
+
+    private void logToolCall(String name, String rawArguments) {
+        System.out.println(RequestLogContext.prefix("工具") + " name=" + name
+                + " args=" + RequestLogContext.preview(rawArguments));
     }
 
     /** 工具轮次结束后只允许模型总结，避免把内部执行步骤直接当成用户答复。 */
@@ -151,7 +197,8 @@ public final class AgentLoop {
         StringBuilder prompt = new StringBuilder("你是工具调用调度器。每轮先检查上一轮工具结果是否满足用户请求；"
                 + "不满足时选择下一个工具或修正参数，满足时给出简洁最终答复。"
                 + "全部已注册工具均可被考虑。图片、音频、文件、下单、外发消息等需要交付或确认的操作不要直接调用，"
-                + "只输出 DELEGATE 交回现有工作流。没有合适工具时也只输出 DELEGATE。"
+                + "只输出 DELEGATE 交回现有工作流。唯一例外是 workspace_file：它可以搜索、读取，或准备修改/发送，"
+                + "但准备操作后必须要求用户明确回复“确认修改”或“确认发送”，绝不能代替用户确认。没有合适工具时也只输出 DELEGATE。"
                 + "调用业务工具前，先调用 select_skill 选择最匹配的 Skill。\n可用 Skills：\n");
         for (BotSkill skill : skills.enabledSkills()) {
             prompt.append("- ").append(skill.name()).append(": ").append(skill.description()).append('\n');

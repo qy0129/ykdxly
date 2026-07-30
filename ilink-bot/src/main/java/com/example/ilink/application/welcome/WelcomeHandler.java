@@ -9,14 +9,15 @@ public final class WelcomeHandler {
     private static final String MENU_TEXT = """
             🤖 ClawBot 助手
 
-            请选择：
+            可以直接发送：
 
-            1️⃣ 新聊天
-            2️⃣ 我的记忆
-            3️⃣ 我的任务
-            4️⃣ 查看计划
+            • 新会话
+            • 我的记忆
+            • 我的任务
+            • 查看计划
+            • 切换会话
 
-            回复数字即可""";
+            数字只用于当前业务或会话列表中的选择。""";
 
     private static final String WELCOME_TEXT = """
             欢迎使用 ClawBot 助手～ 🎉

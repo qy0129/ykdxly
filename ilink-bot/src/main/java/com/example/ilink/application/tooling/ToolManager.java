@@ -1,5 +1,6 @@
 package com.example.ilink.application.tooling;
 
+import com.example.ilink.application.messaging.RequestLogContext;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
@@ -60,21 +61,23 @@ public final class ToolManager {
     public ToolResult execute(String name, ToolContext context, JsonObject arguments) {
         Tool tool = find(name);
         if (tool == null) {
-            System.err.println("[工具调用] 未找到工具：" + name);
+            System.err.println(RequestLogContext.prefix("工具") + " missing=" + name);
             return ToolResult.failure("未找到工具：" + name);
         }
 
         ToolDefinition definition = tool.definition();
-        System.out.println("[工具调用] 工具=" + definition.displayName()
-                + "，参数=" + arguments);
+        System.out.println(RequestLogContext.prefix("工具") + " name=" + definition.name()
+                + " label=" + definition.displayName()
+                + " args=" + RequestLogContext.preview(arguments == null ? "{}" : arguments.toString()));
         try {
             ToolResult result = tool.execute(context, arguments);
             String status = result.success() ? "成功" : "失败";
-            System.out.println("[工具结果] " + definition.displayName() + "执行" + status);
+            System.out.println(RequestLogContext.prefix("工具结果") + " name=" + definition.name()
+                    + " status=" + status);
             return result;
         } catch (Exception e) {
-            System.err.println("[工具结果] " + definition.displayName()
-                    + "执行失败：" + e.getMessage());
+            System.err.println(RequestLogContext.prefix("工具结果") + " name=" + definition.name()
+                    + " status=失败 error=" + RequestLogContext.error(e));
             return ToolResult.failure(e.getMessage());
         }
     }
