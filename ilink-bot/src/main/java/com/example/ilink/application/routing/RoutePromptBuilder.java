@@ -35,6 +35,34 @@ public final class RoutePromptBuilder {
                 """ + contextBlock(context);
     }
 
+    /** 一次完成原子需求拆分和能力分配，减少普通请求的模型往返次数。 */
+    public String buildUnifiedPrompt(RoutingContext context) {
+        StringBuilder prompt = new StringBuilder("""
+                你是 Personal Executive Agent 的结构化路由器，只负责理解用户本轮输入并输出动作，不回答问题。
+                一句话中不同动作、不同对象或不同时间目标必须拆成多个 actions；不能遗漏后文，也不能合并多个待办。
+                每个 action_text 只保留当前原子需求，同一事项的地点、时间、品牌和数量仍属于同一个动作。
+                如果用户回复“需要、好的、可以、继续”，只有上下文存在明确等待确认状态时才能承接，禁止创建标题为“需要”的待办。
+                “这次用语音”只设置本轮 reply_mode；不得修改后续消息的回复模式。
+                地点只能来自本轮输入或已确认位置。打车缺少起点时可使用已确认位置，禁止猜测实时 GPS。
+                每个动作必须有唯一 requirement_id。最多12项，只输出 JSON 对象。
+
+                可用能力：
+                """);
+        for (CapabilityDefinition capability : capabilities.all()) {
+            prompt.append("- ").append(capability.name()).append(": ")
+                    .append(capability.description());
+            if (!capability.parameterHint().isBlank()) {
+                prompt.append("；参数=").append(capability.parameterHint());
+            }
+            prompt.append('\n');
+        }
+        prompt.append("\n可选人设：").append(String.join("、", Personas.getAll().keySet())).append("。\n");
+        prompt.append(parameterRules());
+        prompt.append("\n复合待办示例：输入‘明天10点交周报，下午3点给客户打电话’，actions 必须有两个 todo 动作，分别保留各自 action_text 和时间。\n");
+        prompt.append(contextBlock(context));
+        return prompt.toString();
+    }
+
     public String buildAssignmentPrompt(RoutingContext context, String originalRequest,
                                         List<AtomicRequirement> requirements) {
         StringBuilder prompt = new StringBuilder("""

@@ -19,6 +19,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -954,6 +955,92 @@ public final class MySqlStore implements AutoCloseable {
         }
     }
 
+    /** 原子抢占一条入站消息；返回 ACCEPTED、PROCESSING、COMPLETED 或 UNAVAILABLE。 */
+    public String claimInboundMessage(String channel, String accountId, String messageId,
+                                      String userId, Instant leaseUntil) {
+        if (!isAvailable()) return "UNAVAILABLE";
+        String insert = "INSERT IGNORE INTO inbound_message_receipts "
+                + "(bot_id, channel_name, account_id, message_id, user_id, status, lease_until) "
+                + "VALUES (?, ?, ?, ?, ?, 'PROCESSING', ?)";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(insert)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, channel);
+            statement.setString(3, accountId);
+            statement.setString(4, messageId);
+            statement.setString(5, userId);
+            statement.setTimestamp(6, Timestamp.from(leaseUntil));
+            if (statement.executeUpdate() == 1) return "ACCEPTED";
+        } catch (SQLException error) {
+            logFailure("抢占入站消息", error);
+            return "UNAVAILABLE";
+        }
+
+        String reclaim = "UPDATE inbound_message_receipts SET lease_until=?, updated_at=CURRENT_TIMESTAMP "
+                + "WHERE bot_id=? AND channel_name=? AND account_id=? AND message_id=? "
+                + "AND status='PROCESSING' AND lease_until<CURRENT_TIMESTAMP";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(reclaim)) {
+            statement.setTimestamp(1, Timestamp.from(leaseUntil));
+            statement.setString(2, Config.DATABASE_BOT_ID);
+            statement.setString(3, channel);
+            statement.setString(4, accountId);
+            statement.setString(5, messageId);
+            if (statement.executeUpdate() == 1) return "ACCEPTED";
+        } catch (SQLException error) {
+            logFailure("重新抢占入站消息", error);
+            return "UNAVAILABLE";
+        }
+
+        String query = "SELECT status FROM inbound_message_receipts "
+                + "WHERE bot_id=? AND channel_name=? AND account_id=? AND message_id=?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(query)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, channel);
+            statement.setString(3, accountId);
+            statement.setString(4, messageId);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() && "COMPLETED".equals(result.getString("status"))
+                        ? "COMPLETED" : "PROCESSING";
+            }
+        } catch (SQLException error) {
+            logFailure("读取入站消息状态", error);
+            return "UNAVAILABLE";
+        }
+    }
+
+    public void completeInboundMessage(String channel, String accountId, String messageId) {
+        updateInboundMessageStatus(channel, accountId, messageId, "COMPLETED");
+    }
+
+    public void releaseInboundMessage(String channel, String accountId, String messageId) {
+        if (!isAvailable()) return;
+        String sql = "DELETE FROM inbound_message_receipts WHERE bot_id=? AND channel_name=? "
+                + "AND account_id=? AND message_id=? AND status='PROCESSING'";
+        try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, channel);
+            statement.setString(3, accountId);
+            statement.setString(4, messageId);
+            statement.executeUpdate();
+        } catch (SQLException error) { logFailure("释放入站消息", error); }
+    }
+
+    private void updateInboundMessageStatus(String channel, String accountId, String messageId, String status) {
+        if (!isAvailable()) return;
+        String sql = "UPDATE inbound_message_receipts SET status=?, updated_at=CURRENT_TIMESTAMP "
+                + "WHERE bot_id=? AND channel_name=? AND account_id=? AND message_id=?";
+        try (Connection connection = openConnection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, status);
+            statement.setString(2, Config.DATABASE_BOT_ID);
+            statement.setString(3, channel);
+            statement.setString(4, accountId);
+            statement.setString(5, messageId);
+            statement.executeUpdate();
+        } catch (SQLException error) { logFailure("更新入站消息状态", error); }
+    }
+
     /** 读取用户的全部计划，活动计划和最近更新的计划排在前面。 */
     public List<TaskPlan> loadTaskPlans(String userId) {
         if (!isAvailable()) return List.of();
@@ -1197,6 +1284,20 @@ public final class MySqlStore implements AutoCloseable {
                     + "last_used_at DATETIME NULL,"
                     + "UNIQUE KEY uk_user_memory_key (bot_id, user_id, memory_key),"
                     + "INDEX idx_user_memories (bot_id, user_id, status, updated_at)"
+                    + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+            statement.executeUpdate("CREATE TABLE IF NOT EXISTS inbound_message_receipts ("
+                    + "id BIGINT PRIMARY KEY AUTO_INCREMENT,"
+                    + "bot_id VARCHAR(128) NOT NULL,"
+                    + "channel_name VARCHAR(32) NOT NULL,"
+                    + "account_id VARCHAR(128) NOT NULL,"
+                    + "message_id VARCHAR(256) NOT NULL,"
+                    + "user_id VARCHAR(255) NOT NULL,"
+                    + "status VARCHAR(32) NOT NULL,"
+                    + "lease_until TIMESTAMP NULL,"
+                    + "created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+                    + "updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,"
+                    + "UNIQUE KEY uk_inbound_message (bot_id, channel_name, account_id, message_id),"
+                    + "INDEX idx_inbound_status (status, lease_until)"
                     + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
             statement.executeUpdate("CREATE TABLE IF NOT EXISTS knowledge_documents ("
                     + "id VARCHAR(64) PRIMARY KEY,"

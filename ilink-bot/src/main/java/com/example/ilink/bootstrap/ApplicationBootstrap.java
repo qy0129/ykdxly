@@ -3,6 +3,7 @@ package com.example.ilink.bootstrap;
 import com.example.ilink.adapter.inbound.http.DailyDashboardServer;
 import com.example.ilink.adapter.inbound.http.AutomationConsoleServer;
 import com.example.ilink.adapter.inbound.http.ExpressHttpServer;
+import com.example.ilink.adapter.inbound.http.LocationHttpServer;
 import com.example.ilink.adapter.inbound.http.SessionManagementServer;
 import com.example.ilink.adapter.inbound.wechat.LoginQrPage;
 import com.example.ilink.adapter.inbound.wechat.MessageDispatcher;
@@ -29,6 +30,7 @@ import com.example.ilink.application.executive.ExecutionLogService;
 import com.example.ilink.application.executive.ExecutiveEngine;
 import com.example.ilink.application.executive.ExecutiveRuntime;
 import com.example.ilink.application.executive.ExecutiveScheduler;
+import com.example.ilink.application.executive.ExecutiveTask;
 import com.example.ilink.application.executive.ExecutiveTaskService;
 import com.example.ilink.application.executive.ExecutiveTaskStore;
 import com.example.ilink.application.executive.NotificationOutbox;
@@ -121,6 +123,9 @@ import com.example.ilink.capabilities.mail.QqMailService;
 import com.example.ilink.capabilities.media.BangumiService;
 import com.example.ilink.capabilities.media.LrcLibService;
 import com.example.ilink.capabilities.media.MediaKnowledgeService;
+import com.example.ilink.capabilities.radar.InterestRadarService;
+import com.example.ilink.capabilities.radar.InterestRadarStore;
+import com.example.ilink.capabilities.radar.BilibiliVideoContentService;
 import com.example.ilink.capabilities.media.MusicBrainzService;
 import com.example.ilink.capabilities.knowledge.KnowledgeQueryService;
 import com.example.ilink.capabilities.knowledge.tool.KnowledgeQueryTool;
@@ -137,9 +142,12 @@ import com.example.ilink.capabilities.life.LifeStateStore;
 import com.example.ilink.capabilities.life.PlanReminderService;
 import com.example.ilink.capabilities.life.StudyPlanBuilder;
 import com.example.ilink.capabilities.life.TaskCheckinService;
+import com.example.ilink.capabilities.location.LocationLinkParser;
+import com.example.ilink.capabilities.location.LocationService;
 import com.example.ilink.capabilities.planning.TaskDecompositionTool;
 import com.example.ilink.capabilities.planning.TaskPlanTool;
 import com.example.ilink.capabilities.planning.TaskPlanningService;
+import com.example.ilink.capabilities.planning.TaskPlan;
 import com.example.ilink.capabilities.planning.TodoService;
 import com.example.ilink.capabilities.planning.TodoStore;
 import com.example.ilink.capabilities.travel.AmapService;
@@ -167,6 +175,9 @@ import com.example.ilink.platform.sdk.SdkResumeContextStore;
 import java.net.http.HttpClient;
 import java.net.URI;
 import java.time.Duration;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 /** 创建应用服务、工具、路由和外部适配器。 */
@@ -182,6 +193,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
     private final SessionManagementServer sessionManagementServer;
     private final ExecutiveRuntime executiveRuntime;
     private final AutomationConsoleServer automationConsoleServer;
+    private final LocationHttpServer locationHttpServer;
 
     private ApplicationBootstrap(MessageDispatcher messageDispatcher,
                                  WechatMessageAdapter messageAdapter,
@@ -192,7 +204,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
                                  MySqlStore database,
                                  SessionManagementServer sessionManagementServer,
                                  ExecutiveRuntime executiveRuntime,
-                                 AutomationConsoleServer automationConsoleServer) {
+                                 AutomationConsoleServer automationConsoleServer,
+                                 LocationHttpServer locationHttpServer) {
         this.messageDispatcher = messageDispatcher;
         this.messageAdapter = messageAdapter;
         this.messageExecutor = messageExecutor;
@@ -203,6 +216,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         this.sessionManagementServer = sessionManagementServer;
         this.executiveRuntime = executiveRuntime;
         this.automationConsoleServer = automationConsoleServer;
+        this.locationHttpServer = locationHttpServer;
     }
 
     public static ApplicationBootstrap create() {
@@ -244,6 +258,10 @@ public final class ApplicationBootstrap implements AutoCloseable {
         FoodOrderService foodOrderService = new FoodOrderService(httpClient);
         MediaStore mediaStore = new MediaStore();
         AmapService amapService = new AmapService(httpClient);
+        LocationService locationService = new LocationService(
+                amapService, sessions, new LocationLinkParser(httpClient));
+        LocationHttpServer locationHttpServer = new LocationHttpServer(locationService);
+        locationHttpServer.start();
         ExpressPageService expressPageService = new ExpressPageService();
         ExpressHttpServer expressHttpServer = new ExpressHttpServer(expressPageService);
         AutomationAnalysisService automationAnalysis = new AutomationAnalysisService(httpClient);
@@ -315,6 +333,40 @@ public final class ApplicationBootstrap implements AutoCloseable {
         ExecutiveRuntime executiveRuntime = new ExecutiveRuntime(
                 executiveStore, executiveTasks, approvalService, executionLogs, notificationOutbox,
                 new ExecutiveScheduler(executiveEngine));
+        InterestRadarService interestRadarService = new InterestRadarService(
+                new InterestRadarStore(MySqlStore.getInstance()),
+                newsSearchService::search,
+                (query, limit) -> bilibiliSearchService.search(query, "study", limit),
+                chatService::analyzeExternalMaterial,
+                Config.INTEREST_RADAR_MIN_SCORE,
+                userId -> {
+                    List<String> goals = new ArrayList<>();
+                    TaskPlan activePlan = planSessions.get(userId);
+                    if (activePlan != null) {
+                        boolean complete = !activePlan.tasks().isEmpty()
+                                && activePlan.completedCount() == activePlan.tasks().size();
+                        boolean expired;
+                        try {
+                            expired = LocalDate.parse(activePlan.deadline()).isBefore(LocalDate.now());
+                        } catch (RuntimeException ignored) {
+                            expired = false;
+                        }
+                        if (!complete && !expired) {
+                            if (!activePlan.goal().isBlank()) goals.add(activePlan.goal());
+                            activePlan.tasks().stream()
+                                    .filter(task -> !"completed".equals(task.status()))
+                                    .map(task -> task.title())
+                                    .filter(title -> !title.isBlank()).limit(12).forEach(goals::add);
+                        }
+                    }
+                    executiveRuntime.listTasks(userId).stream()
+                            .filter(task -> !task.status().terminal())
+                            .map(ExecutiveTask::goal).filter(goal -> !goal.isBlank())
+                            .limit(5).forEach(goals::add);
+                    return List.copyOf(goals);
+                },
+                new BilibiliVideoContentService(httpClient)::load,
+                webSearchService::search);
         AutomationWorkflow automationWorkflow = new AutomationWorkflow(
                 executiveRuntime, new AutomationRequestParser(), new AutomationPlanBuilder());
         SkillManager skillManager = SkillManager.loadDefault(toolManager);
@@ -350,7 +402,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         FoodOrderWorkflow foodOrderWorkflow = new FoodOrderWorkflow(
                 sessions, amapService, foodOrderService, replySender);
         TravelWorkflow travelWorkflow = new TravelWorkflow(amapService, calendarService, replySender);
-        TaxiWorkflow taxiWorkflow = new TaxiWorkflow(new DidiMcpClient(), replySender);
+        TaxiWorkflow taxiWorkflow = new TaxiWorkflow(new DidiMcpClient(), replySender, sessions);
         PlanWorkflow planWorkflow = new PlanWorkflow(
                 toolManager, planSessions, chatHistory, replySender, documentService, calendarService);
         LifeWorkflow lifeWorkflow = new LifeWorkflow(
@@ -370,7 +422,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, foodOrderWorkflow,
                 taxiWorkflow, memoryService, todoService,
                 webSearchService, newsSearchService, bilibiliSearchService, mediaKnowledgeService,
-                qqMailService, visualCardWorkflow, executiveRuntime, automationWorkflow);
+                 qqMailService, visualCardWorkflow, executiveRuntime, automationWorkflow,
+                 interestRadarService, locationService);
         MessageProcessor messageProcessor = new MessageProcessor(
                 chatHistory, sessions, audioHistory, documentSessions,
                 audioService, imageService, documentService, memoryService,
@@ -392,15 +445,17 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 messageProcessor, replySender, chatService, calendarService,
                 visualDeckSender, loginBriefingService, welcomeHandler,
                 new DailyDashboardServer(dashboardService), sessionManagementServer,
-                expressHttpServer, expressPageService, executiveRuntime, reflectionService);
+                 expressHttpServer, expressPageService, executiveRuntime, reflectionService,
+                 interestRadarService, locationService);
         AutomationConsoleServer automationConsoleServer = new AutomationConsoleServer(executiveRuntime);
         sessionManagementServer.start();
         automationConsoleServer.start();
         executiveRuntime.start();
         return new ApplicationBootstrap(
                 dispatcher, new WechatMessageAdapter(), new MessageSerialExecutor(),
-                new LoginQrPage(), new SdkResumeContextStore(), chatHistory,
-                MySqlStore.getInstance(), sessionManagementServer, executiveRuntime, automationConsoleServer);
+                 new LoginQrPage(), new SdkResumeContextStore(), chatHistory,
+                 MySqlStore.getInstance(), sessionManagementServer, executiveRuntime, automationConsoleServer,
+                 locationHttpServer);
     }
 
     public MessageDispatcher messageDispatcher() {
@@ -436,6 +491,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
 
     @Override
     public void close() {
+        locationHttpServer.close();
         automationConsoleServer.close();
         executiveRuntime.close();
         sessionManagementServer.close();

@@ -6,6 +6,7 @@ import com.example.ilink.application.messaging.AgentContext;
 
 import com.example.ilink.capabilities.travel.DidiMcpClient;
 import com.example.ilink.application.routing.IntentResult;
+import com.example.ilink.application.conversation.UserSessionStore;
 import com.example.ilink.platform.persistence.MySqlStore;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
@@ -22,14 +23,20 @@ public final class TaxiWorkflow {
 
     private final DidiMcpClient didi;
     private final ReplySender replySender;
+    private final UserSessionStore sessions;
     private final Map<String, PendingTaxi> pendingTaxis = new ConcurrentHashMap<>();
     private final Set<String> loadedUsers = ConcurrentHashMap.newKeySet();
     private final MySqlStore database = MySqlStore.getInstance();
     private final Gson gson = new Gson();
 
     public TaxiWorkflow(DidiMcpClient didi, ReplySender replySender) {
+        this(didi, replySender, null);
+    }
+
+    public TaxiWorkflow(DidiMcpClient didi, ReplySender replySender, UserSessionStore sessions) {
         this.didi = didi;
         this.replySender = replySender;
+        this.sessions = sessions;
     }
 
     public boolean hasPending(String userId) {
@@ -62,13 +69,29 @@ public final class TaxiWorkflow {
             replySender.sendReply(client, userId, "尚未配置滴滴 MCP Key。请在启动环境设置 DIDI_MCP_KEY 后重试。");
             return;
         }
-        String origin = trim(route.travelOrigin());
+        String origin = resolveOrigin(userId, route.travelOrigin());
         String destination = trim(route.travelDestination());
+        String originCity = trim(route.originCity());
+        String destinationCity = trim(route.destinationCity());
+        if (trim(route.travelOrigin()).isBlank() && !origin.isBlank() && sessions != null) {
+            String currentLocation = origin;
+            if (!currentLocation.isBlank()) {
+                if (originCity.isBlank()) originCity = trim(sessions.getCurrentCity(userId));
+                if (destinationCity.isBlank()) destinationCity = originCity;
+                System.out.println("[Taxi] 使用会话当前位置作为起点：" + currentLocation);
+            }
+        }
         if (!origin.isBlank() && !destination.isBlank()) {
-            start(client, userId, origin, destination, route.originCity(), route.destinationCity());
+            start(client, userId, origin, destination, originCity, destinationCity);
             return;
         }
         handleOrderCommand(client, userId, requestText);
+    }
+
+    String resolveOrigin(String userId, String routeOrigin) {
+        String explicit = trim(routeOrigin);
+        if (!explicit.isBlank() || sessions == null) return explicit;
+        return trim(sessions.getCurrentLocation(userId));
     }
 
     public void handlePending(AgentContext context, String text) throws Exception {

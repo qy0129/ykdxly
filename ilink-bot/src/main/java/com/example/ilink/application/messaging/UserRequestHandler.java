@@ -20,6 +20,7 @@ import com.example.ilink.application.conversation.ConversationContext;
 import com.example.ilink.application.conversation.DocumentSessionStore;
 import com.example.ilink.application.conversation.KnowledgeContext;
 import com.example.ilink.application.conversation.UserSessionStore;
+import com.example.ilink.application.conversation.SuggestedActionStore;
 import com.example.ilink.capabilities.chat.ChatService;
 import com.example.ilink.capabilities.automation.AutomationWorkflow;
 import com.example.ilink.capabilities.calculator.CalculatorService;
@@ -27,9 +28,13 @@ import com.example.ilink.capabilities.image.GeneratedImage;
 import com.example.ilink.capabilities.express.ExpressService;
 import com.example.ilink.capabilities.memory.MemoryService;
 import com.example.ilink.capabilities.mail.QqMailService;
+import com.example.ilink.capabilities.location.LocationService;
+import com.example.ilink.capabilities.radar.InterestRadarService;
 import com.example.ilink.capabilities.media.MediaKnowledgeResponse;
 import com.example.ilink.capabilities.media.MediaKnowledgeService;
 import com.example.ilink.capabilities.planning.TodoService;
+import com.example.ilink.capabilities.planning.TodoBatchParser;
+import com.example.ilink.capabilities.planning.TodoDraft;
 import com.example.ilink.capabilities.weather.WeatherLocation;
 import com.example.ilink.capabilities.weather.WeatherService;
 import com.example.ilink.capabilities.documents.DocumentService;
@@ -124,8 +129,13 @@ public final class UserRequestHandler {
     private final VisualCardWorkflow visualCardWorkflow;
     private final ExecutiveRuntime executiveRuntime;
     private final AutomationWorkflow automationWorkflow;
+    private final InterestRadarService interestRadarService;
+    private final LocationService locationService;
     private final ActionPlanExecutor actionPlanExecutor = new ActionPlanExecutor();
     private final CapabilityContractValidator capabilityValidator = new CapabilityContractValidator();
+    private final TodoBatchParser todoBatchParser = new TodoBatchParser();
+    private final SuggestedActionStore suggestedActions = new SuggestedActionStore();
+    private final ThreadLocal<Boolean> executingSuggestedAction = ThreadLocal.withInitial(() -> false);
 
     /** 注入所有业务服务，保持本类只负责请求编排。 */
     public UserRequestHandler(ChatHistoryStore chatHistory, UserSessionStore sessions,
@@ -145,8 +155,9 @@ public final class UserRequestHandler {
                               WebSearchService webSearchService, NewsSearchService newsSearchService,
                               BilibiliSearchService bilibiliSearchService,
                               MediaKnowledgeService mediaKnowledgeService, QqMailService qqMailService,
-                              VisualCardWorkflow visualCardWorkflow,
-                              ExecutiveRuntime executiveRuntime, AutomationWorkflow automationWorkflow) {
+                             VisualCardWorkflow visualCardWorkflow,
+                              ExecutiveRuntime executiveRuntime, AutomationWorkflow automationWorkflow,
+                              InterestRadarService interestRadarService, LocationService locationService) {
         this.chatHistory = chatHistory;
         this.sessions = sessions;
         this.documentSessions = documentSessions;
@@ -177,14 +188,24 @@ public final class UserRequestHandler {
         this.visualCardWorkflow = visualCardWorkflow;
         this.executiveRuntime = executiveRuntime;
         this.automationWorkflow = automationWorkflow;
+        this.interestRadarService = interestRadarService;
+        this.locationService = locationService;
     }
     /** 识别用户意图并调用对应功能处理器。 */
     public void handle(AgentContext agentContext, String text) throws Exception {
         ReplyChannel client = agentContext.replyChannel();
         String userId = agentContext.principalId();
+        if (handleReplyPreference(client, userId, text)) return;
+        if (!executingSuggestedAction.get() && handleSuggestedActionReply(agentContext, text)) return;
+        if (handleLocationRequest(client, userId, text)) return;
         String executiveReply = executiveRuntime.handleCommand(userId, text);
         if (executiveReply != null) {
             replySender.sendReply(client, userId, executiveReply);
+            return;
+        }
+        String radarReply = interestRadarService.handleCommand(userId, text);
+        if (radarReply != null) {
+            replySender.sendReply(client, userId, radarReply);
             return;
         }
         if (automationWorkflow.looksLikeAutomation(text)) {
@@ -314,6 +335,12 @@ public final class UserRequestHandler {
             return;
         }
 
+        // 高频待办请求走本地解析，避免为明确的提醒语句构建完整上下文并调用多轮路由模型。
+        if (looksLikeFastTodo(text)) {
+            handleTodoAction(client, userId, text);
+            return;
+        }
+
         // 根据当前用户的临时状态构造上下文，让意图识别知道用户正在处理什么。
         IntentContext intentContext = new IntentContext(
                 sessions.peekPendingImage(userId) != null,
@@ -360,6 +387,27 @@ public final class UserRequestHandler {
             client.sendText(userId, previous);
             replySender.markSent(userId);
             replySender.rememberText(userId, previous);
+        }
+        return true;
+    }
+
+    /** 地图分享链接和主动重新定位属于确定性输入，不进入大模型路由。 */
+    private boolean handleLocationRequest(ReplyChannel client, String userId, String text) throws Exception {
+        LocationService.LinkUpdate linkUpdate = locationService.updateFromSharedLink(userId, text);
+        if (linkUpdate.recognized()) {
+            replySender.sendReply(client, userId, linkUpdate.message());
+            return true;
+        }
+        String normalized = text == null ? "" : text.trim().replaceAll("[，。！？!?]+$", "");
+        if (!normalized.matches("^(获取我的位置|获取当前位置|更新位置|重新定位|定位我|授权位置)$")) {
+            return false;
+        }
+        String url = locationService.createAuthorizationUrl(userId);
+        if (url.isBlank()) {
+            replySender.sendReply(client, userId,
+                    "定位服务尚未就绪，请检查高德 Key 和 location HTTPS 配置。");
+        } else {
+            replySender.sendReply(client, userId, "请打开链接授权当前位置：\n" + url);
         }
         return true;
     }
@@ -477,7 +525,8 @@ public final class UserRequestHandler {
             replySender.sendReply(client, userId, todoService.cancel(userId, keyword));
             return;
         }
-        if (normalized.matches("^(请)?(帮我)?(添加|新增|创建|记)(一个|个)?待办.*|^待办[：:].*")) {
+        if (normalized.matches("^(请)?(帮我)?(添加|新增|创建|记)(一个|个)?待办.*|^待办[：:].*")
+                || normalized.matches(".*(提醒我|别忘了|记得|记一下).*")) {
             createTodo(client, userId, normalized);
             return;
         }
@@ -609,22 +658,32 @@ public final class UserRequestHandler {
     }
 
     private void createTodo(ReplyChannel client, String userId, String text) throws Exception {
-        LocalDateTime dueAt = DateTimeParser.parse(text);
-        String title = text.replaceFirst("^(请)?(帮我)?(添加|新增|创建|记)(一个|个)?待办[：:，, ]*", "")
-                .replaceFirst("^待办[：:，, ]*", "")
-                .replaceAll("(今天|今日|明天|明日|后天|\\d+天后|本周|这周|下周|下下周|周[一二三四五六日天]|星期[一二三四五六日天])", "")
-                .replaceAll("(?:(?:\\d{4})年)?\\d{1,2}月\\d{1,2}(?:日|号)?", "")
-                .replaceAll("(上午|中午|下午|傍晚|晚上|今晚)?[零一二三四五六七八九十两\\d]{1,3}点(半)?", "")
-                .replaceAll("\\d{1,2}[：:]\\d{2}", "")
-                .replaceAll("[，, ]+", " ").trim();
-        if (title.isBlank()) {
+        List<TodoDraft> drafts = todoBatchParser.parse(text);
+        if (drafts.isEmpty()) {
             replySender.sendReply(client, userId, "请告诉我待办的具体内容。");
             return;
         }
-        var todo = todoService.create(userId, title, dueAt, 30);
-        String dueText = todo.dueAt() == null ? "" : "，时间是"
-                + todo.dueAt().format(DateTimeFormatter.ofPattern("M月d日 HH:mm"));
-        replySender.sendReply(client, userId, "好，已经记到待办里了：" + todo.title() + dueText + "。");
+        List<com.example.ilink.capabilities.planning.TodoItem> created =
+                todoService.createBatch(userId, drafts, 30);
+        StringBuilder reply = new StringBuilder("好，已经记到待办里了：");
+        for (int index = 0; index < created.size(); index++) {
+            var todo = created.get(index);
+            if (index > 0) reply.append('\n');
+            reply.append(index + 1).append(". ").append(todo.title());
+            if (todo.dueAt() != null) {
+                reply.append("（").append(todo.dueAt().format(DateTimeFormatter.ofPattern("M月d日 HH:mm"))).append("）");
+            }
+        }
+        replySender.sendReply(client, userId, reply.toString());
+    }
+
+    private boolean looksLikeFastTodo(String text) {
+        if (text == null || text.isBlank()) return false;
+        String value = text.trim();
+        if (value.matches("^(查看|查询|列出|打开)?(我的)?待办(事项|列表)?$|^我还有什么待办.*")) return true;
+        if (value.matches("^(完成|办完|搞定|取消|删除).*(待办|任务).*")) return true;
+        return value.matches(".*(提醒我|别忘了|记得|记一下|添加待办|新增待办|创建待办|记个待办|安排一个待办).*" )
+                && !value.matches(".*(天气|快递|新闻|打车|外卖|搜索|文件|图片).*" );
     }
 
     private void searchNews(ReplyChannel client, String userId, String text) throws Exception {
@@ -796,7 +855,9 @@ public final class UserRequestHandler {
     /** 把会话、位置、时间和所有等待状态合并成一次路由快照。 */
     private RoutingContext buildRoutingContext(String userId, IntentContext mediaContext, String query) {
         ConversationContext conv = contextManager.buildConversation(userId);
-        KnowledgeContext kn = contextManager.buildKnowledge(userId, query);
+        KnowledgeContext kn = needsKnowledgeContext(query)
+                ? contextManager.buildKnowledge(userId, query)
+                : KnowledgeContext.empty(query);
         Map<String, Boolean> pending = new LinkedHashMap<>();
         pending.put("draw_size", sessions.getPendingDraw(userId) != null);
         pending.put("express", sessions.hasPendingExpress(userId));
@@ -819,14 +880,66 @@ public final class UserRequestHandler {
                 mediaContext, pending);
     }
 
+    private boolean needsKnowledgeContext(String query) {
+        if (query == null || query.isBlank()) return false;
+        return query.matches(".*(根据|结合|参考|文件|文档|资料|知识库|我发的|刚才发的|上面的内容).*" );
+    }
+
     private void sendChatReply(ReplyChannel client, String userId, String text,
                                IntentResult route) throws Exception {
         String reply = chatService.chat(userId, text);
         if (reply == null || reply.isBlank()) reply = "网络波动了，请再发一次～";
+        if (isExecutableOffer(reply, text)) suggestedActions.offer(userId, text);
         chatHistory.add(userId, text, reply);
         replySender.applyReplyMode(userId, route.replyMode());
         System.out.println("[机器人回复] " + reply);
         replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
+    }
+
+    private boolean handleSuggestedActionReply(AgentContext context, String text) throws Exception {
+        String value = text == null ? "" : text.trim();
+        if (value.matches("(不要|不用|不需要|算了|先不用|取消)[。！! ]*")) {
+            SuggestedActionStore.SuggestedAction rejected = suggestedActions.consume(context.principalId());
+            if (rejected == null) return false;
+            replySender.sendReply(context.replyChannel(), context.principalId(), "好，这项建议已取消。");
+            return true;
+        }
+        if (!value.matches("(需要|要|好的|好|可以|行|确定|就这样|帮我做|继续)[。！! ]*")) return false;
+        SuggestedActionStore.SuggestedAction action = suggestedActions.consume(context.principalId());
+        if (action == null) {
+            replySender.sendReply(context.replyChannel(), context.principalId(),
+                    "请告诉我具体需要做什么，我没有找到尚未执行的上一条建议。");
+            return true;
+        }
+        executingSuggestedAction.set(true);
+        try {
+            handle(context, action.requestText());
+        } finally {
+            executingSuggestedAction.remove();
+        }
+        return true;
+    }
+
+    private boolean handleReplyPreference(ReplyChannel client, String userId, String text) throws Exception {
+        String value = text == null ? "" : text.trim();
+        if (value.matches(".*(以后|今后|从现在开始|默认).*(都用|使用|改成)?.*(语音).*(回复|回答)?.*")) {
+            replySender.setDefaultReplyMode(userId, "voice");
+            replySender.sendReply(client, userId, "已将默认回复方式改为语音。", "text", "default");
+            return true;
+        }
+        if (value.matches(".*(以后|今后|从现在开始|默认).*(都用|使用|改成)?.*(文字|文本).*(回复|回答)?.*")) {
+            replySender.setDefaultReplyMode(userId, "text");
+            replySender.sendReply(client, userId, "已将默认回复方式改为文字。", "text", "default");
+            return true;
+        }
+        return false;
+    }
+
+    private boolean isExecutableOffer(String reply, String requestText) {
+        if (reply == null || requestText == null) return false;
+        boolean asks = reply.matches("(?s).*(需要我|要我|是否需要我|要不要我).*(帮|处理|创建|查询|安排|执行).*" );
+        boolean actionable = requestText.matches(".*(提醒|待办|日历|天气|打车|快递|搜索|查询|创建|生成|规划|文件|图片|外卖).*" );
+        return asks && actionable;
     }
 
     /** 当前补充会话结束后继续执行同一段话中尚未完成的动作。 */
@@ -929,15 +1042,34 @@ public final class UserRequestHandler {
                 .filter(action -> "travel_plan".equals(action.route().intent()))
                 .filter(action -> !action.route().travelDepartureTime().isBlank())
                 .findFirst().orElse(null);
-        if (travel == null) return plan;
-        List<IntentAction> actions = plan.actions().stream().filter(action -> {
+        List<IntentAction> actions = travel == null ? plan.actions() : plan.actions().stream().filter(action -> {
             if (!"calendar_event".equals(action.route().intent())
                     || !"create".equals(action.route().calendarAction())) return true;
             String title = action.route().calendarTitle();
             return title == null || (!title.contains(travel.route().travelOrigin())
                     && !title.contains(travel.route().travelDestination()));
         }).toList();
-        return actions.size() == plan.actions().size() ? plan : new IntentPlan(actions);
+
+        List<IntentAction> todoActions = actions.stream()
+                .filter(action -> "todo".equals(action.route().intent())).toList();
+        if (todoActions.size() <= 1) return actions == plan.actions() ? plan : new IntentPlan(actions);
+
+        String mergedText = String.join("，", todoActions.stream().map(IntentAction::requestText).toList());
+        IntentAction firstTodo = todoActions.getFirst();
+        IntentAction merged = new IntentAction(firstTodo.requirementId(), mergedText,
+                todoActions.stream().flatMap(action -> action.dependsOn().stream()).distinct().toList(),
+                firstTodo.route());
+        List<IntentAction> mergedActions = new java.util.ArrayList<>();
+        boolean inserted = false;
+        for (IntentAction action : actions) {
+            if (!"todo".equals(action.route().intent())) {
+                mergedActions.add(action);
+            } else if (!inserted) {
+                mergedActions.add(merged);
+                inserted = true;
+            }
+        }
+        return new IntentPlan(mergedActions);
     }
 
     /** 搜索哔哩哔哩内容；具体视频不可用时服务会返回官方搜索入口。 */

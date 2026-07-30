@@ -1,7 +1,10 @@
 (function () {
     "use strict";
 
-    const state = { data: null, demo: false, dashboardLoading: false, weatherPollTimer: null };
+    const state = {
+        data: null, demo: false, dashboardLoading: false, weatherPollTimer: null,
+        addKind: "todo", addDate: ""
+    };
     const token = location.pathname.split("/").filter(Boolean).at(-1) || "";
     const $ = (id) => document.getElementById(id);
     const weatherBackground = createWeatherBackground($("weather-canvas"));
@@ -298,6 +301,106 @@
         }
     }
 
+    function openAddDrawer(date, kind) {
+        const selectedDate = date || state.data?.date || new Date().toISOString().slice(0, 10);
+        state.addDate = selectedDate;
+        $("add-item-form").reset();
+        $("add-date").value = selectedDate;
+        $("add-date-visible").value = selectedDate;
+        $("add-drawer-date").textContent = selectedDate + " · " + weekdayLabel(selectedDate);
+        setAddKind(kind || "todo");
+        $("planner-drawer-backdrop").hidden = false;
+        document.body.classList.add("drawer-open");
+        requestAnimationFrame(() => $("add-title").focus());
+    }
+
+    function closeAddDrawer() {
+        $("planner-drawer-backdrop").hidden = true;
+        document.body.classList.remove("drawer-open");
+    }
+
+    function setAddKind(kind) {
+        state.addKind = kind === "plan" ? "plan" : "todo";
+        document.querySelectorAll("[data-add-kind]").forEach((button) => {
+            button.classList.toggle("active", button.dataset.addKind === state.addKind);
+        });
+        $("todo-fields").hidden = state.addKind !== "todo";
+        $("plan-fields").hidden = state.addKind !== "plan";
+        $("save-add-item").textContent = state.addKind === "plan" ? "保存计划" : "保存待办";
+    }
+
+    async function submitAddItem(event) {
+        event.preventDefault();
+        const title = $("add-title").value.trim();
+        const date = $("add-date-visible").value;
+        if (!title || !date) return;
+        const button = $("save-add-item");
+        button.disabled = true;
+        const payload = state.addKind === "plan"
+            ? {
+                title: title, date: date,
+                description: $("add-description").value.trim(),
+                estimatedMinutes: Number($("add-duration").value),
+                priority: $("add-priority").value
+            }
+            : {
+                title: title, date: date,
+                time: $("add-time").value,
+                reminderMinutes: Number($("add-reminder").value),
+                priority: $("add-priority").value,
+                notes: $("add-description").value.trim()
+            };
+        if (state.demo) {
+            addDemoItem(payload);
+            closeAddDrawer();
+            showToast(state.addKind === "plan" ? "计划已加入预览" : "待办已加入预览");
+            button.disabled = false;
+            return;
+        }
+        try {
+            const endpoint = state.addKind === "plan" ? "/api/plan-tasks/" : "/api/todos/";
+            const response = await fetch(endpoint + encodeURIComponent(token), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+            if (!response.ok) throw new Error("create failed");
+            closeAddDrawer();
+            showToast(state.addKind === "plan" ? "计划已加入七日计划" : "待办已加入七日计划");
+            await loadDashboard();
+        } catch (error) {
+            showToast("暂时无法保存，请稍后重试");
+        } finally {
+            button.disabled = false;
+        }
+    }
+
+    function addDemoItem(payload) {
+        const day = state.data.days.find((item) => item.date === payload.date) || state.data.days[0];
+        const kind = state.addKind;
+        const item = {
+            id: "demo-added-" + Date.now(),
+            title: payload.title,
+            kind: kind,
+            label: kind === "plan" ? "计划" : "待办",
+            status: "pending",
+            priority: payload.priority || "medium",
+            durationMinutes: kind === "plan" ? payload.estimatedMinutes : 45,
+            time: payload.time || "",
+            interactive: kind === "plan"
+        };
+        day.items.push(item);
+        if (kind === "todo") {
+            state.data.todos.unshift({ id: item.id, title: item.title, dueLabel: "刚刚添加", overdue: false });
+        }
+        render(state.data);
+    }
+
+    function weekdayLabel(value) {
+        const date = new Date(value + "T12:00:00");
+        return ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()];
+    }
+
     function render(data) {
         $("month-name").textContent = data.monthName;
         $("week-number").textContent = data.weekNumber;
@@ -400,6 +503,13 @@
                 track.appendChild(block);
                 timedIndex++;
             });
+            const addButton = document.createElement("button");
+            addButton.className = "day-add-button";
+            addButton.type = "button";
+            addButton.textContent = "＋ 添加";
+            addButton.title = "添加到" + day.weekday + day.dayNumber + "日";
+            addButton.addEventListener("click", () => openAddDrawer(day.date));
+            allDay.appendChild(addButton);
             if (day.today) addCurrentLine(track);
             schedule.append(header, allDay);
             timelines.appendChild(track);
@@ -446,6 +556,12 @@
                 });
                 section.appendChild(items);
             }
+            const addButton = document.createElement("button");
+            addButton.className = "mobile-add-button";
+            addButton.type = "button";
+            addButton.textContent = "＋ 添加到这一天";
+            addButton.addEventListener("click", () => openAddDrawer(day.date));
+            section.appendChild(addButton);
             agenda.appendChild(section);
         });
     }
@@ -606,6 +722,23 @@
     }
 
     $("refresh-button").addEventListener("click", loadDashboard);
+    $("add-item-button").addEventListener("click", () => openAddDrawer());
+    $("close-add-drawer").addEventListener("click", closeAddDrawer);
+    $("planner-drawer-backdrop").addEventListener("click", (event) => {
+        if (event.target.id === "planner-drawer-backdrop") closeAddDrawer();
+    });
+    document.querySelectorAll("[data-add-kind]").forEach((button) => {
+        button.addEventListener("click", () => setAddKind(button.dataset.addKind));
+    });
+    $("add-date-visible").addEventListener("change", (event) => {
+        state.addDate = event.target.value;
+        $("add-date").value = event.target.value;
+        $("add-drawer-date").textContent = event.target.value + " · " + weekdayLabel(event.target.value);
+    });
+    $("add-item-form").addEventListener("submit", submitAddItem);
+    document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && !$("planner-drawer-backdrop").hidden) closeAddDrawer();
+    });
     loadDashboard();
     setInterval(() => {
         if (!document.hidden && !state.demo) loadDashboard();

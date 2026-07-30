@@ -45,6 +45,8 @@ public final class MessageProcessor {
     private final MemoryExtractor memoryExtractor;
     private final RagContextService ragContextService;
     private final InboxApplicationService inboxService;
+    private final InboundMessageReceiptStore receiptStore = new InboundMessageReceiptStore();
+    private final InboundMessageValidator inboundValidator = new InboundMessageValidator();
 
     public MessageProcessor(ChatHistoryStore chatHistory, UserSessionStore sessions,
                             AudioHistoryStore audioHistory, DocumentSessionStore documentSessions,
@@ -77,7 +79,26 @@ public final class MessageProcessor {
         ReplyChannel client = context.replyChannel();
         String userId = context.principalId();
         long startedAt = System.nanoTime();
+        InboundMessageValidator.Result inputValidation = inboundValidator.validate(message);
+        if (!inputValidation.valid()) {
+            System.err.println("[输入校验] " + inputValidation.message());
+            try {
+                replySender.sendReply(client, userId, "这条消息的格式无法处理：" + inputValidation.message());
+            } catch (Exception ignored) { }
+            return;
+        }
+        InboundMessageReceiptStore.Claim receipt = receiptStore.claim(
+                "wechat", "default", message == null ? "" : message.messageId(), userId,
+                java.time.Instant.now());
+        if (!receipt.accepted()) {
+            System.out.println("[消息幂等] 跳过重复消息 user=" + userId
+                    + ", messageId=" + (message == null ? "" : message.messageId())
+                    + ", status=" + receipt.status());
+            return;
+        }
+        boolean failed = false;
         try {
+            if (message == null) return;
             chatHistory.setUserSessionId(userId, sessions.getCurrentSession(userId).sessionId());
             client.startTyping(userId);
             List<MessagePart> parts = message.parts();
@@ -130,12 +151,15 @@ public final class MessageProcessor {
 
             System.out.println("[" + userId + "] [未知消息类型]");
         } catch (Exception error) {
+            failed = true;
             System.err.println("处理消息异常: " + error.getMessage());
+            receiptStore.retryable(receipt);
             try {
                 replySender.sendReply(client, userId, "网络波动了，请再发一次～");
             } catch (Exception ignored) {
             }
         } finally {
+            if (!failed) receiptStore.complete(receipt);
             long elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000;
             if (elapsedMillis >= 1_000) {
                 System.out.println("[Performance] user=" + userId + ", message_ms=" + elapsedMillis);
@@ -279,7 +303,8 @@ public final class MessageProcessor {
     }
 
     private void processText(AgentContext context, String text, IncomingMessage message) throws Exception {
-        if (text == null || text.isBlank()) return;
+        text = inboundValidator.normalizeText(text);
+        if (text.isBlank()) return;
         String userId = context.principalId();
         System.out.println("[" + userId + "] " + text);
         if (commandHandler.trySwitchSession(context.replyChannel(), userId, text)) return;
