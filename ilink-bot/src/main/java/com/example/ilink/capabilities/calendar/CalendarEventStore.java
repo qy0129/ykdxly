@@ -17,17 +17,24 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class CalendarEventStore {
 
     private final Map<String, CalendarEvent> events = new ConcurrentHashMap<>();
-    private final MySqlStore database = MySqlStore.getInstance();
+    private final MySqlStore database;
+    private final boolean persistent;
 
     public CalendarEventStore() {
-        for (CalendarEvent event : database.loadCalendarEvents()) {
-            events.put(event.id(), event);
+        this(true);
+    }
+
+    public CalendarEventStore(boolean persistent) {
+        this.persistent = persistent;
+        this.database = persistent ? MySqlStore.getInstance() : null;
+        if (persistent) {
+            for (CalendarEvent event : database.loadCalendarEvents()) events.put(event.id(), event);
         }
     }
 
     public synchronized void save(CalendarEvent event) {
         events.put(event.id(), event);
-        database.saveCalendarEvent(event);
+        if (persistent) database.saveCalendarEvent(event);
     }
 
     public synchronized List<CalendarEvent> list(String userId) {

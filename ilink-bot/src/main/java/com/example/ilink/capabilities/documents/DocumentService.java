@@ -113,6 +113,9 @@ public final class DocumentService {
         return DocumentParser.extension(fileName);
     }
 
-    public record ParsedDocument(String fileName, String extension, String text) {
+    public record ParsedDocument(String fileName, String extension, String text, String indexText) {
+        public ParsedDocument(String fileName, String extension, String text) {
+            this(fileName, extension, text, text);
+        }
     }
 }

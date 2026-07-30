@@ -1,5 +1,7 @@
 package com.example.ilink.capabilities.documents.rag;
 
+import com.example.ilink.bootstrap.Config;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -26,11 +28,15 @@ public final class Retriever {
 
         String documentId = UUID.randomUUID().toString();
         List<TextChunk> sourceChunks = chunker.chunk(fileName, text == null ? "" : text);
+        List<String> texts = sourceChunks.stream().map(TextChunk::text).toList();
+        List<List<Float>> vectors = sourceChunks.size() == 1
+                ? List.of(embeddingService.embed(texts.get(0))) : embeddingService.embedBatch(texts);
         List<VectorStore.EmbeddedChunk> embedded = new ArrayList<>();
-        for (TextChunk source : sourceChunks) {
+        for (int index = 0; index < sourceChunks.size(); index++) {
+            TextChunk source = sourceChunks.get(index);
             TextChunk chunk = new TextChunk(documentId + "#" + source.chunkIndex(), source.fileName(),
                     source.chunkIndex(), source.text(), source.preview());
-            embedded.add(new VectorStore.EmbeddedChunk(chunk, embeddingService.embed(chunk.text())));
+            embedded.add(new VectorStore.EmbeddedChunk(chunk, vectors.get(index)));
         }
         vectorStore.storeDocument(userId, documentId, contentHash, embedded);
         return new IndexResult(true, embedded.size(), contentHash);
@@ -42,7 +48,7 @@ public final class Retriever {
 
     public List<VectorStore.ScoredChunk> retrieve(String userId, String query, int topK) throws Exception {
         if (!hasKnowledge(userId) || query == null || query.isBlank()) return List.of();
-        return vectorStore.search(userId, embeddingService.embed(query), topK);
+        return vectorStore.search(userId, embeddingService.embed(query), topK, Config.RAG_MIN_SCORE);
     }
 
     public String buildContext(String userId, String query, int topK) {

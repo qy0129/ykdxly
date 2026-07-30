@@ -44,4 +44,9 @@ public record PlanTask(
         return new PlanTask(id, title, description, estimatedMinutes,
                 priority, scheduledDate, newStatus);
     }
+
+    public PlanTask withDescription(String newDescription) {
+        return new PlanTask(id, title, newDescription, estimatedMinutes,
+                priority, scheduledDate, status);
+    }
 }

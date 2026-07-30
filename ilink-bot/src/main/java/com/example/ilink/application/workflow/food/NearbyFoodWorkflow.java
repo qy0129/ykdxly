@@ -131,11 +131,11 @@ public final class NearbyFoodWorkflow {
             for (int index = 0; index < output.candidateMapImages().size(); index++) {
                 client.sendImage(userId, output.candidateMapImages().get(index),
                         "nearby-location-" + (index + 1) + ".png", "");
-                replySender.markSent();
+                replySender.markSent(userId);
             }
         } else if (output != null && output.mapImage() != null) {
             client.sendImage(userId, output.mapImage(), "nearby-food-map.png", "");
-            replySender.markSent();
+            replySender.markSent(userId);
         }
         if (output != null && !output.candidates().isEmpty()) {
             savePendingSearch(userId, PendingNearbySearch.locationChoices(output.candidates(), keyword));

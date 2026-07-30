@@ -223,6 +223,7 @@ class AutomationModuleTest {
                         "github.com", "", "https://github.com/example/java-agent"));
         ToolManager tools = new ToolManager()
                 .register(new AutomationWebSearchTool(search))
+                .register(new ResearchPageFetchTool(url -> "Java Agent 正文资料，包含工具调用、RAG 和生产实践。"))
                 .register(new ResearchAnalysisTool(new AutomationAnalysisService(null)))
                 .register(new AutomationReportTool());
         ExecutiveTaskStore store = ExecutiveTaskStore.inMemory();
@@ -241,11 +242,12 @@ class AutomationModuleTest {
         engine.runDue(LocalDateTime.now().plusSeconds(1));
         engine.runDue(LocalDateTime.now().plusSeconds(2));
         engine.runDue(LocalDateTime.now().plusSeconds(3));
+        engine.runDue(LocalDateTime.now().plusSeconds(4));
 
         assertEquals(TaskStatus.COMPLETED, store.findTask(task.id()).status());
-        assertEquals(3, store.loadSteps(task.id()).size());
-        assertTrue(store.loadSteps(task.id()).get(2).outputText().contains("https://example.com/source"));
-        assertFalse(store.loadSteps(task.id()).get(2).outputText().contains("\"results\":[{"));
+        assertEquals(4, store.loadSteps(task.id()).size());
+        assertTrue(store.loadSteps(task.id()).get(3).outputText().contains("https://example.com/source"));
+        assertFalse(store.loadSteps(task.id()).get(3).outputText().contains("\"results\":[{"));
         assertFalse(runtime.pendingNotifications("u1", 10).isEmpty());
     }
 

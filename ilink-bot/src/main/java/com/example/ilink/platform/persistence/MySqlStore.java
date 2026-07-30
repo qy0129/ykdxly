@@ -954,6 +954,32 @@ public final class MySqlStore implements AutoCloseable {
         }
     }
 
+    /** 读取用户的全部计划，活动计划和最近更新的计划排在前面。 */
+    public List<TaskPlan> loadTaskPlans(String userId) {
+        if (!isAvailable()) return List.of();
+        String sql = "SELECT id, goal, deadline, available_time, created_date FROM plans "
+                + "WHERE bot_id=? AND user_id=? ORDER BY (status='active') DESC, updated_at DESC";
+        List<TaskPlan> plans = new ArrayList<>();
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setString(2, userId);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    String planId = result.getString("id");
+                    plans.add(new TaskPlan(planId, result.getString("goal"),
+                            result.getDate("deadline").toLocalDate().toString(),
+                            result.getString("available_time"),
+                            result.getDate("created_date").toLocalDate().toString(),
+                            loadPlanTasks(connection, planId)));
+                }
+            }
+        } catch (SQLException e) {
+            logFailure("读取全部任务计划", e);
+        }
+        return plans;
+    }
+
     /** 原子保存文档元数据和全部向量片段，避免只落下一半索引。 */
     public void saveKnowledgeDocument(String userId, String documentId, String fileName,
                                       String contentHash, List<KnowledgeChunkRow> chunks) {

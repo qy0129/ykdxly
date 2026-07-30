@@ -21,6 +21,7 @@ import com.example.ilink.capabilities.calendar.ReminderDelivery;
 import com.example.ilink.capabilities.calendar.ReminderTextFormatter;
 import com.example.ilink.capabilities.chat.ChatService;
 import com.example.ilink.capabilities.express.ExpressPageService;
+import com.example.ilink.capabilities.life.DailyReflectionService;
 import com.example.ilink.platform.network.CloudflareTunnel;
 import com.github.wechat.ilink.sdk.ILinkClient;
 
@@ -33,6 +34,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 微信消息分发器。
@@ -55,10 +57,12 @@ public final class MessageDispatcher implements AutoCloseable {
     private final ExpressHttpServer expressHttpServer;
     private final ExpressPageService expressPageService;
     private final ExecutiveRuntime executiveRuntime;
+    private final DailyReflectionService reflectionService;
     private final ScheduledExecutorService progressScheduler = Executors.newScheduledThreadPool(1);
     private final ScheduledExecutorService reminderScheduler = Executors.newScheduledThreadPool(1);
     private final ScheduledExecutorService briefingScheduler = Executors.newSingleThreadScheduledExecutor();
     private final AtomicBoolean briefingInProgress = new AtomicBoolean();
+    private final AtomicReference<String> ownerUserId = new AtomicReference<>(Config.PERSONAL_OWNER_USER_ID);
     private volatile boolean briefingSent;
     private volatile String activeUserId = "";
     private CloudflareTunnel expressTunnel;
@@ -72,7 +76,8 @@ public final class MessageDispatcher implements AutoCloseable {
                              DailyDashboardServer dailyDashboardServer, SessionManagementServer sessionManagementServer,
                              ExpressHttpServer expressHttpServer,
                              ExpressPageService expressPageService,
-                             ExecutiveRuntime executiveRuntime) {
+                             ExecutiveRuntime executiveRuntime,
+                             DailyReflectionService reflectionService) {
         this.messageProcessor = messageProcessor;
         this.replySender = replySender;
         this.chatService = chatService;
@@ -85,6 +90,7 @@ public final class MessageDispatcher implements AutoCloseable {
         this.expressHttpServer = expressHttpServer;
         this.expressPageService = expressPageService;
         this.executiveRuntime = executiveRuntime;
+        this.reflectionService = reflectionService;
         dailyDashboardServer.start();
         expressHttpServer.start();
         startExpressTunnel();
@@ -121,6 +127,14 @@ public final class MessageDispatcher implements AutoCloseable {
     public void handleMessage(ILinkClient client, IncomingMessage message) {
         activeClient = client;
         String userId = message.principalId();
+        if (!acceptOwner(userId)) {
+            try {
+                client.sendText(userId, "该 Personal Agent 已绑定其他用户，当前账号无权使用。");
+            } catch (Exception error) {
+                System.err.println("[访问控制] 拒绝消息时回复失败: " + error.getMessage());
+            }
+            return;
+        }
         try {
             welcomeHandler.handleFirstLogin(new WechatReplyChannel(client), userId);
         } catch (Exception e) {
@@ -128,13 +142,12 @@ public final class MessageDispatcher implements AutoCloseable {
         }
         AgentContext context = AgentContext.wechat(userId, new WechatReplyChannel(client));
         activeUserId = userId;
-        dailyDashboardServer.useUser(userId);
         sessionManagementServer.useUser(userId);
         long startedAtMillis = System.currentTimeMillis();
-        boolean voiceOnly = replySender.isVoiceOnly();
+        boolean voiceOnly = replySender.isVoiceOnly(userId);
         ScheduledFuture<?> progressTask = progressScheduler.schedule(() -> {
             try {
-                if (!voiceOnly && !replySender.hasSentReplySince(startedAtMillis)) {
+                if (!voiceOnly && !replySender.hasSentReplySince(userId, startedAtMillis)) {
                     client.sendText(userId, "正在回复中，请稍等......");
                 }
             } catch (Exception e) {
@@ -176,7 +189,7 @@ public final class MessageDispatcher implements AutoCloseable {
                 continue;
             }
             try {
-                replySender.sendReply(new WechatReplyChannel(client), userId, ReminderTextFormatter.format(event));
+                replySender.sendReply(new WechatReplyChannel(client), userId, reminderText(event));
                 calendarService.markReminderSent(delivery, LocalDateTime.now());
             } catch (Exception e) {
                 System.err.println("[日历提醒] 发送失败: " + e.getMessage());
@@ -240,7 +253,7 @@ public final class MessageDispatcher implements AutoCloseable {
                     continue;
                 }
                 try {
-                    replySender.sendReply(new WechatReplyChannel(client), userId, ReminderTextFormatter.format(event));
+                    replySender.sendReply(new WechatReplyChannel(client), userId, reminderText(event));
                     calendarService.markReminderSent(delivery, LocalDateTime.now());
                 } catch (Exception e) {
                     System.err.println("[离线提醒] 补发失败 user=" + userId + ": " + e.getMessage());
@@ -259,6 +272,13 @@ public final class MessageDispatcher implements AutoCloseable {
         return context != null && context.hasContextToken();
     }
 
+    private String reminderText(CalendarEvent event) {
+        if ("life_reflection".equals(event.source())) {
+            return reflectionService.buildAndSave(event.userId(), event.startAt().toLocalDate()).toDisplayText();
+        }
+        return ReminderTextFormatter.format(event);
+    }
+
     private String currentUserId(ILinkClient client) {
         String current = activeUserId;
         if (!current.isBlank() && hasSendContext(client, current)) return current;
@@ -272,10 +292,19 @@ public final class MessageDispatcher implements AutoCloseable {
         }
         if (!found.isBlank()) {
             activeUserId = found;
-            dailyDashboardServer.useUser(found);
             sessionManagementServer.useUser(found);
         }
         return found;
+    }
+
+    private boolean acceptOwner(String userId) {
+        if (userId == null || userId.isBlank()) return false;
+        String configured = ownerUserId.get();
+        if (configured.isBlank() && ownerUserId.compareAndSet("", userId)) {
+            System.out.println("[访问控制] 未配置 personal.owner.user.id，当前进程已绑定首位用户: " + userId);
+            return true;
+        }
+        return userId.equals(ownerUserId.get());
     }
 
     private String recurrenceName(String recurrence) {

@@ -7,6 +7,7 @@ import com.example.ilink.application.conversation.AudioHistoryStore;
 import com.example.ilink.application.conversation.ChatHistoryStore;
 import com.example.ilink.application.conversation.DocumentSessionStore;
 import com.example.ilink.application.conversation.UserSessionStore;
+import com.example.ilink.application.inbox.InboxApplicationService;
 import com.example.ilink.capabilities.memory.MemoryExtractor;
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.capabilities.audio.AudioService;
@@ -43,6 +44,7 @@ public final class MessageProcessor {
     private final CommandHandler commandHandler;
     private final MemoryExtractor memoryExtractor;
     private final RagContextService ragContextService;
+    private final InboxApplicationService inboxService;
 
     public MessageProcessor(ChatHistoryStore chatHistory, UserSessionStore sessions,
                             AudioHistoryStore audioHistory, DocumentSessionStore documentSessions,
@@ -51,7 +53,8 @@ public final class MessageProcessor {
                              MediaStore mediaStore, ReplySender replySender,
                              CapabilityDispatcher capabilityDispatcher,
                              CommandRouter commandRouter, CommandHandler commandHandler,
-                             MemoryExtractor memoryExtractor, RagContextService ragContextService) {
+                             MemoryExtractor memoryExtractor, RagContextService ragContextService,
+                             InboxApplicationService inboxService) {
         this.chatHistory = chatHistory;
         this.sessions = sessions;
         this.audioHistory = audioHistory;
@@ -67,6 +70,7 @@ public final class MessageProcessor {
         this.commandHandler = commandHandler;
         this.memoryExtractor = memoryExtractor;
         this.ragContextService = ragContextService;
+        this.inboxService = inboxService;
     }
 
     public void process(AgentContext context, IncomingMessage message) {
@@ -88,9 +92,18 @@ public final class MessageProcessor {
                     .filter(MessagePart.Image.class::isInstance)
                     .map(MessagePart.Image.class::cast)
                     .findFirst().orElse(null);
+            MessagePart.File fileMessage = parts.stream()
+                    .filter(MessagePart.File.class::isInstance)
+                    .map(MessagePart.File.class::cast)
+                    .findFirst().orElse(null);
 
             if (imageMessage != null) {
-                processImage(context, imageMessage);
+                String description = processImage(context, imageMessage, textMessage == null);
+                if (textMessage != null) {
+                    String enriched = description == null || description.isBlank() ? textMessage.text()
+                            : textMessage.text() + "\n\n图片识别内容：\n" + description;
+                    processText(context, enriched, message);
+                }
                 return;
             }
 
@@ -99,8 +112,9 @@ public final class MessageProcessor {
                 return;
             }
 
-            if (first instanceof MessagePart.File file) {
-                processFile(context, file);
+            if (fileMessage != null) {
+                processFile(context, fileMessage, textMessage == null);
+                if (textMessage != null) processText(context, textMessage.text(), message);
                 return;
             }
 
@@ -110,7 +124,7 @@ public final class MessageProcessor {
             }
 
             if (textMessage != null) {
-                processText(context, textMessage.text());
+                processText(context, textMessage.text(), message);
                 return;
             }
 
@@ -129,13 +143,14 @@ public final class MessageProcessor {
         }
     }
 
-    private void processImage(AgentContext context, MessagePart.Image item) throws Exception {
+    private String processImage(AgentContext context, MessagePart.Image item,
+                                boolean replyImmediately) throws Exception {
         ReplyChannel client = context.replyChannel();
         String userId = context.principalId();
         byte[] image = item.content();
         if (image == null || image.length == 0) {
             replySender.sendReply(client, userId, "图片下载失败");
-            return;
+            return "";
         }
 
         GeneratedImage receivedImage = GeneratedImage.from(image, null);
@@ -157,13 +172,18 @@ public final class MessageProcessor {
         if (description != null && !description.isBlank()) {
             sessions.setLastImageAnalysis(userId, description);
             chatHistory.addMedia(userId, "图片", saved.toString(), description);
-            replySender.sendReply(client, userId, "收到图片。我看了一下："
-                    + imageAnalysisPreview(description)
-                    + "。你可以让我生成表格、整理成文档、分析内容或修改图片。");
+            if (replyImmediately) {
+                replySender.sendReply(client, userId, "收到图片。我看了一下："
+                        + imageAnalysisPreview(description)
+                        + "。你可以让我生成表格、整理成文档、分析内容或修改图片。");
+            }
         } else {
-            replySender.sendReply(client, userId,
-                    "我已经收到这张图片。你想让我做什么：分析内容、解答题目，还是修改图片？");
+            if (replyImmediately) {
+                replySender.sendReply(client, userId,
+                        "我已经收到这张图片。你想让我做什么：分析内容、解答题目，还是修改图片？");
+            }
         }
+        return description;
     }
 
     private void processVoice(AgentContext context, MessagePart.Voice item) throws Exception {
@@ -195,7 +215,8 @@ public final class MessageProcessor {
         processText(context, text);
     }
 
-    private void processFile(AgentContext context, MessagePart.File item) throws Exception {
+    private void processFile(AgentContext context, MessagePart.File item,
+                             boolean replyImmediately) throws Exception {
         ReplyChannel client = context.replyChannel();
         String userId = context.principalId();
         String fileName = item.fileName();
@@ -222,7 +243,7 @@ public final class MessageProcessor {
                     parsed.fileName(), parsed.extension(), saved.toString(), parsed.text()));
             try {
                 Retriever.IndexResult index = ragContextService.indexDocument(
-                        userId, parsed.fileName(), parsed.text());
+                        userId, parsed.fileName(), parsed.indexText());
                 System.out.println(index.indexed()
                         ? "[RAG] 已索引文件：" + fileName + "，片段数=" + index.chunkCount()
                         : "[RAG] 文件内容已存在，跳过重复索引：" + fileName);
@@ -230,8 +251,10 @@ public final class MessageProcessor {
                 System.err.println("[RAG] 文件索引失败，文件问答继续使用全文模式: " + error.getMessage());
             }
             chatHistory.addMedia(userId, "文件 " + fileName, saved.toString(), "文件已解析，可进行总结或问答");
-            replySender.sendReply(client, userId, "已收到并解析文件：" + fileName
-                    + "。你可以让我总结文件，或直接提问文件内容。");
+            if (replyImmediately) {
+                replySender.sendReply(client, userId, "已收到并解析文件：" + fileName
+                        + "。你可以让我总结文件，或直接提问文件内容。");
+            }
         } catch (Exception error) {
             System.err.println("[Document] 解析失败: " + error.getMessage());
             replySender.sendReply(client, userId, "文件已收到，但暂时无法解析其中的文字内容");
@@ -252,6 +275,10 @@ public final class MessageProcessor {
     }
 
     private void processText(AgentContext context, String text) throws Exception {
+        processText(context, text, null);
+    }
+
+    private void processText(AgentContext context, String text, IncomingMessage message) throws Exception {
         if (text == null || text.isBlank()) return;
         String userId = context.principalId();
         System.out.println("[" + userId + "] " + text);
@@ -260,6 +287,16 @@ public final class MessageProcessor {
         if (commandType != CommandType.NONE) {
             commandHandler.handle(context.replyChannel(), userId, commandType);
             return;
+        }
+        if (message != null) {
+            InboxApplicationService.HandleResult inbox = inboxService.handle(userId, message.messageId(),
+                    message.receivedAt(), message.sourceType(), text);
+            if (inbox.consumed()) {
+                if (!inbox.response().isBlank()) {
+                    replySender.sendReply(context.replyChannel(), userId, inbox.response());
+                }
+                return;
+            }
         }
         String sessionId = sessions.getCurrentSession(userId).sessionId();
         chatHistory.setUserSessionId(userId, sessionId);

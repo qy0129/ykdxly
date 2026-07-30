@@ -4,10 +4,11 @@ package com.example.ilink.application.executive;
 public enum RiskLevel {
     READ_ONLY,
     LOCAL_WRITE,
+    DATA_EGRESS,
     EXTERNAL_WRITE,
     IRREVERSIBLE;
 
     public boolean requiresApproval() {
-        return this == EXTERNAL_WRITE || this == IRREVERSIBLE;
+        return this == DATA_EGRESS || this == EXTERNAL_WRITE || this == IRREVERSIBLE;
     }
 }

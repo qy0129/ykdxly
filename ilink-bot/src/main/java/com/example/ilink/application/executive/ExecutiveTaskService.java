@@ -36,7 +36,8 @@ public final class ExecutiveTaskService {
         List<ExecutiveStep> steps = buildSteps(taskId, specs, now);
         ExecutiveTask ready = stateMachine.transition(planning, TaskStatus.READY)
                 .withProgress(TaskStatus.READY, 0, created.nextRunAt(), 0, "");
-        store.create(ready, steps);
+        ExecutiveTask persisted = store.create(ready, steps);
+        if (!persisted.id().equals(ready.id())) return new Submission(persisted, false);
         logs.record(ready, null, "TASK_CREATED", ready.status().name(), "任务已创建", "{}");
         return new Submission(ready, true);
     }

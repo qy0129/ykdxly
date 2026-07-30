@@ -20,7 +20,9 @@ public final class JobAnalysisTool implements Tool {
             "(?i)(\\d{2,5}\\s*[-~至]\\s*\\d{2,5}\\s*元/(?:天|日|小时)|"
                     + "\\d+(?:\\.\\d+)?\\s*[-~至]\\s*\\d+(?:\\.\\d+)?\\s*[k千]\\s*/?月|"
                     + "\\d+\\s*[-~至]\\s*\\d+\\s*万/年)");
-    private static final Pattern MONTHS = Pattern.compile("(\\d+)\\s*个?月");
+    private static final Pattern MONTHS = Pattern.compile(
+            "(?:实习|连续|至少|不低于|不少于)[^。；,，]{0,16}?(\\d+)\\s*个?月|"
+                    + "(\\d+)\\s*个?月[^。；,，]{0,12}(?:实习|到岗)");
     private static final Pattern DAYS = Pattern.compile("每周\\s*(\\d+)\\s*天");
     private final Gson gson = new Gson();
 
@@ -71,6 +73,8 @@ public final class JobAnalysisTool implements Tool {
                         .append("匹配说明：").append(matchNote(request, education, months, days)).append('\n')
                         .append("信息来源：").append("page".equals(string(job, "sourceLevel"))
                                 ? "岗位网页正文" : "搜索摘要，正文未获取").append('\n')
+                        .append("证据级别：").append(orUnknown(string(job, "sourceLevel"))).append('\n')
+                        .append("抓取时间：").append(orUnknown(string(job, "fetchedAt"))).append('\n')
                         .append("链接：").append(string(job, "url")).append('\n');
             }
             report.append("\n说明：岗位可能下线或变更，薪资和到岗要求以招聘页面及 HR 确认为准。");
@@ -130,7 +134,11 @@ public final class JobAnalysisTool implements Tool {
 
     private int number(Pattern pattern, String text) {
         Matcher matcher = pattern.matcher(text);
-        return matcher.find() ? Integer.parseInt(matcher.group(1)) : 0;
+        if (!matcher.find()) return 0;
+        for (int group = 1; group <= matcher.groupCount(); group++) {
+            if (matcher.group(group) != null) return Integer.parseInt(matcher.group(group));
+        }
+        return 0;
     }
 
     private String orUnknown(String value) {

@@ -42,17 +42,6 @@ public final class AutomationAnalysisService {
     }
 
     public String synthesizeResearch(String goal, String researchJson) {
-        try {
-            JsonArray targets = JsonParser.parseString(researchJson).getAsJsonObject().getAsJsonArray("targets");
-            if (targets != null) {
-                List<String> values = targets.asList().stream().map(value -> value.getAsString()).toList();
-                if (OfficialSourceCatalog.supportsComparison(values)) {
-                    return OfficialSourceCatalog.buildComparisonReport(goal);
-                }
-            }
-        } catch (Exception ignored) {
-            // 非结构化资料继续使用通用分析流程。
-        }
         String prompt = "根据下面的调研目标和检索资料生成一份可直接交付的中文报告。必须回答目标中的问题，"
                 + "比较对象时使用清晰的对比维度，给出适用场景和选择建议。每个关键结论后保留对应来源 URL。"
                 + "只能使用检索资料明确提供的事实；资料没有说明的能力必须写‘未确认’，不得凭常识补全。"

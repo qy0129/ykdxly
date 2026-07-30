@@ -4,10 +4,14 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /** 观察、执行、验证、更新和重试的 Agent 核心循环。 */
-public final class ExecutiveEngine {
+public final class ExecutiveEngine implements AutoCloseable {
     private static final Duration LEASE = Duration.ofMinutes(2);
 
     private final String workerId;
@@ -18,6 +22,11 @@ public final class ExecutiveEngine {
     private final ExecutionLogService logs;
     private final NotificationOutbox outbox;
     private final TaskStateMachine stateMachine = new TaskStateMachine();
+    private final ScheduledExecutorService leaseExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "executive-lease-heartbeat");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     public ExecutiveEngine(String workerId, ExecutiveTaskStore store, CapabilityExecutor executor,
                            ResultVerifier verifier, ApprovalService approvals,
@@ -32,15 +41,28 @@ public final class ExecutiveEngine {
     }
 
     public int runDue(LocalDateTime now) {
-        List<ExecutiveTask> tasks = store.claimDue(now, workerId, LEASE, 20);
+        List<ExecutiveTask> tasks = claimDue(now, 20);
         for (ExecutiveTask task : tasks) {
-            try {
-                executeOne(task, now);
-            } catch (Exception error) {
-                failUnexpected(task, error);
-            }
+            executeClaimed(task, now);
         }
         return tasks.size();
+    }
+
+    public List<ExecutiveTask> claimDue(LocalDateTime now, int limit) {
+        return store.claimDue(now, workerId, LEASE, limit);
+    }
+
+    public void executeClaimed(ExecutiveTask task, LocalDateTime now) {
+        ScheduledFuture<?> heartbeat = leaseExecutor.scheduleAtFixedRate(
+                () -> store.renewLease(task.id(), workerId, LocalDateTime.now().plus(LEASE)),
+                30, 30, TimeUnit.SECONDS);
+        try {
+            executeOne(task, now);
+        } catch (Exception error) {
+            failUnexpected(task, error);
+        } finally {
+            heartbeat.cancel(false);
+        }
     }
 
     private void executeOne(ExecutiveTask claimed, LocalDateTime now) throws Exception {
@@ -66,7 +88,7 @@ public final class ExecutiveEngine {
 
         if (step.approvalRequired()) {
             ApprovalRequest approval = approvals.forStep(step.id());
-            if (approval == null || approval.pending()) {
+            if (approval == null || approval.pending() || approval.expired()) {
                 approval = approvals.ensurePending(task, step);
                 ExecutiveStep waiting = step.withStatus(StepStatus.WAITING_APPROVAL, step.attempts(),
                         null, step.outputText(), "", step.startedAt(), null);
@@ -88,7 +110,8 @@ public final class ExecutiveEngine {
         }
 
         ExecutiveTask running = stateMachine.transition(task, TaskStatus.RUNNING)
-                .withProgress(TaskStatus.RUNNING, step.sequence(), task.nextRunAt(), task.retryCount(), "");
+                .withProgress(TaskStatus.RUNNING, step.sequence(), task.nextRunAt(), task.retryCount(), "")
+                .claimed(workerId, LocalDateTime.now().plus(LEASE));
         store.saveTask(running);
         ExecutiveStep active = step.withStatus(StepStatus.RUNNING, step.attempts() + 1,
                 null, step.outputText(), "", LocalDateTime.now(), null);
@@ -101,7 +124,8 @@ public final class ExecutiveEngine {
         } catch (Exception error) {
             raw = ExecutionOutcome.retry(error.getMessage());
         }
-        ExecutiveTask verifying = stateMachine.transition(running, TaskStatus.VERIFYING);
+        ExecutiveTask verifying = stateMachine.transition(running, TaskStatus.VERIFYING)
+                .claimed(workerId, LocalDateTime.now().plus(LEASE));
         store.saveTask(verifying);
         ExecutionOutcome result = verifier.verify(active, raw);
         applyOutcome(verifying, active, result, now);
@@ -210,10 +234,14 @@ public final class ExecutiveEngine {
 
     private void failUnexpected(ExecutiveTask task, Exception error) {
         System.err.println("[ExecutiveEngine] task=" + task.id() + " 执行异常: " + error.getMessage());
+        String message = error.getMessage() == null || error.getMessage().isBlank()
+                ? error.getClass().getSimpleName() : error.getMessage();
         ExecutiveTask failed = task.withProgress(TaskStatus.FAILED, task.currentStep(), null,
-                task.retryCount(), error.getMessage());
+                task.retryCount(), message);
         store.saveTask(failed);
-        logs.record(failed, null, "ENGINE_ERROR", failed.status().name(), error.getMessage(), "{}");
+        logs.record(failed, null, "ENGINE_ERROR", failed.status().name(), message, "{}");
+        outbox.enqueue(task.id(), task.userId(), "TASK_FAILED",
+                "任务执行异常：" + task.goal() + "\n原因：" + message + "\n任务编号：" + task.id());
     }
 
     private void failBlocked(ExecutiveTask task, List<ExecutiveStep> steps) {
@@ -231,5 +259,10 @@ public final class ExecutiveEngine {
 
     static int backoffMinutes(int attempts) {
         return attempts <= 1 ? 1 : attempts == 2 ? 5 : 15;
+    }
+
+    @Override
+    public void close() {
+        leaseExecutor.shutdownNow();
     }
 }

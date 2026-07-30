@@ -87,11 +87,12 @@ public final class DocumentParser {
                 throw new IOException("文件中没有提取到可用文字，OCR 识别也未返回结果");
             }
         }
+        String indexText = text;
         if (text.length() > Config.DOCUMENT_MAX_TEXT_CHARS) {
             text = text.substring(0, Config.DOCUMENT_MAX_TEXT_CHARS)
                     + "\n[文件内容过长，当前版本仅加载前 " + Config.DOCUMENT_MAX_TEXT_CHARS + " 个字符]";
         }
-        return new DocumentService.ParsedDocument(originalFileName, extension, text);
+        return new DocumentService.ParsedDocument(originalFileName, extension, text, indexText);
     }
 
     /** 读取 DOCX 段落、表格文本和嵌入图片文字。 */
