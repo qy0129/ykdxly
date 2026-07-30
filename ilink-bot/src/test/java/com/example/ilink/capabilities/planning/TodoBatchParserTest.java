@@ -23,4 +23,18 @@ class TodoBatchParserTest {
         assertEquals(15, drafts.get(1).dueAt().getHour());
         assertEquals(20, drafts.get(2).dueAt().getHour());
     }
+
+    @Test
+    void parsesMultipleTasksWithoutRepeatingReminderWords() {
+        var drafts = parser.parse("明天上午十点提交周报，下午三点给客户打电话，晚上八点复习算法");
+
+        assertEquals(3, drafts.size());
+        assertEquals("提交周报", drafts.get(0).title());
+        assertEquals("给客户打电话", drafts.get(1).title());
+        assertEquals("复习算法", drafts.get(2).title());
+        assertEquals(LocalDate.now().plusDays(1), drafts.get(0).dueAt().toLocalDate());
+        assertEquals(10, drafts.get(0).dueAt().getHour());
+        assertEquals(15, drafts.get(1).dueAt().getHour());
+        assertEquals(20, drafts.get(2).dueAt().getHour());
+    }
 }
