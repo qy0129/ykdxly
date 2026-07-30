@@ -99,7 +99,6 @@ public final class MessageProcessor {
         boolean failed = false;
         try {
             if (message == null) return;
-            chatHistory.setUserSessionId(userId, sessions.getCurrentSession(userId).sessionId());
             chatHistory.setUserSessionId(userId, sessionId(context, userId));
             client.startTyping(userId);
             List<MessagePart> parts = message.parts();

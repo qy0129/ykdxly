@@ -38,6 +38,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 微信消息分发器。
@@ -84,12 +85,11 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
                              DailyDashboardServer dailyDashboardServer, SessionManagementServer sessionManagementServer,
                              ExpressHttpServer expressHttpServer,
                              ExpressPageService expressPageService,
+                             WechatWebBridge webBridge,
                              ExecutiveRuntime executiveRuntime,
                              DailyReflectionService reflectionService,
                              InterestRadarService interestRadarService,
                              LocationService locationService) {
-                             ExpressPageService expressPageService, WechatWebBridge webBridge,
-                             ExecutiveRuntime executiveRuntime, DailyReflectionService reflectionService) {
         this.messageProcessor = messageProcessor;
         this.replySender = replySender;
         this.chatService = chatService;
@@ -261,7 +261,7 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
     private void sendRadarReply(ILinkClient client, String userId, String update) {
         if (update == null || update.isBlank()) return;
         try {
-            replySender.sendReply(new WechatReplyChannel(client), userId, update);
+            replySender.sendReply(channel(client), userId, update);
         } catch (Exception error) {
             System.err.println("[兴趣雷达] 主动推送失败: " + error.getMessage());
         }
@@ -273,7 +273,7 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
             String reply = dashboardUrl.isBlank()
                     ? "七日计划页当前未启用，请检查 dashboard.enabled 和 dashboard.port 配置。"
                     : "你的七日计划页：\n" + dashboardUrl;
-            replySender.sendReply(new WechatReplyChannel(client), userId, reply);
+            replySender.sendReply(channel(client), userId, reply);
         } catch (Exception error) {
             System.err.println("[七日计划] 发送页面链接失败: " + error.getMessage());
         }

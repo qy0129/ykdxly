@@ -881,16 +881,13 @@ public final class UserRequestHandler {
     }
 
     /** 把会话、位置、时间和所有等待状态合并成一次路由快照。 */
-    private RoutingContext buildRoutingContext(String userId, IntentContext mediaContext, String query) {
-        ConversationContext conv = contextManager.buildConversation(userId);
-        KnowledgeContext kn = needsKnowledgeContext(query)
-                ? contextManager.buildKnowledge(userId, query)
-                : KnowledgeContext.empty(query);
     private RoutingContext buildRoutingContext(AgentContext agentContext, IntentContext mediaContext, String query) {
         String userId = agentContext.principalId();
         ConversationContext conv = contextManager.buildConversation(userId,
                 agentContext.channel() == ChannelType.WEB ? agentContext.conversationId() : null);
-        KnowledgeContext kn = contextManager.buildKnowledge(userId, query);
+        KnowledgeContext kn = needsKnowledgeContext(query)
+                ? contextManager.buildKnowledge(userId, query)
+                : KnowledgeContext.empty(query);
         Map<String, Boolean> pending = new LinkedHashMap<>();
         pending.put("draw_size", sessions.getPendingDraw(userId) != null);
         pending.put("express", sessions.hasPendingExpress(userId));
@@ -916,6 +913,8 @@ public final class UserRequestHandler {
     private boolean needsKnowledgeContext(String query) {
         if (query == null || query.isBlank()) return false;
         return query.matches(".*(根据|结合|参考|文件|文档|资料|知识库|我发的|刚才发的|上面的内容).*" );
+    }
+
     private void publishActivity(String content, String phase, String status,
                                  Map<String, Object> details) {
         Map<String, Object> metadata = new LinkedHashMap<>(details);

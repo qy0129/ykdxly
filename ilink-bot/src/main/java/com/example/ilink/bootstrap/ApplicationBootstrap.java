@@ -214,7 +214,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
                                  SessionManagementServer sessionManagementServer,
                                  ExecutiveRuntime executiveRuntime,
                                  AutomationConsoleServer automationConsoleServer,
-                                 LocationHttpServer locationHttpServer) {
+                                 LocationHttpServer locationHttpServer,
                                  WebChatServer webChatServer) {
         this.messageDispatcher = messageDispatcher;
         this.messageAdapter = messageAdapter;
@@ -471,26 +471,19 @@ public final class ApplicationBootstrap implements AutoCloseable {
         MessageDispatcher dispatcher = new MessageDispatcher(
                 messageProcessor, replySender, chatService, calendarService,
                 visualDeckSender, loginBriefingService, welcomeHandler,
-                new DailyDashboardServer(dashboardService), sessionManagementServer,
-                 expressHttpServer, expressPageService, executiveRuntime, reflectionService,
-                 interestRadarService, locationService);
                 dailyDashboardServer, sessionManagementServer,
                 expressHttpServer, expressPageService, wechatWebBridge,
-                executiveRuntime, reflectionService);
+                executiveRuntime, reflectionService, interestRadarService, locationService);
         AutomationConsoleServer automationConsoleServer = new AutomationConsoleServer(executiveRuntime);
         sessionManagementServer.start();
         webChatServer.start();
         automationConsoleServer.start();
         executiveRuntime.start();
         return new ApplicationBootstrap(
-                dispatcher, new WechatMessageAdapter(), new MessageSerialExecutor(),
-                 new LoginQrPage(), new SdkResumeContextStore(), chatHistory,
-                 MySqlStore.getInstance(), sessionManagementServer, executiveRuntime, automationConsoleServer,
-                 locationHttpServer);
                 dispatcher, new WechatMessageAdapter(), messageExecutor,
                 loginQrPage, new SdkResumeContextStore(), chatHistory,
                 MySqlStore.getInstance(), sessionManagementServer, executiveRuntime,
-                automationConsoleServer, webChatServer);
+                automationConsoleServer, locationHttpServer, webChatServer);
     }
 
     public MessageDispatcher messageDispatcher() {
