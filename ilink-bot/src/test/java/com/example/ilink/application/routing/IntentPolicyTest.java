@@ -15,6 +15,7 @@ class IntentPolicyTest {
     @Test
     void imageRequestDoesNotAuthorizeDocumentOutput() {
         assertTrue(IntentPolicy.isExplicitImageCreation("帮我生成一张猫咪图片"));
+        assertTrue(IntentPolicy.isExplicitImageCreation("帮我生成一张小猫照片"));
         assertFalse(IntentPolicy.hasExplicitFileRequest("帮我生成一张猫咪图片"));
         assertFalse(IntentPolicy.hasExplicitFileRequest("帮我生成一个图片文件"));
     }
@@ -66,6 +67,39 @@ class IntentPolicyTest {
         assertEquals("draw", action.get("intent").getAsString());
         assertEquals("none", action.get("output_file_type").getAsString());
         assertEquals("生成一张城市夜景图片", action.get("en_prompt").getAsString());
+    }
+
+    @Test
+    void explicitImageRequestCorrectsModelChatIntentWithinRouting() throws Exception {
+        IntentRecognizer recognizer = new IntentRecognizer(HttpClient.newHttpClient());
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "chat");
+        action.addProperty("action_text", "帮我生成一张小猫照片");
+
+        Method normalize = IntentRecognizer.class.getDeclaredMethod(
+                "normalizeAction", String.class, String.class, JsonObject.class, IntentContext.class);
+        normalize.setAccessible(true);
+        normalize.invoke(recognizer, "帮我生成一张小猫照片", "帮我生成一张小猫照片",
+                action, new IntentContext(false, false, false, false, false));
+
+        assertEquals("draw", action.get("intent").getAsString());
+        assertEquals("none", action.get("image_size").getAsString());
+    }
+
+    @Test
+    void imageActionUsesOriginalRequestWhenModelOmitsImagePrompt() throws Exception {
+        IntentRecognizer recognizer = new IntentRecognizer(HttpClient.newHttpClient());
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "image_action");
+        action.addProperty("image_action", "analyze");
+
+        Method normalize = IntentRecognizer.class.getDeclaredMethod(
+                "normalizeAction", String.class, String.class, JsonObject.class, IntentContext.class);
+        normalize.setAccessible(true);
+        normalize.invoke(recognizer, "分析这张图片里的表格", "分析这张图片里的表格",
+                action, new IntentContext(true, true, false, false, false));
+
+        assertEquals("分析这张图片里的表格", action.get("image_prompt").getAsString());
     }
 
     @Test

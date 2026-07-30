@@ -126,10 +126,10 @@ public final class IntentRecognizer {
                 actions.add(new IntentAction(id, requestText,
                         stringList(action, "depends_on"), toIntentResult(action)));
             }
-            return actions.isEmpty() ? fallbackChatPlan(userMessage) : new IntentPlan(actions);
+            return actions.isEmpty() ? fallbackPlan(userMessage) : new IntentPlan(actions);
         } catch (Exception error) {
             System.err.println("[统一意图识别] 识别失败：" + error.getMessage());
-            return fallbackChatPlan(userMessage);
+            return fallbackPlan(userMessage);
         }
     }
 
@@ -302,6 +302,21 @@ public final class IntentRecognizer {
     }
 
     private IntentPlan fallbackChatPlan(String userMessage) {
+        return fallbackPlan(userMessage);
+    }
+
+    /** 路由调用失败时仍维持统一动作契约；只对强确定性的绘图意图给出最小兜底。 */
+    private IntentPlan fallbackPlan(String userMessage) {
+        if (IntentPolicy.isExplicitImageCreation(userMessage)) {
+            JsonObject action = new JsonObject();
+            action.addProperty("intent", "draw");
+            action.addProperty("en_prompt", userMessage);
+            action.addProperty("cn_description", userMessage);
+            action.addProperty("image_size", DrawSizeParser.parseMention(userMessage));
+            action.addProperty("reply_mode", "keep");
+            action.addProperty("voice_style", "default");
+            return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), toIntentResult(action))));
+        }
         return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), IntentResult.chat())));
     }
 
@@ -319,6 +334,14 @@ public final class IntentRecognizer {
         boolean imageCreation = IntentPolicy.isExplicitImageCreation(userMessage);
         boolean imageEdit = IntentPolicy.isExplicitImageEdit(userMessage);
         boolean fileRequest = IntentPolicy.hasExplicitFileRequest(userMessage);
+        if (imageCreation && "chat".equals(intent)) {
+            action.addProperty("intent", "draw");
+            action.addProperty("en_prompt", defaultPrompt(action, actionText, userMessage));
+            action.addProperty("cn_description", actionText);
+            action.addProperty("image_size", DrawSizeParser.parseMention(userMessage));
+            action.addProperty("output_file_type", "none");
+            intent = "draw";
+        }
         if ("generate_file".equals(intent) && !fileRequest) {
             if (imageCreation) {
                 action.addProperty("intent", "draw");
@@ -357,6 +380,9 @@ public final class IntentRecognizer {
             if (!Set.of("1024x1024", "768x1024", "1024x576").contains(string(action, "image_size"))) {
                 action.addProperty("image_size", "none");
             }
+        }
+        if ("image_action".equals(intent) && string(action, "image_prompt").isBlank()) {
+            action.addProperty("image_prompt", actionText);
         }
         if ("nearby_food".equals(intent) && !isNearbyDiningRequest(userMessage)
                 && !IntentPolicy.isExplicitLocationRememberRequest(userMessage)) {

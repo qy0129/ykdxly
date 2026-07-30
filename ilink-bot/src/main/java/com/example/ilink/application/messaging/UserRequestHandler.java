@@ -699,6 +699,8 @@ public final class UserRequestHandler {
         String value = text.trim();
         if (value.matches("^(查看|查询|列出|打开)?(我的)?待办(事项|列表)?$|^我还有什么待办.*")) return true;
         if (value.matches("^(完成|办完|搞定|取消|删除).*(待办|任务).*")) return true;
+        // 多个明确时间点组成的句子就是待办，即使用户没有重复说“提醒我”。
+        if (todoBatchParser.looksLikeCompound(value)) return true;
         return value.matches(".*(提醒我|别忘了|记得|记一下|添加待办|新增待办|创建待办|记个待办|安排一个待办).*" )
                 && !value.matches(".*(天气|快递|新闻|打车|外卖|搜索|文件|图片).*" );
     }
@@ -807,7 +809,7 @@ public final class UserRequestHandler {
             case "draw_size" -> handleDrawSize(client, userId, route);
             case "persona_switch" -> handlePersonaSwitch(client, userId, actionText, route);
             case "audio_transcribe" -> handleAudioTranscribe(client, userId, route);
-            case "image_action" -> handleImageAction(client, userId, route);
+            case "image_action" -> handleImageAction(client, userId, actionText, route);
             case "weather" -> handleWeather(client, userId, actionText, route);
             case "task_plan" -> planWorkflow.createPlan(client, userId, actionText, route);
             case "study_plan" -> lifeWorkflow.startStudyPlan(client, userId, actionText, route);
@@ -1231,7 +1233,7 @@ public final class UserRequestHandler {
     }
 
     /** 处理图片分析、解题和编辑请求。 */
-    private void handleImageAction(ReplyChannel client, String userId,
+    private void handleImageAction(ReplyChannel client, String userId, String actionText,
                                    IntentResult route) throws Exception {
         if ("clarify".equals(route.imageAction()) || "none".equals(route.imageAction())) {
             replySender.sendReply(client, userId, "请告诉我想怎么处理图片：分析内容、解答题目，还是修改图片？");
@@ -1240,7 +1242,8 @@ public final class UserRequestHandler {
 
         if ("analyze".equals(route.imageAction()) || "solve".equals(route.imageAction())) {
             JsonObject arguments = new JsonObject();
-            arguments.addProperty("request", route.imagePrompt());
+            String request = route.imagePrompt().isBlank() ? actionText : route.imagePrompt();
+            arguments.addProperty("request", request);
             arguments.addProperty("mode", route.imageAction());
             ToolResult result = toolManager.execute(
                     ImageAnalysisTool.NAME, new ToolContext(userId), arguments);
@@ -1254,7 +1257,8 @@ public final class UserRequestHandler {
 
         if ("edit".equals(route.imageAction())) {
             JsonObject arguments = new JsonObject();
-            arguments.addProperty("prompt", route.imagePrompt());
+            String prompt = route.imagePrompt().isBlank() ? actionText : route.imagePrompt();
+            arguments.addProperty("prompt", prompt);
             ToolResult result = toolManager.execute(
                     ImageEditTool.NAME, new ToolContext(userId), arguments);
             if (result.hasMedia(GeneratedImage.class)) {
