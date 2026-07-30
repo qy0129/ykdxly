@@ -50,6 +50,29 @@ public class AmapService {
         return geocodeAddress(name, city);
     }
 
+    /** 将手机 GPS 或百度坐标转换为高德坐标后执行逆地理编码。 */
+    public Place reverseGeocode(double longitude, double latitude, String coordinateSystem) throws Exception {
+        validateCoordinate(longitude, latitude);
+        String source = coordinateSystem == null ? "gps" : coordinateSystem.trim().toLowerCase();
+        String location = longitude + "," + latitude;
+        if (!"amap".equals(source) && !"gaode".equals(source)) {
+            String coordsys = "baidu".equals(source) ? "baidu" : "gps";
+            JsonObject converted = getJson("https://restapi.amap.com/v3/assistant/coordinate/convert",
+                    "locations=" + encode(location) + "&coordsys=" + coordsys);
+            location = converted.has("locations") ? converted.get("locations").getAsString() : "";
+            if (location.isBlank()) throw new IllegalStateException("坐标转换失败");
+        }
+
+        JsonObject json = getJson("https://restapi.amap.com/v3/geocode/regeo",
+                "location=" + encode(location) + "&extensions=base&radius=1000");
+        JsonObject regeocode = json.getAsJsonObject("regeocode");
+        if (regeocode == null || !regeocode.has("formatted_address")) return null;
+        String address = regeocode.get("formatted_address").getAsString();
+        if (address.isBlank()) return null;
+        String[] point = location.split(",");
+        return new Place(address, point[0], point[1]);
+    }
+
     /** 使用地址地理编码作为 POI 搜索没有结果时的兜底。 */
     private Place geocodeAddress(String name) throws Exception {
         return geocodeAddress(name, "");
@@ -272,6 +295,13 @@ public class AmapService {
     }
 
     private String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8); }
+
+    private void validateCoordinate(double longitude, double latitude) {
+        if (!Double.isFinite(longitude) || !Double.isFinite(latitude)
+                || longitude < -180 || longitude > 180 || latitude < -90 || latitude > 90) {
+            throw new IllegalArgumentException("经纬度不合法");
+        }
+    }
 
     /**
      * 从导航步骤的折线坐标中抽取 25%、50% 和 75% 三个沿途采样点。

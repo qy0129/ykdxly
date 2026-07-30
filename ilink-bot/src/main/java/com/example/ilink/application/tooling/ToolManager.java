@@ -18,6 +18,7 @@ import java.util.Map;
 public final class ToolManager {
 
     private final Map<String, Tool> tools = new LinkedHashMap<>();
+    private final ToolSchemaValidator schemaValidator = new ToolSchemaValidator();
 
     /** 注册一个工具，禁止重复名称覆盖已有工具。 */
     public ToolManager register(Tool tool) {
@@ -75,6 +76,11 @@ public final class ToolManager {
                 + " label=" + definition.displayName()
                 + " args=" + RequestLogContext.preview(arguments == null ? "{}" : arguments.toString()));
         try {
+            ToolSchemaValidator.Result schemaResult = schemaValidator.validate(definition.parameters(), arguments);
+            if (!schemaResult.valid()) {
+                System.err.println("[工具参数校验] " + definition.displayName() + "：" + schemaResult.message());
+                return ToolResult.failure("工具参数无效：" + schemaResult.message());
+            }
             ToolResult result = tool.execute(context, arguments);
             String status = result.success() ? "成功" : "失败";
             RequestLogContext.publish(new AgentEvent(AgentEvent.Type.TOOL_ACTIVITY,

@@ -42,7 +42,10 @@
                     <h2 id="main-theme">深夜专注计划</h2>
                     <p id="keyword">清醒 / 专注 / 完成</p>
                 </div>
-                <button id="refresh-button" class="icon-button" type="button" title="刷新数据" aria-label="刷新数据">↻</button>
+                <div class="header-actions">
+                    <button id="add-item-button" class="add-header-button" type="button">＋ 添加</button>
+                    <button id="refresh-button" class="icon-button" type="button" title="刷新数据" aria-label="刷新数据">↻</button>
+                </div>
             </header>
 
             <section class="metric-strip" aria-label="计划概览">
@@ -113,6 +116,77 @@
         </div>
     </section>
 </main>
+<div id="planner-drawer-backdrop" class="planner-drawer-backdrop" hidden>
+    <aside class="planner-drawer" role="dialog" aria-modal="true" aria-labelledby="add-drawer-title">
+        <div class="drawer-heading">
+            <div>
+                <span class="eyebrow">QUICK ADD</span>
+                <h2 id="add-drawer-title">添加到周计划</h2>
+                <p id="add-drawer-date" class="drawer-date"></p>
+            </div>
+            <button id="close-add-drawer" class="drawer-close" type="button" aria-label="关闭">×</button>
+        </div>
+        <div class="add-kind-switch" role="tablist" aria-label="添加类型">
+            <button class="add-kind-button active" type="button" data-add-kind="todo">待办</button>
+            <button class="add-kind-button" type="button" data-add-kind="plan">计划</button>
+        </div>
+        <form id="add-item-form" class="add-item-form">
+            <input id="add-date" type="hidden">
+            <label>
+                <span>事项名称</span>
+                <input id="add-title" type="text" maxlength="120" placeholder="例如：整理简历" required>
+            </label>
+            <div class="form-row">
+                <label>
+                    <span>安排日期</span>
+                    <input id="add-date-visible" type="date" required>
+                </label>
+                <label>
+                    <span>优先级</span>
+                    <select id="add-priority">
+                        <option value="low">低</option>
+                        <option value="medium" selected>中</option>
+                        <option value="high">高</option>
+                    </select>
+                </label>
+            </div>
+            <div id="todo-fields">
+                <div class="form-row">
+                    <label>
+                        <span>时间</span>
+                        <input id="add-time" type="time">
+                    </label>
+                    <label>
+                        <span>提醒</span>
+                        <select id="add-reminder">
+                            <option value="0">不提醒</option>
+                            <option value="5">提前 5 分钟</option>
+                            <option value="15" selected>提前 15 分钟</option>
+                            <option value="30">提前 30 分钟</option>
+                        </select>
+                    </label>
+                </div>
+            </div>
+            <div id="plan-fields" hidden>
+                <label>
+                    <span>预计时长</span>
+                    <select id="add-duration">
+                        <option value="15">15 分钟</option>
+                        <option value="30" selected>30 分钟</option>
+                        <option value="60">1 小时</option>
+                        <option value="90">1.5 小时</option>
+                        <option value="120">2 小时</option>
+                    </select>
+                </label>
+            </div>
+            <label>
+                <span>备注</span>
+                <textarea id="add-description" rows="3" maxlength="500" placeholder="补充说明（可选）"></textarea>
+            </label>
+            <button id="save-add-item" class="save-add-button" type="submit">保存待办</button>
+        </form>
+    </aside>
+</div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script src="/static/js/daily-dashboard.js"></script>
 </body>

@@ -2,9 +2,30 @@ package com.example.ilink.application.routing;
 
 /** 在工具执行前校验能力的必要条件，模型输出只能作为候选动作。 */
 public final class CapabilityContractValidator {
+    private static final java.util.Set<String> REPLY_MODES = java.util.Set.of("keep", "text", "voice", "both");
 
     public Validation validate(String requestText, IntentResult route, Context context) {
+        if (route == null || route.intent() == null || route.intent().isBlank()) {
+            return Validation.fallbackToChat();
+        }
         String intent = route.intent();
+        if (!REPLY_MODES.contains(route.replyMode())) {
+            return Validation.requestInput("回复方式参数无效，请重新说明需要文字还是语音回复。");
+        }
+        if ("audio_transcribe".equals(intent) && route.audioIndex() < 1) {
+            return Validation.requestInput("语音序号必须从 1 开始。");
+        }
+        if ("calendar_event".equals(intent)
+                && (route.calendarReminderMinutes() < 0 || route.calendarReminderMinutes() > 10_080)) {
+            return Validation.requestInput("提醒提前时间必须在 0 到 10080 分钟之间。");
+        }
+        if ("todo".equals(intent) && (requestText == null || requestText.isBlank())) {
+            return Validation.requestInput("请告诉我待办的具体内容。");
+        }
+        if ("taxi_trip".equals(intent) && requestText != null && requestText.matches(".*(打车|叫车).*去.*")
+                && route.travelDestination().isBlank()) {
+            return Validation.requestInput("请告诉我打车目的地。");
+        }
         if ("draw".equals(intent) && !IntentPolicy.isExplicitImageCreation(requestText)) {
             return Validation.fallbackToChat();
         }

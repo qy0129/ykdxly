@@ -36,11 +36,18 @@ public final class BilibiliSearchService {
 
     /** 返回具体视频；没有可靠视频时仍返回可点击的哔哩哔哩官方搜索入口。 */
     public List<SearchResult> search(String query, String category) {
+        return search(query, category, RESULT_LIMIT);
+    }
+
+    /** 返回指定数量的视频候选，供需要持久分页的兴趣雷达使用。 */
+    public List<SearchResult> search(String query, String category, int limit) {
         String keyword = normalizeQuery(query, category);
+        int actualLimit = Math.max(1, Math.min(20, limit));
         try {
             List<SearchResult> candidates = searchProvider.search(
-                    "site:bilibili.com/video " + keyword, SEARCH_CANDIDATE_LIMIT);
-            List<SearchResult> results = filterBilibiliVideos(candidates);
+                    "site:bilibili.com/video " + keyword,
+                    Math.max(SEARCH_CANDIDATE_LIMIT, actualLimit * 3));
+            List<SearchResult> results = filterBilibiliVideos(candidates, actualLimit);
             if (!results.isEmpty()) return results;
         } catch (Exception e) {
             System.err.println("[哔哩哔哩搜索] 联网搜索失败，回退到官方搜索页: " + e.getMessage());
@@ -74,12 +81,17 @@ public final class BilibiliSearchService {
     }
 
     static List<SearchResult> filterBilibiliVideos(List<SearchResult> candidates) {
+        return filterBilibiliVideos(candidates, RESULT_LIMIT);
+    }
+
+    static List<SearchResult> filterBilibiliVideos(List<SearchResult> candidates, int limit) {
         List<SearchResult> results = new ArrayList<>();
         Set<String> seenUrls = new HashSet<>();
+        int actualLimit = Math.max(1, limit);
         for (SearchResult result : candidates == null ? List.<SearchResult>of() : candidates) {
             if (!isBilibiliVideoUrl(result.url()) || !seenUrls.add(result.url())) continue;
             results.add(result);
-            if (results.size() >= RESULT_LIMIT) break;
+            if (results.size() >= actualLimit) break;
         }
         return List.copyOf(results);
     }

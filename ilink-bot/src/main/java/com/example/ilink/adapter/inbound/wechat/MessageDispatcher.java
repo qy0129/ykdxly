@@ -24,6 +24,8 @@ import com.example.ilink.capabilities.calendar.ReminderTextFormatter;
 import com.example.ilink.capabilities.chat.ChatService;
 import com.example.ilink.capabilities.express.ExpressPageService;
 import com.example.ilink.capabilities.life.DailyReflectionService;
+import com.example.ilink.capabilities.location.LocationService;
+import com.example.ilink.capabilities.radar.InterestRadarService;
 import com.example.ilink.platform.network.CloudflareTunnel;
 import com.github.wechat.ilink.sdk.ILinkClient;
 
@@ -60,10 +62,15 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
     private final WechatWebBridge webBridge;
     private final ExecutiveRuntime executiveRuntime;
     private final DailyReflectionService reflectionService;
+    private final InterestRadarService interestRadarService;
+    private final LocationService locationService;
     private final ScheduledExecutorService progressScheduler = Executors.newScheduledThreadPool(1);
     private final ScheduledExecutorService reminderScheduler = Executors.newScheduledThreadPool(1);
     private final ScheduledExecutorService briefingScheduler = Executors.newSingleThreadScheduledExecutor();
+    private final ScheduledExecutorService radarScheduler = Executors.newSingleThreadScheduledExecutor();
     private final AtomicBoolean briefingInProgress = new AtomicBoolean();
+    private final AtomicBoolean locationRequestSent = new AtomicBoolean();
+    private final AtomicReference<String> ownerUserId = new AtomicReference<>(Config.PERSONAL_OWNER_USER_ID);
     private volatile boolean briefingSent;
     private volatile String activeUserId = "";
     private CloudflareTunnel expressTunnel;
@@ -76,6 +83,11 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
                              WelcomeHandler welcomeHandler,
                              DailyDashboardServer dailyDashboardServer, SessionManagementServer sessionManagementServer,
                              ExpressHttpServer expressHttpServer,
+                             ExpressPageService expressPageService,
+                             ExecutiveRuntime executiveRuntime,
+                             DailyReflectionService reflectionService,
+                             InterestRadarService interestRadarService,
+                             LocationService locationService) {
                              ExpressPageService expressPageService, WechatWebBridge webBridge,
                              ExecutiveRuntime executiveRuntime, DailyReflectionService reflectionService) {
         this.messageProcessor = messageProcessor;
@@ -92,11 +104,19 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         this.webBridge = webBridge;
         this.executiveRuntime = executiveRuntime;
         this.reflectionService = reflectionService;
+        this.interestRadarService = interestRadarService;
+        this.locationService = locationService;
+        this.locationService.onLocationUpdated(this::sendLocationUpdated);
         webBridge.attach(this);
         dailyDashboardServer.start();
         expressHttpServer.start();
         startExpressTunnel();
         reminderScheduler.scheduleAtFixedRate(this::sendDueReminders, 1, 1, TimeUnit.SECONDS);
+        if (Config.INTEREST_RADAR_ENABLED) {
+            radarScheduler.scheduleWithFixedDelay(this::sendRadarUpdates,
+                    Config.INTEREST_RADAR_POLL_MINUTES,
+                    Config.INTEREST_RADAR_POLL_MINUTES, TimeUnit.MINUTES);
+        }
     }
 
     private void startExpressTunnel() {
@@ -133,6 +153,10 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         if (!resumedUserId.isBlank()) webBridge.updateActiveUser(resumedUserId);
         briefingSent = false;
         briefingInProgress.set(false);
+        locationRequestSent.set(false);
+        if (Config.LOCATION_ENABLED) {
+            briefingScheduler.schedule(() -> sendLoginLocationRequest(client), 1, TimeUnit.SECONDS);
+        }
         if (Config.LOGIN_BRIEFING_ENABLED) {
             System.out.println("[登录简报] 登录触发，等待会话上下文就绪");
             briefingScheduler.schedule(() -> sendLoginBriefing(client), 1, TimeUnit.SECONDS);
@@ -162,6 +186,11 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         activeUserId = userId;
         dailyDashboardServer.useUser(userId);
         sessionManagementServer.useUser(userId);
+        sendLoginLocationRequest(client, userId);
+        if (isDailyDashboardRequest(message)) {
+            sendDailyDashboard(client, userId);
+            return;
+        }
         long startedAtMillis = System.currentTimeMillis();
         boolean voiceOnly = replySender.isVoiceOnly(userId);
         ScheduledFuture<?> progressTask = progressScheduler.schedule(() -> {
@@ -190,6 +219,7 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         progressScheduler.shutdownNow();
         reminderScheduler.shutdownNow();
         briefingScheduler.shutdownNow();
+        radarScheduler.shutdownNow();
         dailyDashboardServer.close();
         expressHttpServer.stop();
         if (expressTunnel != null) expressTunnel.close();
@@ -216,6 +246,52 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
             }
         }
         sendExecutiveNotifications(client, userId);
+    }
+
+    private void sendRadarUpdates() {
+        ILinkClient client = activeClient;
+        if (client == null || !client.isLoggedIn()) return;
+        String userId = currentUserId(client);
+        if (userId.isBlank()) return;
+        for (String update : interestRadarService.collectScheduledUpdates(userId, LocalDateTime.now())) {
+            sendRadarReply(client, userId, update);
+        }
+    }
+
+    private void sendRadarReply(ILinkClient client, String userId, String update) {
+        if (update == null || update.isBlank()) return;
+        try {
+            replySender.sendReply(new WechatReplyChannel(client), userId, update);
+        } catch (Exception error) {
+            System.err.println("[兴趣雷达] 主动推送失败: " + error.getMessage());
+        }
+    }
+
+    private void sendDailyDashboard(ILinkClient client, String userId) {
+        try {
+            String dashboardUrl = dailyDashboardServer.urlFor(userId);
+            String reply = dashboardUrl.isBlank()
+                    ? "七日计划页当前未启用，请检查 dashboard.enabled 和 dashboard.port 配置。"
+                    : "你的七日计划页：\n" + dashboardUrl;
+            replySender.sendReply(new WechatReplyChannel(client), userId, reply);
+        } catch (Exception error) {
+            System.err.println("[七日计划] 发送页面链接失败: " + error.getMessage());
+        }
+    }
+
+    static boolean isDailyDashboardRequest(IncomingMessage message) {
+        if (message == null) return false;
+        return message.parts().stream()
+                .filter(MessagePart.Text.class::isInstance)
+                .map(MessagePart.Text.class::cast)
+                .map(MessagePart.Text::text)
+                .map(value -> value == null ? "" : value.replaceAll("[\\s，。！？、,.!?]", ""))
+                .anyMatch(value -> value.equals("七日计划")
+                        || value.equals("查看七日计划")
+                        || value.equals("打开七日计划")
+                        || value.equals("七日计划页")
+                        || value.equals("查看七日计划页")
+                        || value.equals("打开七日计划页"));
     }
 
     private void sendExecutiveNotifications(ILinkClient client, String userId) {
@@ -290,6 +366,48 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         if (resume == null) return false;
         var context = resume.getConversationContextMap().get(userId);
         return context != null && context.hasContextToken();
+    }
+
+    /** 登录后自动发送一次定位授权链接；首次登录缺少会话上下文时由第一条消息补发。 */
+    private void sendLoginLocationRequest(ILinkClient client) {
+        if (client == null || !client.isLoggedIn()) return;
+        String userId = currentUserId(client);
+        if (!userId.isBlank()) sendLoginLocationRequest(client, userId);
+    }
+
+    private void sendLoginLocationRequest(ILinkClient client, String userId) {
+        if (!Config.LOCATION_ENABLED || locationRequestSent.get()) return;
+        if (client == null || !client.isLoggedIn() || !hasSendContext(client, userId)) return;
+        if (!locationRequestSent.compareAndSet(false, true)) return;
+        String url = locationService.createAuthorizationUrl(userId);
+        if (url.isBlank()) {
+            System.err.println("[位置] 登录定位未发送：服务尚未就绪");
+            return;
+        }
+        try {
+            client.sendText(userId, "请打开下面的链接授权当前位置。页面打开后会自动请求手机定位权限：\n" + url);
+            System.out.println("[位置] 登录定位链接已发送 user=" + userId);
+        } catch (Exception error) {
+            locationRequestSent.set(false);
+            System.err.println("[位置] 登录定位链接发送失败: " + error.getMessage());
+        }
+    }
+
+    private void sendLocationUpdated(String userId, String address) {
+        ILinkClient client = activeClient;
+        if (client == null || !client.isLoggedIn() || !hasSendContext(client, userId)) return;
+        try {
+            client.sendText(userId, "当前位置已更新：" + address);
+        } catch (Exception error) {
+            System.err.println("[位置] 更新确认发送失败: " + error.getMessage());
+        }
+    }
+
+    private String reminderText(CalendarEvent event) {
+        if ("life_reflection".equals(event.source())) {
+            return reflectionService.buildAndSave(event.userId(), event.startAt().toLocalDate()).toDisplayText();
+        }
+        return ReminderTextFormatter.format(event);
     }
 
     private String currentUserId(ILinkClient client) {

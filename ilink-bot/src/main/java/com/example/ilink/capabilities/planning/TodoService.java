@@ -9,6 +9,7 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.UUID;
+import java.util.ArrayList;
 
 /** 待办创建、查询、完成和取消服务。 */
 public final class TodoService {
@@ -30,6 +31,22 @@ public final class TodoService {
                 event == null ? "" : event.id(), now, now);
         store.save(todo);
         return todo;
+    }
+
+    /** 批量创建同一条消息拆出的待办；逐项保留独立标题和时间。 */
+    public List<TodoItem> createBatch(String userId, List<TodoDraft> drafts, int reminderMinutes) {
+        if (drafts == null || drafts.isEmpty()) return List.of();
+        List<TodoItem> created = new ArrayList<>();
+        for (TodoDraft draft : drafts) {
+            if (draft == null || draft.title().isBlank()) {
+                throw new IllegalArgumentException("待办标题不能为空");
+            }
+            if (draft.title().length() > 200) {
+                throw new IllegalArgumentException("待办标题不能超过 200 字");
+            }
+            created.add(create(userId, draft.title(), draft.dueAt(), reminderMinutes));
+        }
+        return List.copyOf(created);
     }
 
     public String list(String userId) {

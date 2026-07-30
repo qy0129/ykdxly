@@ -33,6 +33,7 @@ public final class IntentRecognizer {
     private final RoutePromptBuilder promptBuilder;
     private final RouteResponseParser responseParser = new RouteResponseParser();
     private final IntentNormalizer normalizer;
+    private final boolean unifiedRouting;
 
     public IntentRecognizer(HttpClient httpClient) {
         this(httpClient, CapabilityRegistry.defaults());
@@ -44,6 +45,7 @@ public final class IntentRecognizer {
         this.capabilities = capabilities;
         this.promptBuilder = new RoutePromptBuilder(capabilities);
         this.normalizer = new IntentNormalizer(capabilities);
+        this.unifiedRouting = true;
     }
 
     IntentRecognizer(RouteClient routeClient) {
@@ -52,6 +54,7 @@ public final class IntentRecognizer {
         this.capabilities = CapabilityRegistry.defaults();
         this.promptBuilder = new RoutePromptBuilder(capabilities);
         this.normalizer = new IntentNormalizer(capabilities);
+        this.unifiedRouting = false;
     }
 
     /** 保留旧注入签名；完整上下文现在由调用方一次性传入。 */
@@ -66,6 +69,7 @@ public final class IntentRecognizer {
 
     public IntentPlan recognize(String userId, String userMessage, RoutingContext context) {
         if (userMessage == null || userMessage.isBlank()) return fallbackChatPlan("");
+        if (unifiedRouting) return recognizeUnified(userMessage, context);
         try {
             List<AtomicRequirement> requirements = new ArrayList<>(splitRequirements(userMessage, context));
             if (requirements.isEmpty()) requirements.add(new AtomicRequirement("r1", userMessage, List.of()));
@@ -94,6 +98,37 @@ public final class IntentRecognizer {
             return new IntentPlan(actions);
         } catch (Exception error) {
             System.err.println("[意图识别] 识别失败：" + error.getMessage());
+            return fallbackChatPlan(userMessage);
+        }
+    }
+
+    /** 生产快路径：一次模型调用同时完成需求拆分、能力分配和参数提取。 */
+    private IntentPlan recognizeUnified(String userMessage, RoutingContext context) {
+        try {
+            JsonObject result = requestJson(promptBuilder.buildUnifiedPrompt(context), userMessage);
+            JsonArray array = result.has("actions") && result.get("actions").isJsonArray()
+                    ? result.getAsJsonArray("actions") : new JsonArray();
+            List<IntentAction> actions = new ArrayList<>();
+            Set<String> ids = new LinkedHashSet<>();
+            for (JsonElement element : array) {
+                if (!element.isJsonObject() || actions.size() >= MAX_REQUIREMENTS) break;
+                JsonObject action = element.getAsJsonObject();
+                String requestText = string(action, "action_text");
+                if (requestText.isBlank()) requestText = string(action, "request_text");
+                if (requestText.isBlank()) continue;
+                String id = string(action, "requirement_id");
+                if (id.isBlank()) id = string(action, "id");
+                if (id.isBlank() || !ids.add(id)) {
+                    id = "r" + (actions.size() + 1);
+                    while (!ids.add(id)) id += "x";
+                }
+                normalizeAction(requestText, requestText, action, context.mediaContext());
+                actions.add(new IntentAction(id, requestText,
+                        stringList(action, "depends_on"), toIntentResult(action)));
+            }
+            return actions.isEmpty() ? fallbackChatPlan(userMessage) : new IntentPlan(actions);
+        } catch (Exception error) {
+            System.err.println("[统一意图识别] 识别失败：" + error.getMessage());
             return fallbackChatPlan(userMessage);
         }
     }
@@ -238,7 +273,7 @@ public final class IntentRecognizer {
     private String sendRoute(JsonObject body) throws Exception {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(Config.API_BASE_URL))
-                .timeout(Config.REQ_TIMEOUT)
+                .timeout(Config.ROUTER_REQ_TIMEOUT)
                 .header("Authorization", "Bearer " + Config.API_KEY)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(body)))

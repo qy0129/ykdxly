@@ -48,7 +48,9 @@ public final class ReplySender {
     private final ToolManager toolManager;
     private final UserSessionStore sessions;
     private final ChatHistoryStore chatHistory;
-    private final ConcurrentHashMap<String, Boolean> voiceReplyEnabled = new ConcurrentHashMap<>();
+    /** 仅保存 applyReplyMode 到下一次发送；发送结束后立即消费，不能污染后续消息。 */
+    private final ConcurrentHashMap<String, String> pendingReplyModes = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> defaultReplyModes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> lastReplyTimes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> lastTextReplies = new ConcurrentHashMap<>();
 
@@ -76,15 +78,23 @@ public final class ReplySender {
     public void sendReply(ReplyChannel client, String userId, String text,
                            String replyMode, String voiceStyle) throws Exception {
         String displayText = TextLinkFormatter.format(text);
-        boolean userVoiceEnabled = voiceReplyEnabled.getOrDefault(userId, false);
-        boolean voice = userVoiceEnabled
-                || "voice".equalsIgnoreCase(Config.REPLY_MODE)
-                || "both".equalsIgnoreCase(Config.REPLY_MODE)
-                || "both".equalsIgnoreCase(replyMode)
-                || "voice".equalsIgnoreCase(replyMode);
-        boolean both = userVoiceEnabled
-                || "both".equalsIgnoreCase(Config.REPLY_MODE)
-                || "both".equalsIgnoreCase(replyMode);
+        if (isImmediateDuplicate(userId, displayText)) {
+            System.out.println("[回复幂等] 跳过短时间内的相同回复 user=" + userId);
+            pendingReplyModes.remove(userId);
+            return;
+        }
+        String oneShotMode = pendingReplyModes.remove(userId);
+        String requestedMode = replyMode == null || replyMode.isBlank() || "keep".equalsIgnoreCase(replyMode)
+                ? oneShotMode : replyMode;
+        boolean explicitMode = requestedMode != null && !requestedMode.isBlank();
+        String defaultMode = defaultReplyModes.getOrDefault(userId, Config.REPLY_MODE);
+        boolean voice = explicitMode
+                ? ("voice".equalsIgnoreCase(requestedMode) || "both".equalsIgnoreCase(requestedMode))
+                : "voice".equalsIgnoreCase(defaultMode)
+                        || "both".equalsIgnoreCase(defaultMode);
+        boolean both = explicitMode
+                ? "both".equalsIgnoreCase(requestedMode)
+                : "both".equalsIgnoreCase(defaultMode);
 
         if (!voice || both) {
             client.sendText(userId, displayText);
@@ -164,16 +174,22 @@ public final class ReplySender {
     public void applyReplyMode(String userId, String replyMode) {
         if (userId == null || userId.isBlank()) return;
         if ("both".equals(replyMode) || "voice".equals(replyMode)) {
-            voiceReplyEnabled.put(userId, true);
+            pendingReplyModes.put(userId, replyMode);
         } else if ("text".equals(replyMode)) {
-            voiceReplyEnabled.put(userId, false);
+            pendingReplyModes.put(userId, "text");
         }
     }
 
     /** 判断当前会话是否只发送语音回复。 */
     public boolean isVoiceOnly(String userId) {
-        return voiceReplyEnabled.getOrDefault(userId, false)
-                || "voice".equalsIgnoreCase(Config.REPLY_MODE);
+        return "voice".equalsIgnoreCase(defaultReplyModes.getOrDefault(userId, Config.REPLY_MODE));
+    }
+
+    public void setDefaultReplyMode(String userId, String mode) {
+        if (userId == null || userId.isBlank()) return;
+        if ("text".equals(mode) || "voice".equals(mode) || "both".equals(mode)) {
+            defaultReplyModes.put(userId, mode);
+        }
     }
 
     /** 判断当前处理开始后是否已经成功发出回复。 */
@@ -199,5 +215,11 @@ public final class ReplySender {
 
     public String lastText(String userId) {
         return userId == null ? "" : lastTextReplies.getOrDefault(userId, "");
+    }
+
+    private boolean isImmediateDuplicate(String userId, String text) {
+        if (userId == null || text == null || text.isBlank()) return false;
+        return text.equals(lastTextReplies.get(userId))
+                && System.currentTimeMillis() - lastReplyTimes.getOrDefault(userId, 0L) < 3_000;
     }
 }

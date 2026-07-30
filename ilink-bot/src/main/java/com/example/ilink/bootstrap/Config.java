@@ -46,6 +46,8 @@ public class Config {
     public static final int DOCUMENT_MAX_TEXT_CHARS = Integer.parseInt(loadProperty("document.max_text_chars", "40000"));
     public static final Duration REQ_TIMEOUT = Duration.ofSeconds(
             Long.parseLong(loadProperty("request.timeout.seconds", "180")));
+    public static final Duration ROUTER_REQ_TIMEOUT = Duration.ofSeconds(
+            Long.parseLong(loadProperty("router.request.timeout.seconds", "15")));
     public static final Duration DOCUMENT_REQ_TIMEOUT = Duration.ofSeconds(
             Long.parseLong(loadProperty("document.request.timeout.seconds", "240")));
     public static final Duration VISION_REQ_TIMEOUT = Duration.ofSeconds(
@@ -96,6 +98,21 @@ public class Config {
             loadProperty("express.tunnel.command", "data/tools/cloudflared.exe");
     public static final Duration EXPRESS_TUNNEL_TIMEOUT = Duration.ofSeconds(
             Long.parseLong(loadProperty("express.tunnel.timeout.seconds", "25")));
+    /** 手机定位授权页；浏览器定位需要 HTTPS，因此默认尝试启动 Cloudflare 临时隧道。 */
+    public static final boolean LOCATION_ENABLED =
+            Boolean.parseBoolean(loadProperty("location.enabled", "true"));
+    public static final String LOCATION_BIND_ADDRESS =
+            loadProperty("location.bind.address", "127.0.0.1");
+    public static final int LOCATION_PORT = Integer.parseInt(loadProperty("location.port", "8792"));
+    public static final String LOCATION_BASE_URL = loadProperty("location.base-url", "");
+    public static final boolean LOCATION_TUNNEL_ENABLED =
+            Boolean.parseBoolean(loadProperty("location.tunnel.enabled", "true"));
+    public static final String LOCATION_TUNNEL_COMMAND =
+            loadProperty("location.tunnel.command", "data/tools/cloudflared.exe");
+    public static final Duration LOCATION_TUNNEL_TIMEOUT = Duration.ofSeconds(
+            Long.parseLong(loadProperty("location.tunnel.timeout.seconds", "25")));
+    public static final Duration LOCATION_TOKEN_TTL = Duration.ofSeconds(Math.max(60,
+            Long.parseLong(loadProperty("location.token.ttl.seconds", "300"))));
     public static final boolean LOGIN_BRIEFING_ENABLED =
             Boolean.parseBoolean(loadProperty("briefing.login.enabled", "true"));
     public static final boolean BRIEFING_POLISH_ENABLED =
@@ -160,6 +177,24 @@ public class Config {
             Integer.parseInt(loadProperty("web.search.timeout.seconds", "20"));
     public static final int WEB_SEARCH_RESULT_LIMIT =
             Integer.parseInt(loadProperty("web.search.result.limit", "5"));
+    public static final boolean INTEREST_RADAR_ENABLED =
+            Boolean.parseBoolean(loadProperty("radar.enabled", "true"));
+    public static final int INTEREST_RADAR_POLL_MINUTES = Math.max(5,
+            Integer.parseInt(loadProperty("radar.poll.minutes", "30")));
+    public static final int INTEREST_RADAR_MIN_SCORE = Math.max(0, Math.min(100,
+            Integer.parseInt(loadProperty("radar.min.score", "60"))));
+    public static final int INTEREST_RADAR_VIDEO_PUSH_HOURS = Math.max(1,
+            Integer.parseInt(loadProperty("radar.video.push.hours", "3")));
+    public static final int INTEREST_RADAR_DIGEST_HOURS = Math.max(1,
+            Integer.parseInt(loadProperty("radar.digest.hours", "3")));
+    public static final int INTEREST_RADAR_DIGEST_MAX_ITEMS = Math.max(1, Math.min(5,
+            Integer.parseInt(loadProperty("radar.digest.max.items", "3"))));
+    public static final int INTEREST_RADAR_DAILY_MAX_PUSHES = Math.max(1, Math.min(24,
+            Integer.parseInt(loadProperty("radar.daily.max.pushes", "8"))));
+    public static final String INTEREST_RADAR_QUIET_START =
+            loadProperty("radar.quiet.start", "23:00");
+    public static final String INTEREST_RADAR_QUIET_END =
+            loadProperty("radar.quiet.end", "08:00");
     public static final Path SDK_RESUME_CONTEXT_FILE =
             Path.of(loadProperty("sdk.resume.context.file", "data/sdk-resume-context.json"));
     public static final String KUAIDI100_CUSTOMER = loadProperty("kuaidi100.customer", "");

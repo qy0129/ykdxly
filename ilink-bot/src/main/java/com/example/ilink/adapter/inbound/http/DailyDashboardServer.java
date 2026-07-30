@@ -5,6 +5,7 @@ import com.example.ilink.platform.network.CloudflareTunnel;
 
 import com.example.ilink.bootstrap.Config;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -26,6 +27,8 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.time.LocalDate;
+import java.time.LocalTime;
 
 /** 在 Bot 进程内提供单用户日报页面和待办完成接口。 */
 public final class DailyDashboardServer implements AutoCloseable {
@@ -172,6 +175,39 @@ public final class DailyDashboardServer implements AutoCloseable {
                 sendJson(exchange, 200, dashboardService.weatherSnapshot(tokenUsers.get(weatherToken)));
                 return;
             }
+            String todoToken = tokenOnly(path, "/api/todos/");
+            if (!todoToken.isBlank() && tokenUsers.containsKey(todoToken)
+                    && "POST".equals(exchange.getRequestMethod())) {
+                JsonObject input = readJson(exchange);
+                var todo = dashboardService.createTodo(
+                        tokenUsers.get(todoToken),
+                        string(input, "title"),
+                        LocalDate.parse(string(input, "date")),
+                        optionalTime(input, "time"),
+                        integer(input, "reminderMinutes", 0));
+                JsonObject response = new JsonObject();
+                response.addProperty("success", true);
+                response.addProperty("id", todo.id());
+                sendJson(exchange, 201, response);
+                return;
+            }
+            String planToken = tokenOnly(path, "/api/plan-tasks/");
+            if (!planToken.isBlank() && tokenUsers.containsKey(planToken)
+                    && "POST".equals(exchange.getRequestMethod())) {
+                JsonObject input = readJson(exchange);
+                var task = dashboardService.createPlanTask(
+                        tokenUsers.get(planToken),
+                        string(input, "title"),
+                        string(input, "description"),
+                        LocalDate.parse(string(input, "date")),
+                        integer(input, "estimatedMinutes", 30),
+                        stringOrDefault(input, "priority", "medium"));
+                JsonObject response = new JsonObject();
+                response.addProperty("success", true);
+                response.addProperty("id", task.id());
+                sendJson(exchange, 201, response);
+                return;
+            }
             String[] todoParts = actionParts(path, "/api/todos/");
             if (todoParts != null && tokenUsers.containsKey(todoParts[0])
                     && "POST".equals(exchange.getRequestMethod())) {
@@ -212,6 +248,40 @@ public final class DailyDashboardServer implements AutoCloseable {
         int separator = value.indexOf('/');
         if (separator <= 0 || separator == value.length() - 1) return null;
         return new String[]{value.substring(0, separator), value.substring(separator + 1)};
+    }
+
+    private String tokenOnly(String path, String prefix) {
+        if (!path.startsWith(prefix)) return "";
+        String value = path.substring(prefix.length());
+        return value.isBlank() || value.contains("/") ? "" : value;
+    }
+
+    private JsonObject readJson(HttpExchange exchange) throws IOException {
+        String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        if (body.isBlank()) throw new IllegalArgumentException("请求内容不能为空");
+        return JsonParser.parseString(body).getAsJsonObject();
+    }
+
+    private String string(JsonObject object, String name) {
+        return object.has(name) && !object.get(name).isJsonNull() ? object.get(name).getAsString().trim() : "";
+    }
+
+    private String stringOrDefault(JsonObject object, String name, String fallback) {
+        String value = string(object, name);
+        return value.isBlank() ? fallback : value;
+    }
+
+    private int integer(JsonObject object, String name, int fallback) {
+        try {
+            return object.has(name) ? object.get(name).getAsInt() : fallback;
+        } catch (RuntimeException error) {
+            return fallback;
+        }
+    }
+
+    private LocalTime optionalTime(JsonObject object, String name) {
+        String value = string(object, name);
+        return value.isBlank() ? null : LocalTime.parse(value);
     }
 
     private void sendResource(HttpExchange exchange, int status, String contentType, String resource)

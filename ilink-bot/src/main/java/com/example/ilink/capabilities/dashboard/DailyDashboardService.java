@@ -32,6 +32,7 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.concurrent.CompletableFuture;
+import java.util.UUID;
 
 /** 聚合待办、日历、计划和天气，生成日报页面需要的结构化数据。 */
 public final class DailyDashboardService {
@@ -105,6 +106,36 @@ public final class DailyDashboardService {
 
     public boolean completePlanTask(String userId, String taskId) {
         return userId != null && !userId.isBlank() && taskCheckins.completeById(userId, taskId);
+    }
+
+    public TodoItem createTodo(String userId, String title, LocalDate date, LocalTime time,
+                               int reminderMinutes) {
+        requireUser(userId);
+        if (title == null || title.isBlank()) throw new IllegalArgumentException("待办标题不能为空");
+        if (date == null) throw new IllegalArgumentException("待办日期不能为空");
+        LocalTime dueTime = time == null ? LocalTime.of(9, 0) : time;
+        return todoService.create(userId, title.trim(), date.atTime(dueTime), Math.max(0, reminderMinutes));
+    }
+
+    public PlanTask createPlanTask(String userId, String title, String description, LocalDate date,
+                                   int estimatedMinutes, String priority) {
+        requireUser(userId);
+        if (title == null || title.isBlank()) throw new IllegalArgumentException("计划标题不能为空");
+        if (date == null) throw new IllegalArgumentException("计划日期不能为空");
+        TaskPlan plan = planSessions.get(userId);
+        if (plan == null) {
+            LocalDate deadline = date.plusDays(6);
+            plan = new TaskPlan("PLAN-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(),
+                    "我的七日计划", deadline.toString(), "", LocalDate.now().toString(), List.of());
+        }
+        PlanTask task = new PlanTask(
+                "TASK-" + UUID.randomUUID().toString().substring(0, 8).toUpperCase(),
+                title.trim(), description, Math.max(15, estimatedMinutes), priority,
+                date.toString(), "pending");
+        List<PlanTask> tasks = new ArrayList<>(plan.tasks());
+        tasks.add(task);
+        planSessions.set(userId, plan.withTasks(tasks));
+        return task;
     }
 
     /** 只返回天气区域，供天气后台刷新使用，避免重新计算整张计划表。 */
@@ -258,6 +289,10 @@ public final class DailyDashboardService {
             weatherLoadingLocation = locationName;
             return true;
         }
+    }
+
+    private void requireUser(String userId) {
+        if (userId == null || userId.isBlank()) throw new IllegalArgumentException("用户身份不能为空");
     }
 
     private void refreshWeather(String locationName) {
