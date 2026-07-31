@@ -12,10 +12,11 @@ class IntentRecognizerCompoundFallbackTest {
     @Test
     void coverageRetryRestoresWeatherWhenFirstAssignmentOnlyReturnsExpress() {
         List<String> responses = List.of(
-                "{\"requirements\":["
+                "{\"message_mode\":\"command\",\"requirements\":["
                         + "{\"id\":\"r1\",\"text\":\"查询今天杭州天气\",\"depends_on\":[]},"
-                        + "{\"id\":\"r2\",\"text\":\"查询快递6466167676767941\",\"depends_on\":[]}]}",
-                "{\"actions\":[{\"requirement_id\":\"r2\",\"intent\":\"express_query\"}]}",
+                        + "{\"id\":\"r2\",\"text\":\"查询快递6466167676767941\",\"depends_on\":[]}],"
+                        + "\"actions\":[{\"requirement_id\":\"r2\",\"action_text\":\"查询快递6466167676767941\","
+                        + "\"intent\":\"express_query\"}]}",
                 "{\"actions\":[{\"requirement_id\":\"r1\",\"intent\":\"weather\","
                         + "\"weather_location\":\"杭州\",\"weather_day\":\"today\"}]}"
         );
@@ -29,15 +30,17 @@ class IntentRecognizerCompoundFallbackTest {
         assertEquals(List.of("weather", "express_query"),
                 plan.actions().stream().map(action -> action.route().intent()).toList());
         assertEquals("杭州", plan.actions().getFirst().route().weatherLocation());
-        assertEquals(3, index.get());
+        assertEquals(2, index.get());
     }
 
     @Test
     void assignmentAuditRestoresRequirementMissedBySplitter() {
         List<String> responses = List.of(
-                "{\"requirements\":[{\"id\":\"r1\",\"text\":\"帮我查一下快递\",\"depends_on\":[]}]}",
-                "{\"missing_requirements\":[{\"id\":\"r2\",\"text\":\"今天杭州的天气怎么样\",\"depends_on\":[]}],"
-                        + "\"actions\":[{\"requirement_id\":\"r1\",\"intent\":\"express_query\"}]}",
+                "{\"message_mode\":\"command\","
+                        + "\"requirements\":[{\"id\":\"r1\",\"text\":\"帮我查一下快递\",\"depends_on\":[]}],"
+                        + "\"missing_requirements\":[{\"id\":\"r2\",\"text\":\"今天杭州的天气怎么样\",\"depends_on\":[]}],"
+                        + "\"actions\":[{\"requirement_id\":\"r1\",\"action_text\":\"帮我查一下快递\","
+                        + "\"intent\":\"express_query\"}]}",
                 "{\"actions\":[{\"requirement_id\":\"r2\",\"intent\":\"weather\",\"weather_location\":\"杭州\"}]}"
         );
         AtomicInteger index = new AtomicInteger();
@@ -48,7 +51,7 @@ class IntentRecognizerCompoundFallbackTest {
 
         assertEquals(List.of("weather", "express_query"),
                 plan.actions().stream().map(action -> action.route().intent()).toList());
-        assertEquals(3, index.get());
+        assertEquals(2, index.get());
     }
 
     @Test

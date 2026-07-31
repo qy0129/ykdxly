@@ -52,7 +52,7 @@ public final class AutomationWebSearchTool implements Tool {
             ResearchQueryPlanner.ResearchPlan plan = queryPlanner.plan(query);
             List<SearchResult> collected = new ArrayList<>();
             for (String target : plan.targets()) collected.addAll(OfficialSourceCatalog.sourcesFor(target));
-            for (String subQuery : plan.queries()) {
+            for (String subQuery : plan.queries().stream().limit(3).toList()) {
                 try {
                     collected.addAll(search.search(subQuery, 5));
                 } catch (Exception error) {

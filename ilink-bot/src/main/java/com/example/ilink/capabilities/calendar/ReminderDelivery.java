@@ -26,6 +26,11 @@ public record ReminderDelivery(
                 null, now, "", dedupKey, null);
     }
 
+    public ReminderDelivery pending() {
+        return new ReminderDelivery(id, eventId, userId, scheduledAt, "pending", retryCount,
+                null, sentAt, errorMessage, dedupKey, null);
+    }
+
     public ReminderDelivery failed(LocalDateTime now, String error) {
         int retries = retryCount + 1;
         int delayMinutes = switch (retries) {

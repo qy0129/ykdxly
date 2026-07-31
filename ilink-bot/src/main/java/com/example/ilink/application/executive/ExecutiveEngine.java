@@ -208,8 +208,10 @@ public final class ExecutiveEngine implements AutoCloseable {
             }
             LocalDateTime base = task.nextRunAt() == null ? now : task.nextRunAt();
             LocalDateTime next = task.scheduleRule().nextAfter(base);
+            LocalDateTime nextDeadline = nextDeadline(task, next);
             ExecutiveTask recurring = stateMachine.transition(task, TaskStatus.READY)
-                    .withProgress(TaskStatus.READY, 0, next, 0, "");
+                    .withProgress(TaskStatus.READY, 0, next, 0, "")
+                    .withDeadline(nextDeadline);
             store.saveTask(recurring);
             logs.record(recurring, null, "TASK_CYCLE_COMPLETED", recurring.status().name(),
                     "周期任务本轮完成，下次执行：" + next, "{}");
@@ -259,6 +261,13 @@ public final class ExecutiveEngine implements AutoCloseable {
 
     static int backoffMinutes(int attempts) {
         return attempts <= 1 ? 1 : attempts == 2 ? 5 : 15;
+    }
+
+    private LocalDateTime nextDeadline(ExecutiveTask task, LocalDateTime nextRunAt) {
+        if (task.deadlineAt() == null || task.nextRunAt() == null
+                || !task.deadlineAt().isAfter(task.nextRunAt())) return null;
+        Duration window = Duration.between(task.nextRunAt(), task.deadlineAt());
+        return nextRunAt.plus(window);
     }
 
     @Override

@@ -15,6 +15,7 @@ public final class CapabilityRegistry {
     public CapabilityRegistry(List<CapabilityDefinition> definitions) {
         Map<String, CapabilityDefinition> indexed = new LinkedHashMap<>();
         for (CapabilityDefinition definition : definitions) indexed.put(definition.name(), definition);
+        RoutingGuideCatalog.verifyCoverage(indexed.keySet());
         capabilities = Map.copyOf(indexed);
     }
 

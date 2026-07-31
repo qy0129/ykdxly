@@ -4,6 +4,7 @@ import com.example.ilink.adapter.inbound.http.DailyDashboardServer;
 import com.example.ilink.adapter.inbound.http.ExpressHttpServer;
 import com.example.ilink.adapter.inbound.http.SessionManagementServer;
 import com.example.ilink.adapter.outbound.wechat.WechatReplyChannel;
+import com.example.ilink.adapter.outbound.wechat.WechatContextInvalidException;
 import com.example.ilink.application.integration.WechatWebBridge;
 import com.example.ilink.application.briefing.LoginBriefingService;
 import com.example.ilink.application.executive.ExecutiveRuntime;
@@ -67,10 +68,14 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
     private final LocationService locationService;
     private final ScheduledExecutorService progressScheduler = Executors.newScheduledThreadPool(1);
     private final ScheduledExecutorService reminderScheduler = Executors.newScheduledThreadPool(1);
+    private final ScheduledExecutorService executiveNotificationScheduler =
+            Executors.newSingleThreadScheduledExecutor();
     private final ScheduledExecutorService briefingScheduler = Executors.newSingleThreadScheduledExecutor();
     private final ScheduledExecutorService radarScheduler = Executors.newSingleThreadScheduledExecutor();
     private final AtomicBoolean briefingInProgress = new AtomicBoolean();
     private final AtomicBoolean locationRequestSent = new AtomicBoolean();
+    private final AtomicBoolean notificationPauseLogged = new AtomicBoolean();
+    private final Set<String> freshContextUsers = ConcurrentHashMap.newKeySet();
     private final AtomicReference<String> ownerUserId = new AtomicReference<>(Config.PERSONAL_OWNER_USER_ID);
     private volatile boolean briefingSent;
     private volatile String activeUserId = "";
@@ -112,6 +117,8 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         expressHttpServer.start();
         startExpressTunnel();
         reminderScheduler.scheduleAtFixedRate(this::sendDueReminders, 1, 1, TimeUnit.SECONDS);
+        executiveNotificationScheduler.scheduleWithFixedDelay(
+                this::sendDueExecutiveNotifications, 1, 3, TimeUnit.SECONDS);
         if (Config.INTEREST_RADAR_ENABLED) {
             radarScheduler.scheduleWithFixedDelay(this::sendRadarUpdates,
                     Config.INTEREST_RADAR_POLL_MINUTES,
@@ -142,6 +149,8 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
     /** 首次扫码时直接接收登录回调中的微信身份，避免依赖 SDK 内部状态写入时序。 */
     public void onClientReady(ILinkClient client, String loginUserId) {
         this.activeClient = client;
+        freshContextUsers.clear();
+        activeUserId = "";
         String resumedUserId = currentUserId(client);
         if (resumedUserId.isBlank()) {
             resumedUserId = loginUserId == null ? "" : loginUserId.trim();
@@ -154,24 +163,32 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         briefingSent = false;
         briefingInProgress.set(false);
         locationRequestSent.set(false);
-        if (Config.LOCATION_ENABLED) {
-            briefingScheduler.schedule(() -> sendLoginLocationRequest(client), 1, TimeUnit.SECONDS);
-        }
-        if (Config.LOGIN_BRIEFING_ENABLED) {
-            System.out.println("[登录简报] 登录触发，等待会话上下文就绪");
-            briefingScheduler.schedule(() -> sendLoginBriefing(client), 1, TimeUnit.SECONDS);
-        }
+        notificationPauseLogged.set(false);
+        System.out.println("[登录简报] 登录成功，等待用户新消息刷新会话上下文 Token");
     }
 
     /** 接收一条 SDK 消息，并异步提交给内部处理流程。 */
     public void handleMessage(ILinkClient client, IncomingMessage message) {
         activeClient = client;
         String userId = message.principalId();
+        freshContextUsers.add(userId);
+        activeUserId = userId;
         webBridge.updateActiveUser(userId);
         String inboundText = message.parts().stream().filter(com.example.ilink.application.messaging.MessagePart.Text.class::isInstance)
                 .map(com.example.ilink.application.messaging.MessagePart.Text.class::cast)
                 .map(com.example.ilink.application.messaging.MessagePart.Text::text).findFirst().orElse("");
-        webBridge.recordIncoming(userId, inboundText);
+        if (!inboundText.isBlank()) webBridge.recordIncoming(userId, inboundText);
+        for (MessagePart part : message.parts()) {
+            if (part instanceof MessagePart.Image image) {
+                webBridge.recordIncomingImage(userId, image.content(), image.fileName(), "");
+            } else if (part instanceof MessagePart.File file) {
+                webBridge.recordIncomingFile(userId, file.content(), file.fileName(), "");
+            } else if (part instanceof MessagePart.Voice voice) {
+                webBridge.recordIncomingVoice(userId, voice.content(), voice.transcript());
+            } else if (part instanceof MessagePart.Video video) {
+                webBridge.recordIncomingVideo(userId, video.content(), video.fileName());
+            }
+        }
         if (webBridge.consumePairing(userId, inboundText)) {
             try { channel(client).sendText(userId, "已绑定本地 Web 控制台，可以在电脑端查看同步消息。 "); }
             catch (Exception ignored) { }
@@ -182,7 +199,7 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         } catch (Exception e) {
             System.err.println("[欢迎] 处理失败: " + e.getMessage());
         }
-        AgentContext context = AgentContext.wechat(userId, channel(client));
+        AgentContext context = AgentContext.wechat(userId, webBridge.sessionIdFor(userId), channel(client));
         activeUserId = userId;
         dailyDashboardServer.useUser(userId);
         sessionManagementServer.useUser(userId);
@@ -196,7 +213,7 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         ScheduledFuture<?> progressTask = progressScheduler.schedule(() -> {
             try {
                 if (!voiceOnly && !replySender.hasSentReplySince(userId, startedAtMillis)) {
-                    client.sendText(userId, "正在回复中，请稍等......");
+                    channel(client).sendText(userId, "正在回复中，请稍等......");
                 }
             } catch (Exception e) {
                 System.err.println("发送处理中提示失败: " + e.getMessage());
@@ -218,6 +235,7 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
     public void close() {
         progressScheduler.shutdownNow();
         reminderScheduler.shutdownNow();
+        executiveNotificationScheduler.shutdownNow();
         briefingScheduler.shutdownNow();
         radarScheduler.shutdownNow();
         dailyDashboardServer.close();
@@ -240,12 +258,16 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
             try {
                 replySender.sendReply(channel(client), userId, ReminderTextFormatter.format(event));
                 calendarService.markReminderSent(delivery, LocalDateTime.now());
+            } catch (WechatContextInvalidException error) {
+                releaseContextAfterFailure(userId);
+                calendarService.releaseReminder(delivery);
+                System.err.println("[日历提醒] 会话上下文失效，等待用户下一条消息后补发");
+                return;
             } catch (Exception e) {
                 System.err.println("[日历提醒] 发送失败: " + e.getMessage());
                 calendarService.markReminderFailed(delivery, LocalDateTime.now(), e.getMessage());
             }
         }
-        sendExecutiveNotifications(client, userId);
     }
 
     private void sendRadarUpdates() {
@@ -294,15 +316,37 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
                         || value.equals("打开七日计划页"));
     }
 
-    private void sendExecutiveNotifications(ILinkClient client, String userId) {
+    private void sendDueExecutiveNotifications() {
         if (executiveRuntime == null) return;
-        for (OutboxMessage message : executiveRuntime.pendingNotifications(userId, 10)) {
+        ILinkClient client = activeClient;
+        if (client == null || !client.isLoggedIn()) {
+            if (notificationPauseLogged.compareAndSet(false, true)) {
+                System.err.println("[Executive 通知] 暂停发送：微信客户端未登录，通知保留在 Outbox");
+            }
+            return;
+        }
+        notificationPauseLogged.set(false);
+        for (OutboxMessage message : executiveRuntime.pendingNotifications(20)) {
+            String userId = message.userId();
+            if (userId == null || userId.isBlank()) {
+                System.err.println("[Executive 通知] 发送失败：Outbox 缺少目标用户，outbox=" + message.id());
+                executiveRuntime.markNotificationFailed(message);
+                continue;
+            }
             try {
                 replySender.sendReply(channel(client), userId, message.content());
                 executiveRuntime.markNotificationSent(message);
-            } catch (Exception error) {
-                System.err.println("[Executive 通知] 发送失败: " + error.getMessage());
+                System.out.println("[Executive 通知] 发送成功 task=" + message.taskId()
+                        + " outbox=" + message.id() + " user=" + userId);
+            } catch (WechatContextInvalidException error) {
+                releaseContextAfterFailure(userId);
                 executiveRuntime.markNotificationFailed(message);
+                System.err.println("[Executive 通知] 会话上下文失效，已安排重试 task="
+                        + message.taskId() + " outbox=" + message.id());
+            } catch (Exception error) {
+                executiveRuntime.markNotificationFailed(message);
+                System.err.println("[Executive 通知] 发送失败，已安排重试 task=" + message.taskId()
+                        + " outbox=" + message.id() + " error=" + error.getMessage());
             }
         }
     }
@@ -339,6 +383,10 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
                 visualDeckSender.sendText(channel(client), userId, textFallback);
                 briefingSent = true;
                 System.out.println("[登录简报] 发送成功 user=" + userId);
+            } catch (WechatContextInvalidException error) {
+                releaseContextAfterFailure(userId);
+                System.err.println("[登录简报] 会话上下文失效，等待用户下一条消息后补发");
+                return;
             } catch (Exception e) {
                 System.err.println("[登录简报] 发送失败 user=" + userId + ": " + e.getMessage());
             }
@@ -351,6 +399,11 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
                 try {
                     replySender.sendReply(channel(client), userId, ReminderTextFormatter.format(event));
                     calendarService.markReminderSent(delivery, LocalDateTime.now());
+                } catch (WechatContextInvalidException error) {
+                    releaseContextAfterFailure(userId);
+                    calendarService.releaseReminder(delivery);
+                    System.err.println("[离线提醒] 会话上下文失效，等待用户下一条消息后补发");
+                    return;
                 } catch (Exception e) {
                     System.err.println("[离线提醒] 补发失败 user=" + userId + ": " + e.getMessage());
                     calendarService.markReminderFailed(delivery, LocalDateTime.now(), e.getMessage());
@@ -365,7 +418,9 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         var resume = client.exportResumeContext();
         if (resume == null) return false;
         var context = resume.getConversationContextMap().get(userId);
-        return context != null && context.hasContextToken();
+        return freshContextUsers.contains(userId)
+                && context != null
+                && context.hasContextToken();
     }
 
     /** 登录后自动发送一次定位授权链接；首次登录缺少会话上下文时由第一条消息补发。 */
@@ -385,8 +440,12 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
             return;
         }
         try {
-            client.sendText(userId, "请打开下面的链接授权当前位置。页面打开后会自动请求手机定位权限：\n" + url);
+            channel(client).sendText(userId, "请打开下面的链接授权当前位置。页面打开后会自动请求手机定位权限：\n" + url);
             System.out.println("[位置] 登录定位链接已发送 user=" + userId);
+        } catch (WechatContextInvalidException error) {
+            locationRequestSent.set(false);
+            releaseContextAfterFailure(userId);
+            System.err.println("[位置] 会话上下文失效，等待用户下一条消息后补发");
         } catch (Exception error) {
             locationRequestSent.set(false);
             System.err.println("[位置] 登录定位链接发送失败: " + error.getMessage());
@@ -397,7 +456,10 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         ILinkClient client = activeClient;
         if (client == null || !client.isLoggedIn() || !hasSendContext(client, userId)) return;
         try {
-            client.sendText(userId, "当前位置已更新：" + address);
+            channel(client).sendText(userId, "当前位置已更新：" + address);
+        } catch (WechatContextInvalidException error) {
+            releaseContextAfterFailure(userId);
+            System.err.println("[位置] 会话上下文失效，暂不发送位置更新");
         } catch (Exception error) {
             System.err.println("[位置] 更新确认发送失败: " + error.getMessage());
         }
@@ -410,6 +472,11 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         return ReminderTextFormatter.format(event);
     }
 
+    private void releaseContextAfterFailure(String userId) {
+        freshContextUsers.remove(userId);
+        locationRequestSent.set(false);
+    }
+
     private String currentUserId(ILinkClient client) {
         String current = activeUserId;
         if (!current.isBlank() && hasSendContext(client, current)) return current;
@@ -417,7 +484,9 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         if (resume == null) return "";
         String found = "";
         for (var entry : resume.getConversationContextMap().entrySet()) {
-            if (entry.getValue() == null || !entry.getValue().hasContextToken()) continue;
+            if (!freshContextUsers.contains(entry.getKey())
+                    || entry.getValue() == null
+                    || !entry.getValue().hasContextToken()) continue;
             if (!found.isBlank()) return "";
             found = entry.getKey();
         }
@@ -456,15 +525,18 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
     @Override public void mirrorWebInput(String userId, String text) throws Exception {
         ILinkClient client = activeClient;
         if (client == null || !client.isLoggedIn()) throw new IllegalStateException("微信 Bot 尚未登录");
-        client.sendText(userId, "【来自 Web 工作台】\n" + text);
+        channel(client).sendText(userId, "【来自 Web 工作台】\n" + text);
     }
     @Override public void processText(String userId, String text) throws Exception {
+        processText(userId, webBridge.sessionIdFor(userId), text);
+    }
+    @Override public void processText(String userId, String sessionId, String text) throws Exception {
         ILinkClient client = activeClient;
         if (client == null || !client.isLoggedIn()) throw new IllegalStateException("微信 Bot 尚未登录");
         activeUserId = userId;
         dailyDashboardServer.useUser(userId);
         sessionManagementServer.useUser(userId);
-        AgentContext context = AgentContext.wechat(userId, channel(client));
+        AgentContext context = AgentContext.wechat(userId, sessionId, channel(client));
         messageProcessor.process(context, new IncomingMessage(context.identity(), List.of(new MessagePart.Text(text))));
     }
 }

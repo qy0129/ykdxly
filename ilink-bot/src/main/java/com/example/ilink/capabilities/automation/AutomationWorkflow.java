@@ -3,6 +3,7 @@ package com.example.ilink.capabilities.automation;
 import com.example.ilink.application.executive.ExecutiveRuntime;
 import com.example.ilink.application.executive.ExecutiveTaskService;
 import com.example.ilink.application.executive.ScheduleRule;
+import com.example.ilink.bootstrap.Config;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -25,8 +26,10 @@ public final class AutomationWorkflow {
 
     public ExecutiveTaskService.Submission submit(String userId, String intent, String text) {
         AutomationSpec spec = parser.parse(intent, text);
+        LocalDateTime deadline = spec.schedule().nextRunAt().plus(Config.AUTOMATION_TASK_TIMEOUT);
         return runtime.submit(userId, spec.goal(), "wechat", "", dedupKey(userId, spec),
-                "medium", null, LocalDateTime.now(), ScheduleRule.NONE, plans.build(spec));
+                "medium", deadline, spec.schedule().nextRunAt(),
+                spec.schedule().rule(), plans.build(spec));
     }
 
     public boolean looksLikeAutomation(String text) {
@@ -37,7 +40,9 @@ public final class AutomationWorkflow {
         try {
             LocalDateTime now = LocalDateTime.now();
             LocalDateTime window = now.withMinute(now.getMinute() / 5 * 5).withSecond(0).withNano(0);
-            String value = WORKFLOW_VERSION + "|" + userId + "|" + window + "|" + spec.type() + "|"
+            String windowKey = spec.schedule().rule() == ScheduleRule.NONE ? window.toString() : "recurring";
+            String value = WORKFLOW_VERSION + "|" + userId + "|" + windowKey + "|" + spec.type() + "|"
+                    + spec.schedule().rule() + "|"
                     + spec.goal().replaceAll("\\s+", " ").trim();
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
             return "automation:" + HexFormat.of().formatHex(digest).substring(0, 24);

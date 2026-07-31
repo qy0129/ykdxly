@@ -24,14 +24,23 @@ class IntentPolicyTest {
     void explicitDocumentFormatsAreRecognized() {
         assertEquals("pdf", IntentPolicy.explicitOutputFileType("整理成 PDF 给我"));
         assertEquals("docx", IntentPolicy.explicitOutputFileType("导出为 Word 文档"));
+        assertEquals("xlsx", IntentPolicy.explicitOutputFileType("生成 Excel 文件"));
+        assertEquals("md", IntentPolicy.explicitOutputFileType("保存为 Markdown"));
+        assertEquals("csv", IntentPolicy.explicitOutputFileType("导出 CSV 文件"));
+        assertEquals("xlsx", IntentPolicy.explicitOutputFileType("生成一份项目表格"));
         assertTrue(IntentPolicy.hasExplicitFileRequest("导出为 Word 文档"));
         assertTrue(IntentPolicy.isFileTypeAnswer("PDF 格式"));
+        assertTrue(IntentPolicy.isFileTypeAnswer("Excel"));
     }
 
     @Test
     void imageAndDocumentEditsAreSeparatedByExplicitObject() {
         assertTrue(IntentPolicy.isExplicitImageEdit("把这张图片改成水彩风格"));
+        assertTrue(IntentPolicy.isExplicitImageEdit("将上面生成那只小猫的眼睛上戴一个墨镜"));
+        assertTrue(IntentPolicy.isExplicitImageEdit("帮我在刚刚那只小猫的图片上再加一个小狗"));
         assertTrue(IntentPolicy.isExplicitDocumentEdit("把文档第三段删除"));
+        assertTrue(IntentPolicy.isDocumentImageInsertion("把刚才的图片插入文档第二页"));
+        assertTrue(IntentPolicy.isExplicitDocumentEdit("把第三段里的甲方替换成乙方"));
         assertFalse(IntentPolicy.isExplicitDocumentEdit("把这张图片改成水彩风格"));
     }
 
@@ -48,6 +57,14 @@ class IntentPolicyTest {
         assertTrue(IntentPolicy.isCasualGreeting("你好"));
         assertTrue(IntentPolicy.isCasualGreeting("在吗？"));
         assertFalse(IntentPolicy.isCasualGreeting("你好，帮我查天气"));
+    }
+
+    @Test
+    void explicitTodoCreationIsSeparatedFromTodoQuestions() {
+        assertTrue(IntentPolicy.isExplicitTodoCreation("新建以下待办事项：明天交周报"));
+        assertTrue(IntentPolicy.isExplicitTodoCreation("帮我把明天买菜加入待办"));
+        assertFalse(IntentPolicy.isExplicitTodoCreation("如何创建待办？"));
+        assertFalse(IntentPolicy.isExplicitTodoCreation("我们讨论一下待办管理功能"));
     }
 
     @Test
@@ -100,6 +117,25 @@ class IntentPolicyTest {
                 action, new IntentContext(true, true, false, false, false));
 
         assertEquals("分析这张图片里的表格", action.get("image_prompt").getAsString());
+    }
+
+    @Test
+    void explicitImageEditCorrectsChatIntentAndMissingSubtype() throws Exception {
+        IntentRecognizer recognizer = new IntentRecognizer(HttpClient.newHttpClient());
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "chat");
+
+        Method normalize = IntentRecognizer.class.getDeclaredMethod(
+                "normalizeAction", String.class, String.class, JsonObject.class, IntentContext.class);
+        normalize.setAccessible(true);
+        normalize.invoke(recognizer, "帮我在刚刚那只小猫的图片上再加一个小狗",
+                "帮我在刚刚那只小猫的图片上再加一个小狗", action,
+                new IntentContext(false, true, false, false, false));
+
+        assertEquals("image_action", action.get("intent").getAsString());
+        assertEquals("edit", action.get("image_action").getAsString());
+        assertEquals("帮我在刚刚那只小猫的图片上再加一个小狗",
+                action.get("image_prompt").getAsString());
     }
 
     @Test

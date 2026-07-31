@@ -11,6 +11,7 @@ import com.example.ilink.capabilities.life.StudyPlanBuilder;
 import com.example.ilink.capabilities.life.StudyPlanDraft;
 import com.example.ilink.capabilities.life.StudyPlanProfile;
 import com.example.ilink.capabilities.life.TaskCheckinService;
+import com.example.ilink.capabilities.calendar.CalendarEvent;
 import com.example.ilink.capabilities.planning.PlanTask;
 import com.example.ilink.capabilities.planning.TaskPlan;
 import com.example.ilink.capabilities.planning.TaskPlanningService;
@@ -182,6 +183,11 @@ public final class LifeWorkflow {
 
     public void reflectionHistory(ReplyChannel client, String userId) throws Exception {
         replySender.sendReply(client, userId, reflections.history(userId));
+    }
+
+    /** 开启或更新时间唯一的每日复盘事件，供待办监督流程复用。 */
+    public CalendarEvent enableDailyReflection(String userId, LocalTime time) {
+        return reflections.ensureDailyReminder(userId, time);
     }
 
     public boolean completePlanTaskById(String userId, String taskId) {

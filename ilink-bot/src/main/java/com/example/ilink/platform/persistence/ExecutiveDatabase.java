@@ -470,6 +470,25 @@ public final class ExecutiveDatabase {
         return messages;
     }
 
+    public List<OutboxMessage> pendingOutbox(LocalDateTime now, int limit) {
+        if (!available()) return List.of();
+        String sql = "SELECT * FROM notification_outbox WHERE bot_id=? "
+                + "AND status='PENDING' AND available_at<=? ORDER BY created_at LIMIT ?";
+        List<OutboxMessage> messages = new ArrayList<>();
+        try (Connection connection = database.openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, Config.DATABASE_BOT_ID);
+            statement.setTimestamp(2, Timestamp.valueOf(now));
+            statement.setInt(3, Math.max(1, limit));
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) messages.add(outbox(result));
+            }
+        } catch (SQLException error) {
+            failure("读取待发送通知", error);
+        }
+        return messages;
+    }
+
     private ExecutiveTask task(ResultSet result) throws SQLException {
         return new ExecutiveTask(result.getString("id"), result.getString("user_id"),
                 result.getString("goal"), result.getString("source_type"), result.getString("source_id"),

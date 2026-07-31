@@ -65,7 +65,7 @@ public final class AutomationAnalysisService {
             messages.add(message("user", prompt));
             body.add("messages", messages);
             HttpRequest request = HttpRequest.newBuilder(URI.create(Config.API_BASE_URL))
-                    .timeout(Config.REQ_TIMEOUT)
+                    .timeout(Config.AUTOMATION_ANALYSIS_TIMEOUT)
                     .header("Authorization", "Bearer " + Config.API_KEY)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofString(body.toString())).build();

@@ -5,6 +5,7 @@ import com.example.ilink.adapter.inbound.wechat.MessageDispatcher;
 import com.example.ilink.adapter.inbound.wechat.WechatMessageAdapter;
 import com.example.ilink.application.messaging.IncomingMessage;
 import com.example.ilink.application.messaging.MessageSerialExecutor;
+import com.example.ilink.application.messaging.ConsoleLog;
 
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.platform.sdk.SdkResumeContextStore;
@@ -289,6 +290,7 @@ public class ILinkBot {
 
     /** Java 程序入口，注册退出钩子后启动机器人。 */
     public static void main(String[] args) {
+        ConsoleLog.installLegacyBridge();
         ILinkBot bot = new ILinkBot();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("\n正在退出...");

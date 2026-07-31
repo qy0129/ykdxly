@@ -27,6 +27,40 @@ import static org.junit.jupiter.api.Assertions.*;
 class AutomationModuleTest {
 
     @Test
+    void parsesWeeklyMondayMorningSchedule() {
+        LocalDateTime now = LocalDateTime.of(2026, 7, 31, 12, 0);
+
+        AutomationSchedule schedule = AutomationSchedule.parse(
+                "每周一早上自动搜索大模型行业新闻", now);
+
+        assertEquals(com.example.ilink.application.executive.ScheduleRule.WEEKLY, schedule.rule());
+        assertEquals(LocalDateTime.of(2026, 8, 3, 9, 0), schedule.nextRunAt());
+    }
+
+    @Test
+    void parsesDailyEveningSchedule() {
+        LocalDateTime now = LocalDateTime.of(2026, 7, 31, 12, 0);
+
+        AutomationSchedule schedule = AutomationSchedule.parse(
+                "每天晚上8点整理新闻", now);
+
+        assertEquals(com.example.ilink.application.executive.ScheduleRule.DAILY, schedule.rule());
+        assertEquals(LocalDateTime.of(2026, 7, 31, 20, 0), schedule.nextRunAt());
+    }
+
+    @Test
+    void recognizesScheduledNewsAutomationAndCleansSearchQuery() {
+        String request = "每周一早上自动搜索大模型行业新闻，整理简报微信推送给我";
+        AutomationRequestParser parser = new AutomationRequestParser();
+
+        AutomationSpec spec = parser.parse("automation_research", request);
+
+        assertTrue(parser.looksLikeAutomation(request));
+        assertEquals("大模型行业新闻，整理简报微信推送给我", spec.query());
+        assertEquals(com.example.ilink.application.executive.ScheduleRule.WEEKLY, spec.schedule().rule());
+    }
+
+    @Test
     void deduplicatesSearchResultsByUrl() {
         SearchResult first = new SearchResult("A", "one", "x", "", "https://example.com/a");
         SearchResult duplicate = new SearchResult("A2", "two", "x", "", "https://example.com/a");

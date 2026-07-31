@@ -104,6 +104,10 @@ public final class ReminderDeliveryStore {
         save(delivery.sent(now));
     }
 
+    public synchronized void release(ReminderDelivery delivery) {
+        save(delivery.pending());
+    }
+
     public synchronized void markFailed(ReminderDelivery delivery, LocalDateTime now, String error) {
         save(delivery.failed(now, error));
     }

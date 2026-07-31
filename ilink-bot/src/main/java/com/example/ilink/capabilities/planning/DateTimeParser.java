@@ -253,6 +253,18 @@ public final class DateTimeParser {
                 || isCurrentTimeExpression(value);
     }
 
+    /** 日期明确但只给出时段时，统一补充可执行的默认时刻。 */
+    public static LocalDateTime applyPeriodDefault(String expression, LocalDateTime parsed) {
+        if (parsed == null || hasExplicitTime(expression)
+                || !parsed.toLocalTime().equals(END_OF_DAY)) return parsed;
+        String value = expression == null ? "" : expression;
+        if (value.matches(".*(上午|早上).*")) return parsed.with(LocalTime.of(9, 0));
+        if (value.contains("中午")) return parsed.with(LocalTime.NOON);
+        if (value.contains("下午")) return parsed.with(LocalTime.of(14, 0));
+        if (value.matches(".*(晚上|傍晚|今晚).*")) return parsed.with(LocalTime.of(18, 0));
+        return parsed;
+    }
+
     /** 判断原话是否真的包含可用于提醒的时刻证据，防止模型凭空补出默认时间。 */
     public static boolean hasTimeEvidence(String expression) {
         if (expression == null || expression.isBlank()) return false;

@@ -1,17 +1,28 @@
 package com.example.ilink.application.integration;
 
 import com.example.ilink.adapter.outbound.web.WebEventBroker;
+import com.example.ilink.adapter.outbound.web.WebArtifactStore;
+import com.example.ilink.application.conversation.ConversationSession;
+import com.example.ilink.application.conversation.UserSessionStore;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Proxy;
+import java.time.LocalDateTime;
+import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class WechatWebBridgeTest {
+
+    @TempDir
+    Path tempDir;
 
     @Test
     void pairingMirrorsOnlyBotVisibleMessagesAndSendsWithoutDuplicateRecord() throws Exception {
@@ -103,6 +114,54 @@ class WechatWebBridgeTest {
         assertEquals(List.of("继续完成任务"), gateway.processedTexts);
         assertEquals("sync_failed", events.history(WechatWebBridge.EVENT_STREAM, 0)
                 .getLast().event().metadata().get("integrationType"));
+    }
+
+    @Test
+    void imageRepliesAreStoredForThePairedWebWorkspace() {
+        WebEventBroker events = new WebEventBroker();
+        WebArtifactStore artifacts = new WebArtifactStore(tempDir);
+        WechatWebBridge bridge = new WechatWebBridge(events, artifacts);
+        bridge.updateActiveUser("wechat-user");
+        bridge.attach(new Gateway());
+        bridge.activate("web-user");
+
+        bridge.recordOutgoingImage("wechat-user", new byte[] {1, 2, 3}, "draw.png", "图片已生成");
+
+        WechatWebBridge.Message message = bridge.messages("web-user").getLast();
+        assertEquals("image", message.kind());
+        assertFalse(message.artifactId().isBlank());
+        assertTrue(artifacts.find("web-user", message.artifactId()).isPresent());
+        var event = events.history(WechatWebBridge.EVENT_STREAM, 0).getLast().event();
+        assertEquals("image", event.metadata().get("kind"));
+        assertEquals(message.artifactId(), event.metadata().get("artifactId"));
+
+        bridge.recordOutgoingFile("wechat-user", new byte[] {4, 5}, "reply.mp3", "语音回复");
+        WechatWebBridge.Message audio = bridge.messages("web-user").getLast();
+        assertEquals("audio", audio.kind());
+        assertEquals("audio/mpeg", audio.contentType());
+    }
+
+    @Test
+    void webSessionSwitchChangesTheWechatConversationForTheNextMessage() {
+        AtomicReference<String> activeSession = new AtomicReference<>("wechat-session-a");
+        UserSessionStore sessions = (UserSessionStore) Proxy.newProxyInstance(
+                UserSessionStore.class.getClassLoader(), new Class<?>[] {UserSessionStore.class},
+                (proxy, method, args) -> {
+                    if (method.getName().equals("getCurrentSession")) {
+                        LocalDateTime now = LocalDateTime.now();
+                        return new ConversationSession("wechat-user", activeSession.get(), now, now);
+                    }
+                    if (method.getReturnType() == boolean.class) return false;
+                    if (method.getReturnType() == int.class) return 0;
+                    return null;
+                });
+        WechatWebBridge bridge = new WechatWebBridge(new WebEventBroker(), null, sessions);
+
+        bridge.updateActiveUser("wechat-user");
+        activeSession.set("web-session-b");
+        bridge.updateActiveUser("wechat-user");
+
+        assertEquals("web-session-b", bridge.sessionIdFor("wechat-user"));
     }
 
     private static final class Gateway implements WechatWebBridge.Gateway {

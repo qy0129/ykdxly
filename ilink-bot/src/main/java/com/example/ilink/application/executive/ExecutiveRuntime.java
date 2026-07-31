@@ -120,6 +120,10 @@ public final class ExecutiveRuntime implements AutoCloseable {
         return outbox.pending(userId, limit);
     }
 
+    public List<OutboxMessage> pendingNotifications(int limit) {
+        return outbox.pending(limit);
+    }
+
     public void markNotificationSent(OutboxMessage message) {
         outbox.markSent(message);
     }

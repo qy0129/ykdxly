@@ -33,11 +33,14 @@ import com.example.ilink.capabilities.radar.InterestRadarService;
 import com.example.ilink.capabilities.media.MediaKnowledgeResponse;
 import com.example.ilink.capabilities.media.MediaKnowledgeService;
 import com.example.ilink.capabilities.planning.TodoService;
-import com.example.ilink.capabilities.planning.TodoBatchParser;
-import com.example.ilink.capabilities.planning.TodoDraft;
+import com.example.ilink.capabilities.planning.TodoConflictResolver;
+import com.example.ilink.capabilities.planning.TodoConflictState;
+import com.example.ilink.capabilities.planning.TodoPlan;
+import com.example.ilink.capabilities.planning.TodoPlanningService;
 import com.example.ilink.capabilities.weather.WeatherLocation;
 import com.example.ilink.capabilities.weather.WeatherService;
 import com.example.ilink.capabilities.documents.DocumentService;
+import com.example.ilink.capabilities.documents.DocumentFileType;
 import com.example.ilink.capabilities.web.NewsSearchService;
 import com.example.ilink.capabilities.web.BilibiliSearchService;
 import com.example.ilink.capabilities.web.WebSearchService;
@@ -77,13 +80,17 @@ import com.google.gson.JsonObject;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 用户文本请求处理器。
@@ -133,7 +140,8 @@ public final class UserRequestHandler {
     private final LocationService locationService;
     private final ActionPlanExecutor actionPlanExecutor = new ActionPlanExecutor();
     private final CapabilityContractValidator capabilityValidator = new CapabilityContractValidator();
-    private final TodoBatchParser todoBatchParser = new TodoBatchParser();
+    private final TodoPlanningService todoPlanningService;
+    private final TodoConflictResolver todoConflictResolver;
     private final SuggestedActionStore suggestedActions = new SuggestedActionStore();
     private final ThreadLocal<Boolean> executingSuggestedAction = ThreadLocal.withInitial(() -> false);
 
@@ -152,6 +160,7 @@ public final class UserRequestHandler {
                                FoodOrderWorkflow foodOrderWorkflow,
                               TaxiWorkflow taxiWorkflow,
                               MemoryService memoryService, TodoService todoService,
+                              TodoPlanningService todoPlanningService,
                               WebSearchService webSearchService, NewsSearchService newsSearchService,
                               BilibiliSearchService bilibiliSearchService,
                               MediaKnowledgeService mediaKnowledgeService, QqMailService qqMailService,
@@ -180,6 +189,8 @@ public final class UserRequestHandler {
         this.taxiWorkflow = taxiWorkflow;
         this.memoryService = memoryService;
         this.todoService = todoService;
+        this.todoPlanningService = todoPlanningService;
+        this.todoConflictResolver = new TodoConflictResolver(todoService);
         this.webSearchService = webSearchService;
         this.newsSearchService = newsSearchService;
         this.bilibiliSearchService = bilibiliSearchService;
@@ -200,8 +211,27 @@ public final class UserRequestHandler {
                 || visualCardWorkflow.hasPending(userId);
     }
 
+    /** 使用完整上下文调用一次大模型，供消息入口和执行器复用同一份路由结果。 */
+    public IntentPlan analyze(AgentContext agentContext, String text) {
+        String userId = agentContext.principalId();
+        IntentContext intentContext = new IntentContext(
+                sessions.peekPendingImage(userId) != null,
+                sessions.getLastImage(userId) != null,
+                sessions.peekPendingDraw(userId) != null,
+                documentSessions.get(userId) != null,
+                false);
+        publishActivity("正在分析请求", "model", "running", Map.of("model", "Qwen"));
+        return intentRecognizer.recognize(userId, text,
+                buildRoutingContext(agentContext, intentContext, text));
+    }
+
     /** 识别用户意图并调用对应功能处理器。 */
     public void handle(AgentContext agentContext, String text) throws Exception {
+        handle(agentContext, text, null);
+    }
+
+    /** 执行已分析的请求；传入计划时不会重复调用意图模型。 */
+    public void handle(AgentContext agentContext, String text, IntentPlan recognizedPlan) throws Exception {
         ReplyChannel client = agentContext.replyChannel();
         String userId = agentContext.principalId();
         if (handleReplyPreference(client, userId, text)) return;
@@ -252,6 +282,11 @@ public final class UserRequestHandler {
         if (hasBlockingPending(userId) && !acceptsBlockingReply(userId, text)) {
             clearBlockingPending(userId);
             actionPlanExecutor.cancel(userId);
+        }
+
+        if (sessions.hasPendingTodoConflict(userId)) {
+            handlePendingTodoConflict(agentContext, text);
+            return;
         }
 
         if (handleRepeatCommand(client, userId, text)) return;
@@ -345,12 +380,6 @@ public final class UserRequestHandler {
             return;
         }
 
-        // 高频待办请求走本地解析，避免为明确的提醒语句构建完整上下文并调用多轮路由模型。
-        if (looksLikeFastTodo(text)) {
-            handleTodoAction(client, userId, text);
-            return;
-        }
-
         // 根据当前用户的临时状态构造上下文，让意图识别知道用户正在处理什么。
         IntentContext intentContext = new IntentContext(
                 sessions.peekPendingImage(userId) != null,
@@ -358,19 +387,41 @@ public final class UserRequestHandler {
                 sessions.peekPendingDraw(userId) != null,
                 documentSessions.get(userId) != null,
                 false);
-        publishActivity("正在分析请求", "model", "running", Map.of("model", "Qwen"));
-        IntentPlan plan = intentRecognizer.recognize(userId, text,
-                buildRoutingContext(agentContext, intentContext, text));
+        IntentPlan plan = recognizedPlan == null ? analyze(agentContext, text) : recognizedPlan;
         if (plan == null || plan.isEmpty()) {
             replySender.sendReply(client, userId, "网络波动了，请再发一次～");
             return;
         }
-        RoutePlanReviewer.Review review = routePlanReviewer.review(plan, intentContext);
-        if (review.needsInput()) {
-            replySender.sendReply(client, userId, review.prompt());
+        if (plan.messageMode() == com.example.ilink.application.routing.MessageMode.AMBIGUOUS) {
+            replySender.sendReply(client, userId,
+                    "我还不确定你是希望我执行操作，还是只是在描述这件事。请明确告诉我要创建、查询、修改或生成什么。");
             return;
         }
-        plan = review.plan();
+        if (plan.messageMode() == com.example.ilink.application.routing.MessageMode.CONTINUATION) {
+            replySender.sendReply(client, userId,
+                    "当前没有可继续的等待步骤。请把要继续处理的具体内容再说明一下。");
+            return;
+        }
+        if (plan.messageMode() == com.example.ilink.application.routing.MessageMode.CHAT
+                && plan.actions().stream().anyMatch(action -> !"chat".equals(action.route().intent()))) {
+            replySender.sendReply(client, userId,
+                    "我还不能确认你是否要我执行这些操作。请明确说“帮我创建、查询、修改或生成”。");
+            return;
+        }
+        if (plan.isPassiveMessage()) {
+            replySender.sendReply(client, userId,
+                    "我把这条内容识别为通知，但没有找到可以安全自动整理的待办或日历事项。");
+            return;
+        }
+        RoutePlanReviewer.Review review = routePlanReviewer.review(plan, intentContext);
+        if (review.needsInput()) {
+            if (review.plan() == null || review.plan().isEmpty()) {
+                replySender.sendReply(client, userId, review.prompt());
+                return;
+            }
+            replySender.sendReply(client, userId, "部分要求还需要补充信息：\n" + review.prompt());
+        }
+        plan = coalesceDependentActions(review.plan());
 
         String recognizedActions = String.join("、", plan.actions().stream()
                 .map(action -> intentName(action.route().intent())).toList());
@@ -380,7 +431,6 @@ public final class UserRequestHandler {
 
         System.out.println("[意图识别] 共识别 " + plan.actions().size() + " 个动作："
                 + plan.actions().stream().map(action -> intentName(action.route().intent())).toList());
-        plan = coalesceDependentActions(plan);
         if (plan.actions().size() > 1) {
             String actionNames = String.join("、", plan.actions().stream()
                     .map(action -> intentName(action.route().intent())).toList());
@@ -388,7 +438,7 @@ public final class UserRequestHandler {
                     + " 项要求：" + actionNames + "。现在依次处理。");
         }
         actionPlanExecutor.start(userId, plan,
-                action -> executeAction(agentContext, action),
+                action -> executeAction(agentContext, action, text),
                 () -> hasBlockingPending(userId),
                 (action, error) -> handleActionFailure(client, userId, action, error));
     }
@@ -520,8 +570,9 @@ public final class UserRequestHandler {
         }
     }
 
-    /** 执行已经由统一路由识别出的待办动作。 */
-    private void handleTodoAction(ReplyChannel client, String userId, String text) throws Exception {
+    /** 查询和变更直接本地执行，只有创建动作进入独立待办规划模型。 */
+    private void handleTodoAction(ReplyChannel client, String userId,
+                                  String text, String originalText) throws Exception {
         String normalized = text == null ? "" : text.trim();
         if (normalized.isBlank()) {
             replySender.sendReply(client, userId, "请告诉我要创建、查看、完成还是删除待办。");
@@ -542,12 +593,7 @@ public final class UserRequestHandler {
             replySender.sendReply(client, userId, todoService.cancel(userId, keyword));
             return;
         }
-        if (normalized.matches("^(请)?(帮我)?(添加|新增|创建|记)(一个|个)?待办.*|^待办[：:].*")
-                || normalized.matches(".*(提醒我|别忘了|记得|记一下).*")) {
-            createTodo(client, userId, normalized);
-            return;
-        }
-        replySender.sendReply(client, userId, "请明确要创建、查看、完成还是删除待办。");
+        createTodo(client, userId, normalized, originalText);
     }
 
     private boolean isExpressCommand(String text) {
@@ -674,14 +720,45 @@ public final class UserRequestHandler {
         return tail.find() ? tail.group(1) : "";
     }
 
-    private void createTodo(ReplyChannel client, String userId, String text) throws Exception {
-        List<TodoDraft> drafts = todoBatchParser.parse(text);
-        if (drafts.isEmpty()) {
+    private void createTodo(ReplyChannel client, String userId, String text,
+                            String originalText) throws Exception {
+        TodoPlan plan = todoPlanningService.plan(originalText, text);
+        if (plan.drafts().isEmpty()) {
             replySender.sendReply(client, userId, "请告诉我待办的具体内容。");
             return;
         }
-        List<com.example.ilink.capabilities.planning.TodoItem> created =
-                todoService.createBatch(userId, drafts, 30);
+        handleTodoResolution(client, userId, todoConflictResolver.begin(userId, plan));
+    }
+
+    private void handlePendingTodoConflict(AgentContext context, String text) throws Exception {
+        String userId = context.principalId();
+        TodoConflictState state = sessions.getPendingTodoConflict(userId);
+        if (state == null) return;
+        TodoConflictResolver.Resolution resolution = todoConflictResolver.reply(userId, state, text);
+        handleTodoResolution(context.replyChannel(), userId, resolution);
+        if (resolution.completed()) resumeActionPlan(context);
+        if (resolution.cancelled()) actionPlanExecutor.cancel(userId);
+    }
+
+    private void handleTodoResolution(ReplyChannel client, String userId,
+                                      TodoConflictResolver.Resolution resolution) throws Exception {
+        if (resolution.cancelled()) {
+            sessions.clearPendingTodoConflict(userId);
+            replySender.sendReply(client, userId, resolution.message());
+            return;
+        }
+        if (!resolution.completed()) {
+            sessions.setPendingTodoConflict(userId, resolution.state());
+            replySender.sendReply(client, userId, resolution.message());
+            return;
+        }
+        sessions.clearPendingTodoConflict(userId);
+        sendTodoCreatedReply(client, userId, resolution);
+    }
+
+    private void sendTodoCreatedReply(ReplyChannel client, String userId,
+                                      TodoConflictResolver.Resolution resolution) throws Exception {
+        List<com.example.ilink.capabilities.planning.TodoItem> created = resolution.created();
         StringBuilder reply = new StringBuilder("好，已经记到待办里了：");
         for (int index = 0; index < created.size(); index++) {
             var todo = created.get(index);
@@ -691,18 +768,34 @@ public final class UserRequestHandler {
                 reply.append("（").append(todo.dueAt().format(DateTimeFormatter.ofPattern("M月d日 HH:mm"))).append("）");
             }
         }
+        if (!resolution.rescheduled().isEmpty()) {
+            reply.append("\n同时已改期：");
+            for (int index = 0; index < resolution.rescheduled().size(); index++) {
+                var todo = resolution.rescheduled().get(index);
+                if (index > 0) reply.append('、');
+                reply.append(todo.title()).append("（")
+                        .append(todo.dueAt().format(DateTimeFormatter.ofPattern("M月d日 HH:mm"))).append("）");
+            }
+        }
+        if (resolution.state().supervisionEnabled()) {
+            String cadence = resolution.state().supervisionCadence();
+            if (TodoPlan.weeklySupervisionRequested(cadence)) {
+                reply.append("\n已识别到每周复盘要求，但当前自动复盘只支持每日频率；待办已创建，尚未建立每周调度。");
+            } else {
+                LocalTime reflectionTime = TodoPlan.resolveSupervisionTime(cadence);
+                try {
+                    var event = lifeWorkflow.enableDailyReflection(userId, reflectionTime);
+                    if (event == null) throw new IllegalStateException("复盘日历事件创建失败");
+                    reply.append("\n已开启每日 ")
+                            .append(reflectionTime.format(DateTimeFormatter.ofPattern("HH:mm")))
+                            .append(" 复盘。我会检查当天待办的完成、未完成和逾期情况，并推送复盘结果。");
+                } catch (RuntimeException error) {
+                    System.err.println("[待办监督] 每日复盘调度失败：" + error.getMessage());
+                    reply.append("\n待办已创建，但每日复盘调度暂时没有建立，请稍后发送“开启每日复盘”重试。");
+                }
+            }
+        }
         replySender.sendReply(client, userId, reply.toString());
-    }
-
-    private boolean looksLikeFastTodo(String text) {
-        if (text == null || text.isBlank()) return false;
-        String value = text.trim();
-        if (value.matches("^(查看|查询|列出|打开)?(我的)?待办(事项|列表)?$|^我还有什么待办.*")) return true;
-        if (value.matches("^(完成|办完|搞定|取消|删除).*(待办|任务).*")) return true;
-        // 多个明确时间点组成的句子就是待办，即使用户没有重复说“提醒我”。
-        if (todoBatchParser.looksLikeCompound(value)) return true;
-        return value.matches(".*(提醒我|别忘了|记得|记一下|添加待办|新增待办|创建待办|记个待办|安排一个待办).*" )
-                && !value.matches(".*(天气|快递|新闻|打车|外卖|搜索|文件|图片).*" );
     }
 
     private void searchNews(ReplyChannel client, String userId, String text) throws Exception {
@@ -777,6 +870,11 @@ public final class UserRequestHandler {
 
     /** 调用一个动作对应的原有业务处理器，动作之间由统一执行器负责排序。 */
     private void executeAction(AgentContext context, IntentAction action) throws Exception {
+        executeAction(context, action, action.requestText());
+    }
+
+    private void executeAction(AgentContext context, IntentAction action,
+                               String originalText) throws Exception {
         ReplyChannel client = context.replyChannel();
         String userId = context.principalId();
         IntentResult route = action.route();
@@ -821,7 +919,7 @@ public final class UserRequestHandler {
             case "bilibili_search" -> searchBilibili(client, userId, route);
             case "media_lookup" -> lookupMedia(client, userId, actionText, route);
             case "email_query" -> queryEmail(client, userId, route);
-            case "todo" -> handleTodoAction(client, userId, actionText);
+            case "todo" -> handleTodoAction(client, userId, actionText, originalText);
             case "express_query" -> queryExpress(client, userId, actionText);
             case "news_search" -> searchNews(client, userId, actionText);
             case "web_search" -> searchWeb(client, userId, actionText);
@@ -876,7 +974,9 @@ public final class UserRequestHandler {
     private void submitAutomation(ReplyChannel client, String userId, String intent, String text) throws Exception {
         ExecutiveTaskService.Submission submission = automationWorkflow.submit(userId, intent, text);
         String message = submission.created()
-                ? "已创建自动化任务：" + submission.task().id() + "\n我会在后台执行并主动发送结果。"
+                ? "已创建自动化任务：" + submission.task().id()
+                        + "\n首次执行时间：" + submission.task().nextRunAt()
+                        + "\n我会在后台执行并主动发送结果。"
                 : "这个自动化任务已经存在：" + submission.task().id()
                         + "\n当前状态：" + submission.task().status();
         replySender.sendReply(client, userId, message);
@@ -902,6 +1002,7 @@ public final class UserRequestHandler {
         pending.put("nearby_food_location", nearbyFoodWorkflow.hasPendingLocation(userId));
         pending.put("food_order", foodOrderWorkflow.hasPending(userId));
         pending.put("taxi", taxiWorkflow.hasPending(userId));
+        pending.put("todo_conflict", sessions.hasPendingTodoConflict(userId));
         pending.put("visual_card", visualCardWorkflow.hasPending(userId));
         pending.put("file_export", sessions.hasPendingFileExport(userId));
         return new RoutingContext(
@@ -932,7 +1033,7 @@ public final class UserRequestHandler {
         if (isExecutableOffer(reply, text)) suggestedActions.offer(userId, text);
         chatHistory.add(userId, text, reply);
         replySender.applyReplyMode(userId, route.replyMode());
-        System.out.println("[机器人回复] " + reply);
+        ConsoleLog.info("回复生成", "已生成回复，等待发送，内容摘要=" + ConsoleLog.summary(reply));
         replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
     }
 
@@ -997,6 +1098,7 @@ public final class UserRequestHandler {
     private boolean hasBlockingPending(String userId) {
         return sessions.getPendingDraw(userId) != null
                 || sessions.hasPendingExpress(userId)
+                || sessions.hasPendingTodoConflict(userId)
                 || sessions.hasPendingWeatherLocations(userId)
                 || planWorkflow.hasPendingPlan(userId)
                 || planWorkflow.hasPendingCalendarSync(userId)
@@ -1034,6 +1136,9 @@ public final class UserRequestHandler {
                     || !ExpressService.extractOrderNo(value).isBlank() || !extractExpressPhone(value).isBlank()
                     || value.matches("重试|再查一次|继续查询");
         }
+        if (sessions.hasPendingTodoConflict(userId)) {
+            return todoConflictResolver.acceptsReply(sessions.getPendingTodoConflict(userId), value);
+        }
         if (sessions.hasPendingWeatherLocations(userId)) return value.matches("\\d+") || !looksLikeNewRequest(value);
         if (planWorkflow.hasPendingPlan(userId)) return DateTimeParser.parse(value) != null;
         if (planWorkflow.hasPendingCalendarSync(userId)) {
@@ -1064,6 +1169,7 @@ public final class UserRequestHandler {
     private void clearBlockingPending(String userId) {
         sessions.clearPendingDraw(userId);
         sessions.clearPendingExpress(userId);
+        sessions.clearPendingTodoConflict(userId);
         sessions.clearPendingWeatherLocations(userId);
         planWorkflow.clearPending(userId);
         calendarWorkflow.clearPending(userId);
@@ -1077,39 +1183,62 @@ public final class UserRequestHandler {
     }
 
     /** 路线动作已负责创建带导航链接的日历，去掉同一行程的重复日历动作。 */
-    private IntentPlan coalesceDependentActions(IntentPlan plan) {
+    static IntentPlan coalesceDependentActions(IntentPlan plan) {
         IntentAction travel = plan.actions().stream()
                 .filter(action -> "travel_plan".equals(action.route().intent()))
                 .filter(action -> !action.route().travelDepartureTime().isBlank())
                 .findFirst().orElse(null);
-        List<IntentAction> actions = travel == null ? plan.actions() : plan.actions().stream().filter(action -> {
-            if (!"calendar_event".equals(action.route().intent())
-                    || !"create".equals(action.route().calendarAction())) return true;
-            String title = action.route().calendarTitle();
-            return title == null || (!title.contains(travel.route().travelOrigin())
-                    && !title.contains(travel.route().travelDestination()));
-        }).toList();
+        List<IntentAction> actions = travel == null || travel.requirementId().isBlank()
+                ? plan.actions() : plan.actions().stream().filter(action -> {
+                    if (!"calendar_event".equals(action.route().intent())
+                            || !"create".equals(action.route().calendarAction())) return true;
+                    return !action.dependsOn().contains(travel.requirementId());
+                }).toList();
 
-        List<IntentAction> todoActions = actions.stream()
-                .filter(action -> "todo".equals(action.route().intent())).toList();
-        if (todoActions.size() <= 1) return actions == plan.actions() ? plan : new IntentPlan(actions);
+        List<IntentAction> todoCreates = actions.stream()
+                .filter(UserRequestHandler::isTodoCreateAction).toList();
+        if (todoCreates.size() <= 1) {
+            return actions.size() == plan.actions().size()
+                    ? plan : new IntentPlan(actions, plan.messageMode());
+        }
 
-        String mergedText = String.join("，", todoActions.stream().map(IntentAction::requestText).toList());
-        IntentAction firstTodo = todoActions.getFirst();
-        IntentAction merged = new IntentAction(firstTodo.requirementId(), mergedText,
-                todoActions.stream().flatMap(action -> action.dependsOn().stream()).distinct().toList(),
-                firstTodo.route());
-        List<IntentAction> mergedActions = new java.util.ArrayList<>();
+        IntentAction first = todoCreates.getFirst();
+        Set<String> mergedIds = todoCreates.stream().map(IntentAction::requirementId)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        List<String> mergedDependencies = todoCreates.stream()
+                .flatMap(action -> action.dependsOn().stream())
+                .filter(dependency -> !mergedIds.contains(dependency)).distinct().toList();
+        IntentAction merged = new IntentAction(first.requirementId(),
+                String.join("\n", todoCreates.stream().map(IntentAction::requestText).toList()),
+                mergedDependencies, first.route());
+
+        List<IntentAction> result = new ArrayList<>();
         boolean inserted = false;
         for (IntentAction action : actions) {
-            if (!"todo".equals(action.route().intent())) {
-                mergedActions.add(action);
-            } else if (!inserted) {
-                mergedActions.add(merged);
-                inserted = true;
+            if (isTodoCreateAction(action)) {
+                if (!inserted) {
+                    result.add(merged);
+                    inserted = true;
+                }
+                continue;
             }
+            List<String> dependencies = action.dependsOn().stream()
+                    .map(dependency -> mergedIds.contains(dependency)
+                            ? first.requirementId() : dependency)
+                    .distinct().toList();
+            result.add(dependencies.equals(action.dependsOn()) ? action
+                    : new IntentAction(action.requirementId(), action.requestText(),
+                            dependencies, action.route()));
         }
-        return new IntentPlan(mergedActions);
+        return new IntentPlan(result, plan.messageMode());
+    }
+
+    private static boolean isTodoCreateAction(IntentAction action) {
+        if (!"todo".equals(action.route().intent())) return false;
+        String text = action.requestText() == null ? "" : action.requestText().trim();
+        return !text.matches("^(查看|查询|列出|打开)?(我的)?待办(事项|列表)?$|^我还有什么待办.*")
+                && !text.matches("^(完成|办完|搞定)(这个|最后一个|最新的)?待办.*")
+                && !text.matches("^(取消|删除)(这个|最后一个|最新的)?待办.*");
     }
 
     /** 搜索哔哩哔哩内容；具体视频不可用时服务会返回官方搜索入口。 */
@@ -1194,7 +1323,6 @@ public final class UserRequestHandler {
         if (result.hasMedia(GeneratedImage.class)) {
             GeneratedImage image = result.dataAs(GeneratedImage.class);
             Path saved = mediaStore.save(userId, "image", image.bytes(), image.extension());
-            documentSessions.clear(userId);
             sessions.setLastImage(userId, saved.toString());
             String description = pending.description().isBlank()
                     ? "已按你的要求生成" : pending.description();
@@ -1235,16 +1363,21 @@ public final class UserRequestHandler {
     /** 处理图片分析、解题和编辑请求。 */
     private void handleImageAction(ReplyChannel client, String userId, String actionText,
                                    IntentResult route) throws Exception {
-        if ("clarify".equals(route.imageAction()) || "none".equals(route.imageAction())) {
+        String imageAction = route.imageAction();
+        if ((imageAction == null || imageAction.isBlank() || "none".equals(imageAction)
+                || "clarify".equals(imageAction)) && IntentPolicy.isExplicitImageEdit(actionText)) {
+            imageAction = "edit";
+        }
+        if ("clarify".equals(imageAction) || "none".equals(imageAction)) {
             replySender.sendReply(client, userId, "请告诉我想怎么处理图片：分析内容、解答题目，还是修改图片？");
             return;
         }
 
-        if ("analyze".equals(route.imageAction()) || "solve".equals(route.imageAction())) {
+        if ("analyze".equals(imageAction) || "solve".equals(imageAction)) {
             JsonObject arguments = new JsonObject();
             String request = route.imagePrompt().isBlank() ? actionText : route.imagePrompt();
             arguments.addProperty("request", request);
-            arguments.addProperty("mode", route.imageAction());
+            arguments.addProperty("mode", imageAction);
             ToolResult result = toolManager.execute(
                     ImageAnalysisTool.NAME, new ToolContext(userId), arguments);
             if (result.success()) {
@@ -1255,7 +1388,7 @@ public final class UserRequestHandler {
             return;
         }
 
-        if ("edit".equals(route.imageAction())) {
+        if ("edit".equals(imageAction)) {
             JsonObject arguments = new JsonObject();
             String prompt = route.imagePrompt().isBlank() ? actionText : route.imagePrompt();
             arguments.addProperty("prompt", prompt);
@@ -1264,7 +1397,6 @@ public final class UserRequestHandler {
             if (result.hasMedia(GeneratedImage.class)) {
                 GeneratedImage edited = result.dataAs(GeneratedImage.class);
                 Path saved = mediaStore.save(userId, "image", edited.bytes(), edited.extension());
-                documentSessions.clear(userId);
                 sessions.setLastImage(userId, saved.toString());
                 chatHistory.addMedia(userId, "图片", saved.toString(), "已根据用户要求修改图片");
                 client.sendImage(userId, edited.bytes(), edited.fileName("edited"), "");
@@ -1273,7 +1405,11 @@ public final class UserRequestHandler {
                 String error = result.success() ? "图片服务没有返回有效图片，请稍后重试。" : result.output();
                 replySender.sendReply(client, userId, error);
             }
+            return;
         }
+
+        replySender.sendReply(client, userId,
+                "我识别到你想处理图片，但没有确定具体操作。请说明要分析、解题，还是修改图片。");
     }
 
     /** 调用费用分摊工具，处理多人 AA 和不同付款金额的结算。 */
@@ -1418,6 +1554,10 @@ public final class UserRequestHandler {
     private void handleDocumentAction(ReplyChannel client, String userId, String userText,
                                       IntentResult route, String forcedOutputType) throws Exception {
         DocumentRecord document = documentSessions.get(userId);
+        String requestedOutputType = DocumentFileType.canonical(forcedOutputType);
+        if ("none".equals(requestedOutputType)) {
+            requestedOutputType = IntentPolicy.explicitOutputFileType(userText);
+        }
         String pendingImage = sessions.peekPendingImage(userId);
         String cachedImageAnalysis = usableImageAnalysis(sessions.getLastImageAnalysis(userId));
         boolean hasImageSource = pendingImage != null
@@ -1425,7 +1565,8 @@ public final class UserRequestHandler {
         boolean imageToNewDocument = isImageToNewDocumentRequest(
                 userText, route.intent(), hasImageSource);
         if (document == null && !"generate_file".equals(route.intent()) && !imageToNewDocument) {
-            replySender.sendReply(client, userId, "请先发送 PDF、DOC、DOCX 或 TXT 文件");
+            replySender.sendReply(client, userId,
+                    "请先发送需要处理的文档。当前支持 " + DocumentFileType.supportedInputLabel() + " 文件。 ");
             return;
         }
 
@@ -1441,33 +1582,44 @@ public final class UserRequestHandler {
             return;
         }
 
+        if ("generate_file".equals(route.intent()) && "none".equals(requestedOutputType)) {
+            if (imageToNewDocument && userText.matches(".*(?:表格|电子表格|Excel|excel|XLSX|xlsx).*")) {
+                requestedOutputType = "xlsx";
+            } else {
+                sessions.setPendingFileExport(userId, userText, route);
+                replySender.sendReply(client, userId,
+                        "请选择输出格式：Word、PDF、Excel、TXT、Markdown 或 CSV。回复“取消”可结束生成。 ");
+                return;
+            }
+        }
+        if ("generate_file".equals(route.intent())
+                && DocumentFileType.isPresentation(requestedOutputType)) {
+            replySender.sendReply(client, userId,
+                    "当前支持识别和编辑 PPT/PPTX，但暂不支持从零生成演示文稿。请选择 "
+                            + DocumentFileType.generatableLabel() + "。 ");
+            return;
+        }
+        if ("generate_file".equals(route.intent())
+                && !DocumentFileType.canGenerate(requestedOutputType)) {
+            replySender.sendReply(client, userId,
+                    "暂不支持生成该格式，请选择 " + DocumentFileType.generatableLabel() + "。 ");
+            return;
+        }
+
         // ── 确定输出格式 ──
         // 格式转换兜底：如果用户明确要求转格式，强制走编辑工具（不管意图识别结果）
         String toolName;
         String outputType;
         boolean isFormatConversion = document != null
-                && userText.matches(".*(?:转[成为换]|改[成为]|变[成为]|导出[为成]?).*(?:Word|word|WORD|PDF|pdf|Excel|excel|PPT|ppt|DOCX|docx|xlsx|XLSX|pptx|PPTX|txt|TXT|md|csv).*");
+                && IntentPolicy.isDocumentFormatConversion(userText);
         if (!imageToNewDocument && (isFormatConversion || "document_edit".equals(route.intent()))) {
             toolName = DocumentEditTool.NAME;
-            String specified = route.outputFileType();
-            // 从用户文本中推断输出格式
-            if (specified == null || specified.isBlank() || "none".equals(specified)) {
-                if (userText.matches(".*(?:Word|word|WORD|DOCX|docx).*")) specified = "docx";
-                else if (userText.matches(".*(?:PDF|pdf).*")) specified = "pdf";
-                else if (userText.matches(".*(?:Excel|excel|XLSX|xlsx).*")) specified = "xlsx";
-                else if (userText.matches(".*(?:PPT|ppt|PPTX|pptx).*")) specified = "pptx";
-                else if (userText.matches(".*(?:TXT|txt|文本).*")) specified = "txt";
-            }
-            outputType = (specified != null && !specified.isBlank() && !"none".equals(specified))
-                    ? specified
-                    : (document != null ? document.extension() : "docx");
+            outputType = !"none".equals(requestedOutputType)
+                    ? requestedOutputType
+                    : DocumentFileType.defaultEditOutput(document.extension());
         } else {
             toolName = DocumentGenerateTool.NAME;
-            outputType = imageToNewDocument && userText.matches(".*(?:表格|电子表格|Excel|excel|XLSX|xlsx).*") ? "xlsx"
-                    : "pdf".equals(route.outputFileType()) ? "pdf"
-                    : "xlsx".equals(route.outputFileType()) ? "xlsx"
-                    : "pptx".equals(route.outputFileType()) ? "pptx"
-                    : "docx";
+            outputType = requestedOutputType;
         }
 
         JsonObject arguments = new JsonObject();
@@ -1495,9 +1647,10 @@ public final class UserRequestHandler {
             arguments.addProperty("source_content", imageContent);
             arguments.addProperty("source_name", "用户刚发送的图片");
         } else {
-            String lastImage = sessions.getLastImage(userId);
-            if (lastImage != null) {
-                arguments.addProperty("image_path", lastImage);
+            String imagePath = pendingImage != null ? pendingImage : sessions.getLastImage(userId);
+            if (IntentPolicy.isDocumentImageInsertion(userText)
+                    && imagePath != null && !imagePath.isBlank()) {
+                arguments.addProperty("image_path", imagePath);
             }
         }
         ToolResult result = toolManager.execute(toolName, new ToolContext(userId), arguments);
@@ -1518,7 +1671,7 @@ public final class UserRequestHandler {
         }
         documentSessions.set(userId, new DocumentRecord(
                 output.fileName(), output.extension(), saved.toString(), newText));
-        if (imageToNewDocument) {
+        if (imageToNewDocument || IntentPolicy.isDocumentImageInsertion(userText)) {
             sessions.clearPendingImage(userId);
         }
     }

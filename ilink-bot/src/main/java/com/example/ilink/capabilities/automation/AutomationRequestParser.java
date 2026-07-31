@@ -29,15 +29,19 @@ public final class AutomationRequestParser {
         };
         String jd = section(JD_SECTION, request);
         String resume = section(RESUME_SECTION, request);
-        if (type == AutomationType.JD_ANALYSIS && jd.isBlank()) jd = stripCommand(request);
+        String query = stripCommand(AutomationSchedule.stripPrefix(request));
+        if (type == AutomationType.JD_ANALYSIS && jd.isBlank()) jd = query;
         JobSearchSpec jobs = type == AutomationType.JOB_SEARCH ? parseJobSearch(request) : JobSearchSpec.empty();
-        return new AutomationSpec(type, request, stripCommand(request), jd, resume, jobs);
+        return new AutomationSpec(type, request, query, jd, resume, jobs,
+                AutomationSchedule.parse(request, java.time.LocalDateTime.now()));
     }
 
     public boolean looksLikeAutomation(String text) {
         if (text == null) return false;
         return text.matches("(?is).*(帮我调研|自动调研|搜索岗位|找工作|找实习|实习岗位|招聘岗位|校招职位|"
-                + "找.{0,30}(?:岗位|职位|实习)|分析JD|分析职位描述|简历匹配|岗位匹配).*" );
+                + "找.{0,30}(?:岗位|职位|实习)|分析JD|分析职位描述|简历匹配|岗位匹配|"
+                + "(?:每天|每周[一二三四五六日天]?).{0,20}(?:自动)?(?:搜索|调研|整理|汇总).{0,40}"
+                + "(?:新闻|资讯|简报|报告)).*" );
     }
 
     private AutomationType infer(String text) {

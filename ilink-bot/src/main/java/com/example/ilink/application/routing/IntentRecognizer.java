@@ -3,6 +3,7 @@ package com.example.ilink.application.routing;
 import com.example.ilink.application.conversation.ChatHistoryStore;
 import com.example.ilink.application.conversation.UserSessionStore;
 import com.example.ilink.bootstrap.Config;
+import com.example.ilink.capabilities.documents.DocumentFileType;
 import com.example.ilink.capabilities.memory.MemoryService;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -33,7 +34,6 @@ public final class IntentRecognizer {
     private final RoutePromptBuilder promptBuilder;
     private final RouteResponseParser responseParser = new RouteResponseParser();
     private final IntentNormalizer normalizer;
-    private final boolean unifiedRouting;
 
     public IntentRecognizer(HttpClient httpClient) {
         this(httpClient, CapabilityRegistry.defaults());
@@ -45,7 +45,6 @@ public final class IntentRecognizer {
         this.capabilities = capabilities;
         this.promptBuilder = new RoutePromptBuilder(capabilities);
         this.normalizer = new IntentNormalizer(capabilities);
-        this.unifiedRouting = true;
     }
 
     IntentRecognizer(RouteClient routeClient) {
@@ -54,7 +53,6 @@ public final class IntentRecognizer {
         this.capabilities = CapabilityRegistry.defaults();
         this.promptBuilder = new RoutePromptBuilder(capabilities);
         this.normalizer = new IntentNormalizer(capabilities);
-        this.unifiedRouting = false;
     }
 
     /** 保留旧注入签名；完整上下文现在由调用方一次性传入。 */
@@ -69,49 +67,77 @@ public final class IntentRecognizer {
 
     public IntentPlan recognize(String userId, String userMessage, RoutingContext context) {
         if (userMessage == null || userMessage.isBlank()) return fallbackChatPlan("");
-        if (unifiedRouting) return recognizeUnified(userMessage, context);
-        try {
-            List<AtomicRequirement> requirements = new ArrayList<>(splitRequirements(userMessage, context));
-            if (requirements.isEmpty()) requirements.add(new AtomicRequirement("r1", userMessage, List.of()));
+        return recognizeUnified(userMessage, context);
+    }
 
-            AssignmentBatch firstBatch = assignRequirements(userMessage, context, requirements, false);
-            Map<String, IntentAction> assigned = new LinkedHashMap<>(firstBatch.actions());
-            appendUncoveredRequirements(requirements, firstBatch.uncovered());
+    /** 生产快路径：一次模型调用同时完成需求拆分、能力分配和参数提取。 */
+    private IntentPlan recognizeUnified(String userMessage, RoutingContext context) {
+        try {
+            JsonObject result = requestJson(promptBuilder.buildUnifiedPrompt(context, userMessage), userMessage);
+            MessageMode messageMode = MessageMode.fromModel(string(result, "message_mode"));
+            Map<String, IntentAction> assigned = parseUnifiedActions(result, context);
+            List<AtomicRequirement> requirements = new ArrayList<>(
+                    parseRequirements(result, "requirements", Set.of()));
+            Set<String> requirementIds = requirements.stream().map(AtomicRequirement::id)
+                    .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+            for (IntentAction action : assigned.values()) {
+                if (requirementIds.add(action.requirementId())) {
+                    requirements.add(new AtomicRequirement(action.requirementId(), action.requestText(),
+                            action.dependsOn()));
+                }
+            }
+            appendUncoveredRequirements(requirements,
+                    parseRequirements(result, "missing_requirements", requirementIds));
             orderRequirementsBySource(userMessage, requirements);
+
             List<AtomicRequirement> missing = requirements.stream()
                     .filter(requirement -> !assigned.containsKey(requirement.id())).toList();
             if (!missing.isEmpty()) {
-                System.out.println("[路由覆盖校验] 首轮遗漏=" + missing.stream().map(AtomicRequirement::id).toList());
-                assigned.putAll(assignRequirements(userMessage, context, missing, true).actions());
+                System.out.println("[统一路由覆盖校验] 首轮遗漏="
+                        + missing.stream().map(AtomicRequirement::id).toList());
+                try {
+                    assigned.putAll(assignRequirements(userMessage, context, missing, true).actions());
+                } catch (Exception error) {
+                    System.err.println("[统一路由覆盖校验] 补偿失败：" + error.getMessage());
+                }
             }
 
             List<IntentAction> actions = new ArrayList<>();
             for (AtomicRequirement requirement : requirements) {
                 IntentAction action = assigned.get(requirement.id());
                 if (action == null) {
-                    System.err.println("[路由覆盖校验] 补偿后仍遗漏=" + requirement.id() + "，降级为chat保留原需求");
+                    System.err.println("[统一路由覆盖校验] 仍未覆盖=" + requirement.id()
+                            + "，保留原需求并降级为chat");
                     action = new IntentAction(requirement.id(), requirement.text(),
                             requirement.dependsOn(), IntentResult.chat());
                 }
                 actions.add(action);
             }
-            return new IntentPlan(actions);
+            if (actions.isEmpty()) return fallbackPlan(userMessage, context);
+            // 批量待办要求 action_text 保留完整原文；模型缩写成首条任务时仍以原命令为准。
+            if (actions.size() == 1 && IntentPolicy.isExplicitTodoCreation(userMessage)) {
+                return todoPlan(userMessage);
+            }
+            if (actions.size() == 1 && IntentPolicy.isExplicitImageEdit(userMessage)
+                    && !IntentPolicy.isDocumentImageInsertion(userMessage)) {
+                return imageEditPlan(userMessage);
+            }
+            return new IntentPlan(actions, messageMode);
         } catch (Exception error) {
-            System.err.println("[意图识别] 识别失败：" + error.getMessage());
-            return fallbackChatPlan(userMessage);
+            System.err.println("[统一意图识别] 识别失败：" + error.getMessage());
+            return fallbackPlan(userMessage, context);
         }
     }
 
-    /** 生产快路径：一次模型调用同时完成需求拆分、能力分配和参数提取。 */
-    private IntentPlan recognizeUnified(String userMessage, RoutingContext context) {
-        try {
-            JsonObject result = requestJson(promptBuilder.buildUnifiedPrompt(context), userMessage);
-            JsonArray array = result.has("actions") && result.get("actions").isJsonArray()
-                    ? result.getAsJsonArray("actions") : new JsonArray();
-            List<IntentAction> actions = new ArrayList<>();
-            Set<String> ids = new LinkedHashSet<>();
-            for (JsonElement element : array) {
-                if (!element.isJsonObject() || actions.size() >= MAX_REQUIREMENTS) break;
+    private Map<String, IntentAction> parseUnifiedActions(JsonObject result, RoutingContext context) {
+        JsonArray array = result.has("actions") && result.get("actions").isJsonArray()
+                ? result.getAsJsonArray("actions") : new JsonArray();
+        Map<String, IntentAction> actions = new LinkedHashMap<>();
+        Set<String> ids = new LinkedHashSet<>();
+        for (JsonElement element : array) {
+            if (actions.size() >= MAX_REQUIREMENTS) break;
+            if (!element.isJsonObject()) continue;
+            try {
                 JsonObject action = element.getAsJsonObject();
                 String requestText = string(action, "action_text");
                 if (requestText.isBlank()) requestText = string(action, "request_text");
@@ -123,40 +149,13 @@ public final class IntentRecognizer {
                     while (!ids.add(id)) id += "x";
                 }
                 normalizeAction(requestText, requestText, action, context.mediaContext());
-                actions.add(new IntentAction(id, requestText,
+                actions.put(id, new IntentAction(id, requestText,
                         stringList(action, "depends_on"), toIntentResult(action)));
+            } catch (RuntimeException error) {
+                System.err.println("[统一意图识别] 忽略非法动作：" + error.getMessage());
             }
-            return actions.isEmpty() ? fallbackPlan(userMessage) : new IntentPlan(actions);
-        } catch (Exception error) {
-            System.err.println("[统一意图识别] 识别失败：" + error.getMessage());
-            return fallbackPlan(userMessage);
         }
-    }
-
-    private List<AtomicRequirement> splitRequirements(String userMessage, RoutingContext context) throws Exception {
-        JsonObject result = requestJson(promptBuilder.buildRequirementPrompt(context), userMessage);
-        JsonArray array = result.has("requirements") && result.get("requirements").isJsonArray()
-                ? result.getAsJsonArray("requirements") : new JsonArray();
-        List<AtomicRequirement> requirements = new ArrayList<>();
-        Set<String> ids = new LinkedHashSet<>();
-        for (JsonElement element : array) {
-            if (!element.isJsonObject() || requirements.size() >= MAX_REQUIREMENTS) break;
-            JsonObject item = element.getAsJsonObject();
-            String text = string(item, "text");
-            if (text.isBlank()) continue;
-            String id = string(item, "id");
-            if (id.isBlank() || !ids.add(id)) {
-                id = "r" + (requirements.size() + 1);
-                while (!ids.add(id)) id = id + "x";
-            }
-            requirements.add(new AtomicRequirement(id, text, stringList(item, "depends_on")));
-        }
-        Set<String> validIds = requirements.stream().map(AtomicRequirement::id)
-                .collect(java.util.stream.Collectors.toSet());
-        return requirements.stream()
-                .map(item -> new AtomicRequirement(item.id(), item.text(), item.dependsOn().stream()
-                        .filter(validIds::contains).filter(id -> !id.equals(item.id())).toList()))
-                .toList();
+        return actions;
     }
 
     private AssignmentBatch assignRequirements(String originalMessage, RoutingContext context,
@@ -221,7 +220,8 @@ public final class IntentRecognizer {
         List<AtomicRequirement> values = new ArrayList<>();
         Set<String> ids = new LinkedHashSet<>(reservedIds);
         for (JsonElement element : source.getAsJsonArray(field)) {
-            if (!element.isJsonObject() || values.size() >= MAX_REQUIREMENTS) break;
+            if (values.size() >= MAX_REQUIREMENTS) break;
+            if (!element.isJsonObject()) continue;
             JsonObject item = element.getAsJsonObject();
             String text = string(item, "text");
             if (text.isBlank()) continue;
@@ -247,6 +247,7 @@ public final class IntentRecognizer {
         body.addProperty("model", Config.ROUTER_MODEL);
         body.addProperty("temperature", 0.1);
         body.addProperty("enable_thinking", false);
+        body.addProperty("max_tokens", Config.ROUTER_MAX_TOKENS);
         JsonObject responseFormat = new JsonObject();
         responseFormat.addProperty("type", "json_object");
         body.add("response_format", responseFormat);
@@ -271,21 +272,41 @@ public final class IntentRecognizer {
     }
 
     private String sendRoute(JsonObject body) throws Exception {
+        String requestBody = gson.toJson(body);
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(Config.API_BASE_URL))
                 .timeout(Config.ROUTER_REQ_TIMEOUT)
                 .header("Authorization", "Bearer " + Config.API_KEY)
                 .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(body)))
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                 .build();
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        if (response.statusCode() != 200) {
-            throw new IllegalStateException("请求失败，HTTP " + response.statusCode() + "：" + response.body());
+        long startedAt = System.nanoTime();
+        HttpResponse<String> response;
+        try {
+            response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        } catch (Exception error) {
+            System.err.println("[路由模型] status=exception elapsed_ms=" + elapsedMillis(startedAt)
+                    + " request_chars=" + requestBody.length() + " model=" + Config.ROUTER_MODEL
+                    + " error=" + error.getClass().getSimpleName());
+            throw error;
         }
-        JsonObject responseJson = JsonParser.parseString(response.body()).getAsJsonObject();
+        String responseBody = response.body() == null ? "" : response.body();
+        System.out.println("[路由模型] status=" + response.statusCode()
+                + " elapsed_ms=" + elapsedMillis(startedAt)
+                + " request_chars=" + requestBody.length()
+                + " response_chars=" + responseBody.length()
+                + " model=" + Config.ROUTER_MODEL);
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("请求失败，HTTP " + response.statusCode() + "：" + responseBody);
+        }
+        JsonObject responseJson = JsonParser.parseString(responseBody).getAsJsonObject();
         JsonElement content = responseJson.getAsJsonArray("choices").get(0).getAsJsonObject()
                 .getAsJsonObject("message").get("content");
         return content == null || content.isJsonNull() ? "" : content.getAsString();
+    }
+
+    private long elapsedMillis(long startedAt) {
+        return (System.nanoTime() - startedAt) / 1_000_000;
     }
 
     @FunctionalInterface
@@ -305,8 +326,24 @@ public final class IntentRecognizer {
         return fallbackPlan(userMessage);
     }
 
-    /** 路由调用失败时仍维持统一动作契约；只对强确定性的绘图意图给出最小兜底。 */
+    /** 兼容不带上下文的既有调用。 */
     private IntentPlan fallbackPlan(String userMessage) {
+        return fallbackPlan(userMessage, RoutingContext.minimal(
+                new IntentContext(false, false, false, false, false)));
+    }
+
+    /** 路由调用失败时保留明确、低歧义的核心能力。 */
+    private IntentPlan fallbackPlan(String userMessage, RoutingContext context) {
+        if (IntentPolicy.isExplicitTodoCreation(userMessage)) {
+            return todoPlan(userMessage);
+        }
+        String documentIntent = deterministicDocumentIntent(userMessage, context.mediaContext());
+        if (!documentIntent.isBlank()) {
+            return documentPlan(userMessage, documentIntent);
+        }
+        if (IntentPolicy.isExplicitImageEdit(userMessage)) {
+            return imageEditPlan(userMessage);
+        }
         if (IntentPolicy.isExplicitImageCreation(userMessage)) {
             JsonObject action = new JsonObject();
             action.addProperty("intent", "draw");
@@ -315,9 +352,59 @@ public final class IntentRecognizer {
             action.addProperty("image_size", DrawSizeParser.parseMention(userMessage));
             action.addProperty("reply_mode", "keep");
             action.addProperty("voice_style", "default");
-            return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), toIntentResult(action))));
+            return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), toIntentResult(action))),
+                    MessageMode.COMMAND);
         }
-        return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), IntentResult.chat())));
+        return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), IntentResult.chat())),
+                MessageMode.CHAT);
+    }
+
+    private IntentPlan todoPlan(String userMessage) {
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "todo");
+        action.addProperty("reply_mode", "keep");
+        action.addProperty("voice_style", "default");
+        return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), toIntentResult(action))),
+                MessageMode.COMMAND);
+    }
+
+    private IntentPlan documentPlan(String userMessage, String intent) {
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", intent);
+        action.addProperty("document_action", switch (intent) {
+            case "document_summary" -> "summary";
+            case "document_question" -> "question";
+            case "document_edit" -> "edit";
+            default -> "none";
+        });
+        action.addProperty("output_file_type", IntentPolicy.explicitOutputFileType(userMessage));
+        action.addProperty("reply_mode", "keep");
+        action.addProperty("voice_style", "default");
+        return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), toIntentResult(action))),
+                MessageMode.COMMAND);
+    }
+
+    private String deterministicDocumentIntent(String text, IntentContext context) {
+        if (IntentPolicy.isDocumentImageInsertion(text)) return "document_edit";
+        if (IntentPolicy.isExplicitDocumentSummary(text)) return "document_summary";
+        if (IntentPolicy.isExplicitDocumentQuestion(text)) return "document_question";
+        if (IntentPolicy.isExplicitDocumentEdit(text)
+                || (context.hasDocument() && IntentPolicy.isDocumentFormatConversion(text))) {
+            return "document_edit";
+        }
+        if (IntentPolicy.hasExplicitFileRequest(text)) return "generate_file";
+        return "";
+    }
+
+    private IntentPlan imageEditPlan(String userMessage) {
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "image_action");
+        action.addProperty("image_action", "edit");
+        action.addProperty("image_prompt", userMessage);
+        action.addProperty("reply_mode", "keep");
+        action.addProperty("voice_style", "default");
+        return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), toIntentResult(action))),
+                MessageMode.COMMAND);
     }
 
     /** 规则层只做参数和安全约束校验，不负责在能力之间抢路由。 */
@@ -325,15 +412,44 @@ public final class IntentRecognizer {
                                  JsonObject action, IntentContext context) {
         String modelIntent = string(action, "intent");
         String intent = normalizer.normalizeIntent(modelIntent);
-        if (!intent.equals(modelIntent)) {
-            action.addProperty("intent", "chat");
+        String documentIntent = deterministicDocumentIntent(userMessage, context);
+        if (!normalizer.isKnown(modelIntent)) {
+            if (documentIntent.isBlank()) {
+                System.err.println("[意图校验] 未知能力=" + modelIntent + "，需求=" + actionText);
+            }
+            intent = documentIntent.isBlank() ? "chat" : documentIntent;
+            action.addProperty("intent", intent);
             clearOutputFields(action);
-            return;
+        } else if (!intent.equals(modelIntent)) {
+            System.out.println("[意图校验] 能力别名 " + modelIntent + " -> " + intent);
+            action.addProperty("intent", intent);
+        } else if (!documentIntent.isBlank() && "chat".equals(intent)) {
+            intent = documentIntent;
+            action.addProperty("intent", intent);
         }
 
         boolean imageCreation = IntentPolicy.isExplicitImageCreation(userMessage);
-        boolean imageEdit = IntentPolicy.isExplicitImageEdit(userMessage);
+        boolean documentImageInsertion = IntentPolicy.isDocumentImageInsertion(userMessage);
+        boolean imageEdit = IntentPolicy.isExplicitImageEdit(userMessage) && !documentImageInsertion;
         boolean fileRequest = IntentPolicy.hasExplicitFileRequest(userMessage);
+        if (IntentPolicy.isExplicitTodoCreation(userMessage) && !"todo".equals(intent)) {
+            action.addProperty("intent", "todo");
+            clearOutputFields(action);
+            return;
+        }
+        if (documentImageInsertion) {
+            action.addProperty("intent", "document_edit");
+            action.addProperty("document_action", "edit");
+            action.addProperty("output_file_type", "none");
+            return;
+        }
+        if (imageEdit) {
+            action.addProperty("intent", "image_action");
+            action.addProperty("image_action", "edit");
+            action.addProperty("image_prompt", defaultPrompt(action, actionText, userMessage));
+            action.addProperty("output_file_type", "none");
+            return;
+        }
         if (imageCreation && "chat".equals(intent)) {
             action.addProperty("intent", "draw");
             action.addProperty("en_prompt", defaultPrompt(action, actionText, userMessage));
@@ -361,14 +477,10 @@ public final class IntentRecognizer {
                 action.addProperty("output_file_type", "none");
                 return;
             }
-            if (!context.hasDocument() || !IntentPolicy.isExplicitDocumentEdit(userMessage)) {
-                action.addProperty("intent", "chat");
-                action.addProperty("output_file_type", "none");
-                return;
-            }
         }
-        if ("generate_file".equals(intent)) {
-            action.addProperty("output_file_type", IntentPolicy.explicitOutputFileType(userMessage));
+        if ("generate_file".equals(intent) || "document_edit".equals(intent)) {
+            String outputType = IntentPolicy.explicitOutputFileType(userMessage);
+            action.addProperty("output_file_type", DocumentFileType.canonical(outputType));
         } else if (!"task_plan".equals(intent)) {
             action.addProperty("output_file_type", "none");
         }
@@ -381,8 +493,9 @@ public final class IntentRecognizer {
                 action.addProperty("image_size", "none");
             }
         }
-        if ("image_action".equals(intent) && string(action, "image_prompt").isBlank()) {
-            action.addProperty("image_prompt", actionText);
+        if ("image_action".equals(intent)) {
+            action.addProperty("image_action", normalizeImageAction(string(action, "image_action")));
+            if (string(action, "image_prompt").isBlank()) action.addProperty("image_prompt", actionText);
         }
         if ("nearby_food".equals(intent) && !isNearbyDiningRequest(userMessage)
                 && !IntentPolicy.isExplicitLocationRememberRequest(userMessage)) {
@@ -552,6 +665,16 @@ public final class IntentRecognizer {
         action.addProperty("image_size", "none");
     }
 
+    private String normalizeImageAction(String value) {
+        return switch (value == null ? "" : value.trim().toLowerCase()) {
+            case "edit", "modify", "change", "add", "insert", "image_edit" -> "edit";
+            case "analyze", "analysis" -> "analyze";
+            case "solve", "answer" -> "solve";
+            case "clarify" -> "clarify";
+            default -> "none";
+        };
+    }
+
     private String defaultPrompt(JsonObject action, String actionText, String userMessage) {
         String prompt = string(action, "en_prompt");
         return !prompt.isBlank() ? prompt : (actionText == null || actionText.isBlank() ? userMessage : actionText);
@@ -570,7 +693,14 @@ public final class IntentRecognizer {
     }
 
     private String string(JsonObject object, String name) {
-        return object.has(name) && !object.get(name).isJsonNull() ? object.get(name).getAsString() : "";
+        if (object == null || !object.has(name)) return "";
+        JsonElement value = object.get(name);
+        if (value == null || value.isJsonNull() || !value.isJsonPrimitive()) return "";
+        try {
+            return value.getAsString().trim();
+        } catch (RuntimeException ignored) {
+            return "";
+        }
     }
 
     private String defaultString(JsonObject object, String name, String defaultValue) {
@@ -582,7 +712,13 @@ public final class IntentRecognizer {
         if (!object.has(name) || !object.get(name).isJsonArray()) return List.of();
         List<String> values = new ArrayList<>();
         for (JsonElement element : object.getAsJsonArray(name)) {
-            String value = element.getAsString().trim();
+            if (element == null || element.isJsonNull() || !element.isJsonPrimitive()) continue;
+            String value;
+            try {
+                value = element.getAsString().trim();
+            } catch (RuntimeException ignored) {
+                continue;
+            }
             if (!value.isBlank()) values.add(value);
         }
         return List.copyOf(values);
