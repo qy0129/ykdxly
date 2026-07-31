@@ -4,6 +4,9 @@ import com.example.ilink.capabilities.documents.DocumentRecord;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -16,28 +19,70 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class DocumentSessionStore {
 
     private static final Duration SESSION_TTL = Duration.ofHours(1);
-    private final Map<String, DocumentSession> documents = new ConcurrentHashMap<>();
+    private static final int MAX_DOCUMENT_HISTORY = 20;
+    private final Map<String, List<DocumentSession>> documents = new ConcurrentHashMap<>();
 
     /** 保存用户当前文档。 */
     public void set(String userId, DocumentRecord document) {
-        // 新文档会覆盖该用户之前的当前文档。
-        documents.put(userId, new DocumentSession(document, Instant.now()));
+        documents.compute(userId, (ignored, current) -> {
+            List<DocumentSession> history = new ArrayList<>();
+            if (current != null) {
+                history.addAll(current.stream()
+                        .filter(session -> !sameDocument(session.document(), document))
+                        .toList());
+            }
+            history.add(0, new DocumentSession(document, Instant.now()));
+            return List.copyOf(history.subList(0, Math.min(MAX_DOCUMENT_HISTORY, history.size())));
+        });
     }
 
     /** 获取用户当前文档，没有文档时返回 null。 */
     public DocumentRecord get(String userId) {
-        DocumentSession session = documents.get(userId);
-        if (session == null) return null;
-        if (session.createdAt().plus(SESSION_TTL).isBefore(Instant.now())) {
-            documents.remove(userId, session);
-            return null;
-        }
-        return session.document();
+        List<DocumentSession> active = activeSessions(userId);
+        return active.isEmpty() ? null : active.getFirst().document();
+    }
+
+    /** 按用户原话中出现的文件名选择文件；没有明确文件名时始终返回最新文件。 */
+    public DocumentRecord resolve(String userId, String request) {
+        List<DocumentSession> active = activeSessions(userId);
+        if (active.isEmpty()) return null;
+        String value = request == null ? "" : request.toLowerCase(Locale.ROOT);
+        return active.stream()
+                .filter(session -> mentionsFile(value, session.document().fileName()))
+                .map(DocumentSession::document)
+                .findFirst()
+                .orElse(active.getFirst().document());
     }
 
     /** 用户进入其他媒体工作流时清除当前文档，避免旧状态污染意图判断。 */
     public void clear(String userId) {
         documents.remove(userId);
+    }
+
+    private List<DocumentSession> activeSessions(String userId) {
+        List<DocumentSession> current = documents.getOrDefault(userId, List.of());
+        Instant cutoff = Instant.now().minus(SESSION_TTL);
+        List<DocumentSession> active = current.stream()
+                .filter(session -> session.createdAt().isAfter(cutoff))
+                .toList();
+        if (active.size() != current.size()) {
+            if (active.isEmpty()) documents.remove(userId);
+            else documents.put(userId, active);
+        }
+        return active;
+    }
+
+    private static boolean mentionsFile(String request, String fileName) {
+        if (request == null || request.isBlank() || fileName == null || fileName.isBlank()) return false;
+        String fullName = fileName.toLowerCase(Locale.ROOT);
+        if (request.contains(fullName)) return true;
+        int extension = fullName.lastIndexOf('.');
+        String baseName = extension > 0 ? fullName.substring(0, extension) : fullName;
+        return baseName.length() >= 2 && request.contains(baseName);
+    }
+
+    private static boolean sameDocument(DocumentRecord left, DocumentRecord right) {
+        return left.path().equals(right.path());
     }
 
     private record DocumentSession(DocumentRecord document, Instant createdAt) {

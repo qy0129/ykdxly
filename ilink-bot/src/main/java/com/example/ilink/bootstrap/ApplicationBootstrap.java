@@ -418,9 +418,9 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 calendarService, new DietPlanSessionStore(), replySender, toolManager);
         NearbyFoodWorkflow nearbyFoodWorkflow = new NearbyFoodWorkflow(sessions, toolManager, replySender);
         FoodOrderWorkflow foodOrderWorkflow = new FoodOrderWorkflow(
-                sessions, amapService, foodOrderService, replySender);
+                sessions, amapService, foodOrderService, replySender, locationService);
         TravelWorkflow travelWorkflow = new TravelWorkflow(amapService, calendarService, replySender);
-        TaxiWorkflow taxiWorkflow = new TaxiWorkflow(new DidiMcpClient(), replySender, sessions);
+        TaxiWorkflow taxiWorkflow = new TaxiWorkflow(new DidiMcpClient(), replySender, sessions, locationService);
         PlanWorkflow planWorkflow = new PlanWorkflow(
                 toolManager, planSessions, chatHistory, replySender, documentService, calendarService);
         LifeWorkflow lifeWorkflow = new LifeWorkflow(
@@ -477,7 +477,9 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 visualDeckSender, loginBriefingService, welcomeHandler,
                 dailyDashboardServer, sessionManagementServer,
                 expressHttpServer, expressPageService, wechatWebBridge,
-                executiveRuntime, reflectionService, interestRadarService, locationService);
+                executiveRuntime, reflectionService, interestRadarService, locationService,
+                foodOrderWorkflow);
+        foodOrderWorkflow.enableLocationContinuation();
         AutomationConsoleServer automationConsoleServer = new AutomationConsoleServer(executiveRuntime);
         sessionManagementServer.start();
         webChatServer.start();

@@ -63,7 +63,7 @@ public final class DocumentEditTool implements Tool {
                 NAME,
                 "编辑文档",
                 "修改或转换最近发送的文档（DOCX/PDF/PPTX/XLSX/TXT/MD/CSV），支持同格式编辑或跨格式转换（如 PDF 转 Word）。没有当前文档时不要调用。如果用户要求插入图片，需要传 image_path。",
-                ToolDefinition.objectParameters(properties, "request", "output_type", "image_path"),
+                ToolDefinition.objectParameters(properties, "request", "output_type"),
                 true);
     }
 
@@ -74,12 +74,12 @@ public final class DocumentEditTool implements Tool {
 
     @Override
     public ToolResult execute(ToolContext context, JsonObject arguments) throws Exception {
-        DocumentRecord document = documentSessions.get(context.userId());
+        String request = ToolArguments.requireString(arguments, "request");
+        DocumentRecord document = documentSessions.resolve(context.userId(), request);
         if (document == null) {
             return ToolResult.failure("请先发送需要修改的文档");
         }
 
-        String request = ToolArguments.requireString(arguments, "request");
         String outputType = DocumentFileType.canonical(
                 ToolArguments.string(arguments, "output_type", "docx"));
         if (!DocumentFileType.canEditOutput(outputType)) {

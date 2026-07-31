@@ -392,23 +392,21 @@ public final class UserRequestHandler {
             replySender.sendReply(client, userId, "网络波动了，请再发一次～");
             return;
         }
-        if (plan.messageMode() == com.example.ilink.application.routing.MessageMode.AMBIGUOUS) {
+        boolean hasBusinessAction = plan.actions().stream()
+                .anyMatch(action -> !"chat".equals(action.route().intent()));
+        if (!hasBusinessAction
+                && plan.messageMode() == com.example.ilink.application.routing.MessageMode.AMBIGUOUS) {
             replySender.sendReply(client, userId,
                     "我还不确定你是希望我执行操作，还是只是在描述这件事。请明确告诉我要创建、查询、修改或生成什么。");
             return;
         }
-        if (plan.messageMode() == com.example.ilink.application.routing.MessageMode.CONTINUATION) {
+        if (!hasBusinessAction
+                && plan.messageMode() == com.example.ilink.application.routing.MessageMode.CONTINUATION) {
             replySender.sendReply(client, userId,
                     "当前没有可继续的等待步骤。请把要继续处理的具体内容再说明一下。");
             return;
         }
-        if (plan.messageMode() == com.example.ilink.application.routing.MessageMode.CHAT
-                && plan.actions().stream().anyMatch(action -> !"chat".equals(action.route().intent()))) {
-            replySender.sendReply(client, userId,
-                    "我还不能确认你是否要我执行这些操作。请明确说“帮我创建、查询、修改或生成”。");
-            return;
-        }
-        if (plan.isPassiveMessage()) {
+        if (!hasBusinessAction && plan.isPassiveMessage()) {
             replySender.sendReply(client, userId,
                     "我把这条内容识别为通知，但没有找到可以安全自动整理的待办或日历事项。");
             return;
@@ -463,6 +461,7 @@ public final class UserRequestHandler {
         LocationService.LinkUpdate linkUpdate = locationService.updateFromSharedLink(userId, text);
         if (linkUpdate.recognized()) {
             replySender.sendReply(client, userId, linkUpdate.message());
+            if (linkUpdate.updated()) foodOrderWorkflow.resumeAfterLocationUpdate(client, userId);
             return true;
         }
         String normalized = text == null ? "" : text.trim().replaceAll("[，。！？!?]+$", "");
@@ -822,7 +821,7 @@ public final class UserRequestHandler {
         try {
             List<SearchResult> results = webSearchService.search(query, Config.WEB_SEARCH_RESULT_LIMIT);
             String reply = formatSearchResults("联网搜索结果", results);
-            visualCardWorkflow.sendSearchResults(client, userId, "联网搜索结果", results, reply);
+            replySender.sendReply(client, userId, reply);
         } catch (Exception e) {
             System.err.println("[联网搜索] 查询失败: " + e.getMessage());
             replySender.sendReply(client, userId, "这次联网查询没有成功，我不会用旧知识冒充实时结果，请稍后再试。");

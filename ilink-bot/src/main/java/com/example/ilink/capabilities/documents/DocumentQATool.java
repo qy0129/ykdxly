@@ -46,13 +46,12 @@ public final class DocumentQATool implements Tool {
     /** 读取当前文档并调用文档 AI 服务。 */
     @Override
     public ToolResult execute(ToolContext context, JsonObject arguments) {
-        DocumentRecord document = documentSessions.get(context.userId());
+        String action = ToolArguments.string(arguments, "action", "question");
+        String request = ToolArguments.requireString(arguments, "request");
+        DocumentRecord document = documentSessions.resolve(context.userId(), request);
         if (document == null) {
             return ToolResult.failure("请先发送需要处理的文档");
         }
-
-        String action = ToolArguments.string(arguments, "action", "question");
-        String request = ToolArguments.requireString(arguments, "request");
         if ("summary".equals(action)) {
             request = "请总结这份文件，提炼核心观点、重要事实和结论。用户补充要求：" + request;
         }

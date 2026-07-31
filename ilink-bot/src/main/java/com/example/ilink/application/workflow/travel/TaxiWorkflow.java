@@ -5,6 +5,8 @@ import com.example.ilink.application.messaging.ReplySender;
 import com.example.ilink.application.messaging.AgentContext;
 
 import com.example.ilink.capabilities.travel.DidiMcpClient;
+import com.example.ilink.capabilities.location.LocationService;
+import com.example.ilink.capabilities.travel.AmapService;
 import com.example.ilink.application.routing.IntentResult;
 import com.example.ilink.application.conversation.UserSessionStore;
 import com.example.ilink.platform.persistence.MySqlStore;
@@ -24,19 +26,26 @@ public final class TaxiWorkflow {
     private final DidiMcpClient didi;
     private final ReplySender replySender;
     private final UserSessionStore sessions;
+    private final LocationService locationService;
     private final Map<String, PendingTaxi> pendingTaxis = new ConcurrentHashMap<>();
     private final Set<String> loadedUsers = ConcurrentHashMap.newKeySet();
     private final MySqlStore database = MySqlStore.getInstance();
     private final Gson gson = new Gson();
 
     public TaxiWorkflow(DidiMcpClient didi, ReplySender replySender) {
-        this(didi, replySender, null);
+        this(didi, replySender, null, null);
     }
 
     public TaxiWorkflow(DidiMcpClient didi, ReplySender replySender, UserSessionStore sessions) {
+        this(didi, replySender, sessions, null);
+    }
+
+    public TaxiWorkflow(DidiMcpClient didi, ReplySender replySender,
+                        UserSessionStore sessions, LocationService locationService) {
         this.didi = didi;
         this.replySender = replySender;
         this.sessions = sessions;
+        this.locationService = locationService;
     }
 
     public boolean hasPending(String userId) {
@@ -69,7 +78,11 @@ public final class TaxiWorkflow {
             replySender.sendReply(client, userId, "尚未配置滴滴 MCP Key。请在启动环境设置 DIDI_MCP_KEY 后重试。");
             return;
         }
-        String origin = resolveOrigin(userId, route.travelOrigin());
+        boolean explicitOrigin = !trim(route.travelOrigin()).isBlank();
+        AmapService.Place preciseOrigin = explicitOrigin ? null : currentPreciseLocation(userId);
+        String origin = preciseOrigin == null
+                ? resolveOrigin(userId, route.travelOrigin())
+                : trim(preciseOrigin.name());
         String destination = trim(route.travelDestination());
         String originCity = trim(route.originCity());
         String destinationCity = trim(route.destinationCity());
@@ -82,7 +95,7 @@ public final class TaxiWorkflow {
             }
         }
         if (!origin.isBlank() && !destination.isBlank()) {
-            start(client, userId, origin, destination, originCity, destinationCity);
+            start(client, userId, origin, destination, originCity, destinationCity, preciseOrigin);
             return;
         }
         handleOrderCommand(client, userId, requestText);
@@ -92,6 +105,19 @@ public final class TaxiWorkflow {
         String explicit = trim(routeOrigin);
         if (!explicit.isBlank() || sessions == null) return explicit;
         return trim(sessions.getCurrentLocation(userId));
+    }
+
+    private AmapService.Place currentPreciseLocation(String userId) {
+        if (locationService == null) return null;
+        try {
+            AmapService.Place place = locationService.currentPlace(userId);
+            return place == null || trim(place.name()).isBlank()
+                    || trim(place.longitude()).isBlank() || trim(place.latitude()).isBlank()
+                    ? null : place;
+        } catch (RuntimeException error) {
+            System.err.println("[Taxi] 读取精确定位失败，退回地址搜索：" + error.getMessage());
+            return null;
+        }
     }
 
     public void handlePending(AgentContext context, String text) throws Exception {
@@ -109,7 +135,8 @@ public final class TaxiWorkflow {
         }
         try {
             switch (pending.stage()) {
-                case CITY -> start(client, userId, pending.origin(), pending.destination(), answer, answer);
+                case CITY -> start(client, userId, pending.origin(), pending.destination(), answer, answer,
+                        currentPreciseLocation(userId));
                 case ORIGIN_SELECTION -> selectOrigin(client, userId, pending, answer);
                 case DESTINATION_SELECTION -> selectDestination(client, userId, pending, answer);
                 case CONFIRM_ORDER -> createOrder(client, userId, pending, answer);
@@ -133,6 +160,11 @@ public final class TaxiWorkflow {
 
     private void start(ReplyChannel client, String userId, String origin, String destination,
                        String originCity, String destinationCity) throws Exception {
+        start(client, userId, origin, destination, originCity, destinationCity, null);
+    }
+
+    private void start(ReplyChannel client, String userId, String origin, String destination,
+                       String originCity, String destinationCity, AmapService.Place preciseOrigin) throws Exception {
         String fromCity = city(originCity);
         String toCity = city(destinationCity);
         if (fromCity.isBlank() && toCity.isBlank()) {
@@ -142,7 +174,11 @@ public final class TaxiWorkflow {
         }
         if (fromCity.isBlank()) fromCity = toCity;
         if (toCity.isBlank()) toCity = fromCity;
-        List<DidiMcpClient.Place> originCandidates = didi.textSearch(origin, fromCity);
+        List<DidiMcpClient.Place> originCandidates = preciseOrigin == null
+                ? didi.textSearch(origin, fromCity)
+                : List.of(new DidiMcpClient.Place(
+                        preciseOrigin.name(), "", preciseOrigin.name(), fromCity,
+                        preciseOrigin.longitude(), preciseOrigin.latitude()));
         if (originCandidates.isEmpty()) {
             save(userId, PendingTaxi.city(origin, destination));
             replySender.sendReply(client, userId, "没有找到出发地“" + origin + "”，请补充更完整的地点或城市。");

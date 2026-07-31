@@ -21,11 +21,16 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** 唯一的用户意图识别入口：先拆需求，再逐项分配同级能力。 */
 public final class IntentRecognizer {
 
     private static final int MAX_REQUIREMENTS = 12;
+    private static final Pattern FOOD_ORDER_ITEM = Pattern.compile(
+            "(?:想吃|想喝|想点|要点|帮我点|给我点|替我点|帮我订|给我订|替我订|点|订|下单)"
+                    + "(?:一份|一个|个|一杯|杯|份)?\\s*([^，,。！？?!；;]{1,30})");
 
     private final HttpClient httpClient;
     private final RouteClient routeClient;
@@ -75,7 +80,7 @@ public final class IntentRecognizer {
         try {
             JsonObject result = requestJson(promptBuilder.buildUnifiedPrompt(context, userMessage), userMessage);
             MessageMode messageMode = MessageMode.fromModel(string(result, "message_mode"));
-            Map<String, IntentAction> assigned = parseUnifiedActions(result, context);
+            Map<String, IntentAction> assigned = parseUnifiedActions(result, context, userMessage);
             List<AtomicRequirement> requirements = new ArrayList<>(
                     parseRequirements(result, "requirements", Set.of()));
             Set<String> requirementIds = requirements.stream().map(AtomicRequirement::id)
@@ -122,14 +127,15 @@ public final class IntentRecognizer {
                     && !IntentPolicy.isDocumentImageInsertion(userMessage)) {
                 return imageEditPlan(userMessage);
             }
-            return new IntentPlan(actions, messageMode);
+            return new IntentPlan(actions, resolveMessageMode(messageMode, actions));
         } catch (Exception error) {
             System.err.println("[统一意图识别] 识别失败：" + error.getMessage());
             return fallbackPlan(userMessage, context);
         }
     }
 
-    private Map<String, IntentAction> parseUnifiedActions(JsonObject result, RoutingContext context) {
+    private Map<String, IntentAction> parseUnifiedActions(JsonObject result, RoutingContext context,
+                                                          String originalMessage) {
         JsonArray array = result.has("actions") && result.get("actions").isJsonArray()
                 ? result.getAsJsonArray("actions") : new JsonArray();
         Map<String, IntentAction> actions = new LinkedHashMap<>();
@@ -149,6 +155,11 @@ public final class IntentRecognizer {
                     while (!ids.add(id)) id += "x";
                 }
                 normalizeAction(requestText, requestText, action, context.mediaContext());
+                if ("food_order".equals(string(action, "intent"))
+                        && string(action, "food_order_restaurants").isBlank()) {
+                    action.addProperty("food_order_restaurants",
+                            inferFoodOrderRestaurant(originalMessage));
+                }
                 actions.put(id, new IntentAction(id, requestText,
                         stringList(action, "depends_on"), toIntentResult(action)));
             } catch (RuntimeException error) {
@@ -355,8 +366,36 @@ public final class IntentRecognizer {
             return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), toIntentResult(action))),
                     MessageMode.COMMAND);
         }
+        String businessIntent = IntentPolicy.explicitBusinessIntent(userMessage);
+        if (!businessIntent.isBlank()) {
+            return deterministicBusinessPlan(userMessage, businessIntent);
+        }
         return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), IntentResult.chat())),
                 MessageMode.CHAT);
+    }
+
+    private IntentPlan deterministicBusinessPlan(String userMessage, String intent) {
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", intent);
+        action.addProperty("reply_mode", "keep");
+        action.addProperty("voice_style", "default");
+        action.addProperty("output_file_type", "none");
+        if ("food_order".equals(intent)) {
+            action.addProperty("food_order_restaurants", inferFoodOrderRestaurant(userMessage));
+        }
+        if ("nearby_food".equals(intent)) {
+            action.addProperty("nearby_action", "search");
+            action.addProperty("meal_keyword", "");
+        }
+        return new IntentPlan(
+                List.of(new IntentAction("r1", userMessage, List.of(), toIntentResult(action))),
+                MessageMode.COMMAND);
+    }
+
+    private MessageMode resolveMessageMode(MessageMode modelMode, List<IntentAction> actions) {
+        boolean hasBusinessAction = actions.stream()
+                .anyMatch(action -> !"chat".equals(action.route().intent()));
+        return hasBusinessAction ? MessageMode.COMMAND : modelMode;
     }
 
     private IntentPlan todoPlan(String userMessage) {
@@ -432,6 +471,12 @@ public final class IntentRecognizer {
         boolean documentImageInsertion = IntentPolicy.isDocumentImageInsertion(userMessage);
         boolean imageEdit = IntentPolicy.isExplicitImageEdit(userMessage) && !documentImageInsertion;
         boolean fileRequest = IntentPolicy.hasExplicitFileRequest(userMessage);
+        String explicitBusinessIntent = IntentPolicy.explicitBusinessIntent(userMessage);
+        if (!explicitBusinessIntent.isBlank() && !explicitBusinessIntent.equals(intent)) {
+            action.addProperty("intent", explicitBusinessIntent);
+            action.addProperty("output_file_type", "none");
+            intent = explicitBusinessIntent;
+        }
         if (IntentPolicy.isExplicitTodoCreation(userMessage) && !"todo".equals(intent)) {
             action.addProperty("intent", "todo");
             clearOutputFields(action);
@@ -522,6 +567,12 @@ public final class IntentRecognizer {
             }
             action.addProperty("meal_keyword", keyword);
             action.addProperty("nearby_action", "search");
+        }
+        if ("food_order".equals(intent)) {
+            String restaurant = string(action, "food_order_restaurants");
+            if (restaurant.isBlank()) restaurant = inferFoodOrderRestaurant(actionText);
+            if (restaurant.isBlank()) restaurant = inferFoodOrderRestaurant(userMessage);
+            action.addProperty("food_order_restaurants", restaurant);
         }
     }
 
@@ -643,6 +694,26 @@ public final class IntentRecognizer {
                 .replaceAll("(了|呢|吗|呀|啊|附近的?|附近有吗)$", "")
                 .replaceAll("[，,。？?！!]", " ").replaceAll("\\s+", " ").trim();
         return value.length() > 30 ? value.substring(0, 30).trim() : value;
+    }
+
+    static String inferFoodOrderRestaurant(String text) {
+        if (text == null || text.isBlank()) return "";
+        Matcher matcher = FOOD_ORDER_ITEM.matcher(text);
+        while (matcher.find()) {
+            String candidate = cleanFoodOrderCandidate(matcher.group(1));
+            if (!candidate.isBlank()) return candidate;
+        }
+        return "";
+    }
+
+    private static String cleanFoodOrderCandidate(String value) {
+        String candidate = value == null ? "" : value.trim();
+        candidate = candidate.replaceAll("(?:吧|呀|啊|呢|了)$", "")
+                .replaceAll("(?:的)?(?:外卖|外送|配送|下单)$", "")
+                .replaceFirst("^(?:附近的?|周边的?)", "")
+                .trim();
+        if (candidate.matches("(?:外卖|饭|餐|东西|吃的|喝的|美食|餐厅|随便|都行|附近)")) return "";
+        return candidate.length() > 30 ? candidate.substring(0, 30).trim() : candidate;
     }
 
     static boolean isGenericNearbyFoodQuery(String text) {
