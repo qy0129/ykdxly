@@ -14,6 +14,10 @@ import org.apache.pdfbox.rendering.PDFRenderer;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.poi.hwpf.HWPFDocument;
 import org.apache.poi.hwpf.extractor.WordExtractor;
+import org.apache.poi.hslf.usermodel.HSLFShape;
+import org.apache.poi.hslf.usermodel.HSLFSlide;
+import org.apache.poi.hslf.usermodel.HSLFSlideShow;
+import org.apache.poi.hslf.usermodel.HSLFTextShape;
 import org.apache.poi.ss.usermodel.Cell;
 import org.apache.poi.ss.usermodel.CellType;
 import org.apache.poi.ss.usermodel.Row;
@@ -51,7 +55,7 @@ import java.util.Locale;
 /**
  * 文档解析器。
  *
- * <p>根据扩展名解析 TXT、DOC、DOCX 和 PDF，统一返回纯文本，
+ * <p>根据扩展名解析常见文字、表格、PDF 和演示文稿，统一返回纯文本，
  * 供文档问答、总结和编辑计划使用。</p>
  */
 public final class DocumentParser {
@@ -74,6 +78,7 @@ public final class DocumentParser {
             case "pdf" -> parsePdf(path);
             case "xlsx" -> parseXlsx(path);
             case "xls" -> parseXls(path);
+            case "ppt" -> parsePpt(path);
             case "pptx" -> parsePptx(path);
             default -> throw new IOException("暂不支持解析 " + extension + " 文件");
         };
@@ -213,6 +218,26 @@ public final class DocumentParser {
             }
             default -> "";
         };
+    }
+
+    /** 读取旧版 PPT 演示文稿，按页提取文字。 */
+    private String parsePpt(Path path) throws IOException {
+        StringBuilder text = new StringBuilder();
+        try (InputStream input = Files.newInputStream(path);
+             HSLFSlideShow ppt = new HSLFSlideShow(input)) {
+            int page = 1;
+            for (HSLFSlide slide : ppt.getSlides()) {
+                text.append("----- 第 ").append(page++).append(" 页 -----\n");
+                for (HSLFShape shape : slide.getShapes()) {
+                    if (shape instanceof HSLFTextShape textShape
+                            && textShape.getText() != null && !textShape.getText().isBlank()) {
+                        text.append(textShape.getText().strip()).append('\n');
+                    }
+                }
+                text.append('\n');
+            }
+        }
+        return text.toString();
     }
 
     /** 读取 PPTX 演示文稿，按页提取文字。 */

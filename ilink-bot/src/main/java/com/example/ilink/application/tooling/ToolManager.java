@@ -1,6 +1,7 @@
 package com.example.ilink.application.tooling;
 
 import com.example.ilink.application.messaging.AgentEvent;
+import com.example.ilink.application.messaging.ConsoleLog;
 import com.example.ilink.application.messaging.RequestLogContext;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -26,8 +27,8 @@ public final class ToolManager {
         if (tools.putIfAbsent(definition.name(), tool) != null) {
             throw new IllegalArgumentException("工具名称重复: " + definition.name());
         }
-        System.out.println("[工具管理] 已注册：" + definition.displayName()
-                + "（" + definition.name() + "）");
+        ConsoleLog.info("工具管理", "已注册工具：" + definition.displayName()
+                + "，工具编号=" + definition.name());
         return this;
     }
 
@@ -63,22 +64,24 @@ public final class ToolManager {
     public ToolResult execute(String name, ToolContext context, JsonObject arguments) {
         Tool tool = find(name);
         if (tool == null) {
-            System.err.println(RequestLogContext.prefix("工具") + " missing=" + name);
+            ConsoleLog.warn("工具调用", "未找到工具，工具编号=" + name);
             return ToolResult.failure("未找到工具：" + name);
         }
 
         ToolDefinition definition = tool.definition();
+        long startedAt = System.nanoTime();
         RequestLogContext.publish(new AgentEvent(AgentEvent.Type.TOOL_ACTIVITY,
                 "调用工具：" + definition.displayName(), Map.of(
                 "toolName", definition.name(), "toolLabel", definition.displayName(),
                 "status", "running", "phase", "tool")));
-        System.out.println(RequestLogContext.prefix("工具") + " name=" + definition.name()
-                + " label=" + definition.displayName()
-                + " args=" + RequestLogContext.preview(arguments == null ? "{}" : arguments.toString()));
+        ConsoleLog.info("工具调用", "开始调用工具：" + definition.displayName()
+                + "，工具编号=" + definition.name()
+                + "，参数摘要=" + ConsoleLog.summary(arguments == null ? "{}" : arguments.toString()));
         try {
             ToolSchemaValidator.Result schemaResult = schemaValidator.validate(definition.parameters(), arguments);
             if (!schemaResult.valid()) {
-                System.err.println("[工具参数校验] " + definition.displayName() + "：" + schemaResult.message());
+                ConsoleLog.warn("工具参数校验", "工具=" + definition.displayName() + "，校验失败："
+                        + schemaResult.message());
                 return ToolResult.failure("工具参数无效：" + schemaResult.message());
             }
             ToolResult result = tool.execute(context, arguments);
@@ -87,17 +90,21 @@ public final class ToolManager {
                     (result.success() ? "工具完成：" : "工具失败：") + definition.displayName(), Map.of(
                     "toolName", definition.name(), "toolLabel", definition.displayName(),
                     "status", result.success() ? "success" : "failed", "phase", "tool")));
-            System.out.println(RequestLogContext.prefix("工具结果") + " name=" + definition.name()
-                    + " status=" + status);
+            ConsoleLog.info("工具结果", "工具=" + definition.displayName() + "，执行状态=" + status
+                    + "，耗时=" + elapsedMillis(startedAt) + "毫秒，结果摘要=" + ConsoleLog.summary(result.output()));
             return result;
         } catch (Exception e) {
             RequestLogContext.publish(new AgentEvent(AgentEvent.Type.TOOL_ACTIVITY,
                     "工具失败：" + definition.displayName(), Map.of(
                     "toolName", definition.name(), "toolLabel", definition.displayName(),
                     "status", "failed", "phase", "tool")));
-            System.err.println(RequestLogContext.prefix("工具结果") + " name=" + definition.name()
-                    + " status=失败 error=" + RequestLogContext.error(e));
+            ConsoleLog.error("工具结果", "工具=" + definition.displayName() + "，执行状态=失败，耗时="
+                    + elapsedMillis(startedAt) + "毫秒，" + ConsoleLog.errorSummary(e));
             return ToolResult.failure(e.getMessage());
         }
+    }
+
+    private static long elapsedMillis(long startedAt) {
+        return (System.nanoTime() - startedAt) / 1_000_000;
     }
 }

@@ -16,6 +16,8 @@ import java.util.Properties;
  */
 public class Config {
 
+    private static final Path CONFIG_PATH = locateConfigPath();
+
     public static final String API_KEY = loadApiKey();
     public static final String API_BASE_URL = "https://api.siliconflow.cn/v1/chat/completions";
     public static final String MODEL = "Qwen/Qwen3-8B";
@@ -47,7 +49,21 @@ public class Config {
     public static final Duration REQ_TIMEOUT = Duration.ofSeconds(
             Long.parseLong(loadProperty("request.timeout.seconds", "180")));
     public static final Duration ROUTER_REQ_TIMEOUT = Duration.ofSeconds(
-            Long.parseLong(loadProperty("router.request.timeout.seconds", "15")));
+            Long.parseLong(loadProperty("router.request.timeout.seconds", "30")));
+    public static final int ROUTER_MAX_TOKENS = Integer.parseInt(
+            loadProperty("router.max_tokens", "1800"));
+    public static final Duration TODO_PLANNER_REQ_TIMEOUT = Duration.ofSeconds(
+            Long.parseLong(loadProperty("todo.planner.request.timeout.seconds", "30")));
+    public static final boolean REFLECTION_AI_ENABLED =
+            Boolean.parseBoolean(loadProperty("reflection.ai.enabled", "true"));
+    public static final Duration REFLECTION_AI_TIMEOUT = Duration.ofSeconds(
+            Long.parseLong(loadProperty("reflection.ai.timeout.seconds", "30")));
+    public static final int REFLECTION_AI_MAX_TOKENS = Integer.parseInt(
+            loadProperty("reflection.ai.max_tokens", "1000"));
+    public static final Duration AUTOMATION_TASK_TIMEOUT = Duration.ofSeconds(
+            Long.parseLong(loadProperty("automation.task.timeout.seconds", "300")));
+    public static final Duration AUTOMATION_ANALYSIS_TIMEOUT = Duration.ofSeconds(
+            Long.parseLong(loadProperty("automation.analysis.timeout.seconds", "90")));
     public static final Duration DOCUMENT_REQ_TIMEOUT = Duration.ofSeconds(
             Long.parseLong(loadProperty("document.request.timeout.seconds", "240")));
     public static final Duration VISION_REQ_TIMEOUT = Duration.ofSeconds(
@@ -196,7 +212,7 @@ public class Config {
     public static final String INTEREST_RADAR_QUIET_END =
             loadProperty("radar.quiet.end", "08:00");
     public static final Path SDK_RESUME_CONTEXT_FILE =
-            Path.of(loadProperty("sdk.resume.context.file", "data/sdk-resume-context.json"));
+            resolveConfiguredPath(loadProperty("sdk.resume.context.file", "data/sdk-resume-context.json"));
     public static final String KUAIDI100_CUSTOMER = loadProperty("kuaidi100.customer", "");
     public static final String KUAIDI100_KEY = loadProperty("kuaidi100.key", "");
     public static final String BANGUMI_API_BASE = loadProperty("bangumi.api.base", "https://api.bgm.tv");
@@ -249,6 +265,10 @@ public class Config {
 
     /** 支持从项目目录启动时读取项目上一级的私有配置文件。 */
     private static Path configPath() {
+        return CONFIG_PATH;
+    }
+
+    private static Path locateConfigPath() {
         Path directory = Path.of("").toAbsolutePath().normalize();
         for (int level = 0; level < 4 && directory != null; level++) {
             Path candidate = directory.resolve("config.properties");
@@ -256,6 +276,15 @@ public class Config {
             directory = directory.getParent();
         }
         return null;
+    }
+
+    private static Path resolveConfiguredPath(String value) {
+        Path path = Path.of(value);
+        if (path.isAbsolute()) return path.normalize();
+        Path base = CONFIG_PATH == null
+                ? Path.of("").toAbsolutePath().normalize()
+                : CONFIG_PATH.getParent();
+        return base.resolve(path).normalize();
     }
 
     private static String loadSecretProperty(String environmentName, String propertyName) {

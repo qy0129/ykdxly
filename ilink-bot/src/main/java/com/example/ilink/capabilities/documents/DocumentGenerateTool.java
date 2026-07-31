@@ -26,13 +26,13 @@ public final class DocumentGenerateTool implements Tool {
 
         JsonObject properties = new JsonObject();
         properties.add("request", ToolDefinition.stringProperty("需要生成的文件内容和格式要求"));
-        properties.add("output_type", ToolDefinition.enumStringProperty("输出文件格式", "docx", "pdf", "xlsx", "pptx", "txt", "md", "csv"));
+        properties.add("output_type", ToolDefinition.enumStringProperty("输出文件格式", "docx", "pdf", "xlsx", "txt", "md", "csv"));
         properties.add("source_content", ToolDefinition.stringProperty("本轮图片等新来源中提取出的内容；没有时留空"));
         properties.add("source_name", ToolDefinition.stringProperty("新来源的说明名称，例如用户图片；没有时留空"));
         this.definition = new ToolDefinition(
                 NAME,
                 "生成文档",
-                "从零生成新的 DOCX/PDF/XLSX/PPTX 文件。不会自动使用会话中的旧文档；不要用于格式转换。",
+                "从零生成新的 DOCX/PDF/XLSX/TXT/MD/CSV 文件。不会自动使用会话中的旧文档；不要用于格式转换，也不生成 PPT/PPTX。",
                 ToolDefinition.objectParameters(properties, "request", "output_type"),
                 true);
     }
@@ -47,7 +47,13 @@ public final class DocumentGenerateTool implements Tool {
     @Override
     public ToolResult execute(ToolContext context, JsonObject arguments) throws Exception {
         String request = ToolArguments.requireString(arguments, "request");
-        String outputType = ToolArguments.string(arguments, "output_type", "docx");
+        String outputType = DocumentFileType.canonical(
+                ToolArguments.string(arguments, "output_type", "docx"));
+        if (!DocumentFileType.canGenerate(outputType)) {
+            return ToolResult.failure(DocumentFileType.isPresentation(outputType)
+                    ? "当前支持识别和编辑 PPT/PPTX，但暂不支持从零生成演示文稿"
+                    : "暂不支持生成 " + outputType + " 文件");
+        }
         String sourceContent = ToolArguments.string(arguments, "source_content", "");
         String sourceName = ToolArguments.string(arguments, "source_name", "");
 
@@ -64,7 +70,6 @@ public final class DocumentGenerateTool implements Tool {
         byte[] bytes = switch (outputType) {
             case "txt", "md", "csv" -> documentService.createPlainText(content);
             case "xlsx" -> documentService.createXlsx(content);
-            case "pptx" -> documentService.createPptx(title, content);
             case "pdf" -> documentService.createPdf(title, content);
             default -> documentService.createDocx(title, content);
         };

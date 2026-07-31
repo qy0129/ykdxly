@@ -143,6 +143,7 @@ import com.example.ilink.capabilities.planning.PlanProgressTool;
 import com.example.ilink.application.workflow.planning.PlanWorkflow;
 import com.example.ilink.application.workflow.life.LifeWorkflow;
 import com.example.ilink.capabilities.life.DailyReflectionService;
+import com.example.ilink.capabilities.life.ReflectionInsightService;
 import com.example.ilink.capabilities.life.LifeStateStore;
 import com.example.ilink.capabilities.life.PlanReminderService;
 import com.example.ilink.capabilities.life.StudyPlanBuilder;
@@ -153,6 +154,7 @@ import com.example.ilink.capabilities.planning.TaskDecompositionTool;
 import com.example.ilink.capabilities.planning.TaskPlanTool;
 import com.example.ilink.capabilities.planning.TaskPlanningService;
 import com.example.ilink.capabilities.planning.TaskPlan;
+import com.example.ilink.capabilities.planning.TodoPlanningService;
 import com.example.ilink.capabilities.planning.TodoService;
 import com.example.ilink.capabilities.planning.TodoStore;
 import com.example.ilink.capabilities.travel.AmapService;
@@ -394,12 +396,14 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 new VisualCardRenderer(new QrCodeService()), replySender::markSent, replySender::rememberText);
         CalendarService calendarService = new CalendarService(new CalendarEventStore());
         TodoService todoService = new TodoService(new TodoStore(), calendarService);
+        TodoPlanningService todoPlanningService = new TodoPlanningService(httpClient);
         LifeStateStore lifeStates = new LifeStateStore();
         PlanReminderService planReminders = new PlanReminderService(planSessions, calendarService);
         TaskCheckinService taskCheckins = new TaskCheckinService(
                 planSessions, planningService, planReminders, lifeStates);
+        ReflectionInsightService reflectionInsights = new ReflectionInsightService(httpClient);
         DailyReflectionService reflectionService = new DailyReflectionService(
-                planSessions, todoService, calendarService, lifeStates);
+                planSessions, todoService, calendarService, lifeStates, reflectionInsights);
         UserRepository userRepository = new UserRepository(MySqlStore.getInstance());
         WelcomeHandler welcomeHandler = new WelcomeHandler(userRepository);
         CommandRouter commandRouter = new CommandRouter();
@@ -433,8 +437,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
                 mediaStore, replySender, toolManager, new RoutePlanReviewer(), contextManager,
                 planWorkflow, lifeWorkflow,
                 new CalculatorService(httpClient, toolManager), calendarWorkflow,
-                healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, foodOrderWorkflow,
-                taxiWorkflow, memoryService, todoService,
+                 healthDietWorkflow, travelWorkflow, nearbyFoodWorkflow, foodOrderWorkflow,
+                 taxiWorkflow, memoryService, todoService, todoPlanningService,
                 webSearchService, newsSearchService, bilibiliSearchService, mediaKnowledgeService,
                  qqMailService, visualCardWorkflow, executiveRuntime, automationWorkflow,
                  interestRadarService, locationService);
@@ -459,8 +463,8 @@ public final class ApplicationBootstrap implements AutoCloseable {
         DailyDashboardServer dailyDashboardServer = new DailyDashboardServer(dashboardService);
         LoginQrPage loginQrPage = new LoginQrPage();
         WebEventBroker webEvents = new WebEventBroker();
-        WechatWebBridge wechatWebBridge = new WechatWebBridge(webEvents);
         WebArtifactStore webArtifacts = new WebArtifactStore(Config.MEDIA_DIR.resolve("web-artifacts"));
+        WechatWebBridge wechatWebBridge = new WechatWebBridge(webEvents, webArtifacts, sessions);
         WebReplyChannel webReplyChannel = new WebReplyChannel(
                 webEvents, webArtifacts, chatHistory, wechatWebBridge);
         WebChatServer webChatServer = new WebChatServer(

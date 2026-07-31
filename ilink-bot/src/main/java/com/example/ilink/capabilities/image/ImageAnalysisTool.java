@@ -35,7 +35,7 @@ public final class ImageAnalysisTool implements Tool {
                 NAME,
                 "图片分析",
                 "分析用户最近发送的图片，或解答图片中的题目。没有当前图片时不要调用。",
-                ToolDefinition.objectParameters(properties, "request", "mode"),
+                ToolDefinition.objectParameters(properties),
                 true);
     }
 
@@ -53,7 +53,8 @@ public final class ImageAnalysisTool implements Tool {
             return ToolResult.failure("没有找到需要分析的图片");
         }
 
-        String request = ToolArguments.requireString(arguments, "request");
+        String request = ToolArguments.string(arguments, "request", "").trim();
+        if (request.isBlank()) request = "请识别图片中的主要内容，并给出简洁、准确的分析。";
         String mode = ToolArguments.string(arguments, "mode", "analyze");
         String prompt = "solve".equals(mode)
                 ? "请识别图片中的题目，并给出详细、准确的解题过程和答案。用户要求：" + request

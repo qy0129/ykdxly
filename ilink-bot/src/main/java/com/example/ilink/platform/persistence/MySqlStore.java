@@ -1,6 +1,7 @@
 package com.example.ilink.platform.persistence;
 
 import com.example.ilink.application.conversation.User;
+import com.example.ilink.application.messaging.ConsoleLog;
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.capabilities.calendar.CalendarEvent;
 import com.example.ilink.capabilities.planning.PlanTask;
@@ -48,11 +49,11 @@ public final class MySqlStore implements AutoCloseable {
             connectionPool = new DatabaseConnectionPool();
             initializeTables();
             available = true;
-            System.out.println("[Database] MySQL 已连接，bot_id=" + Config.DATABASE_BOT_ID);
+            ConsoleLog.info("数据库", "MySQL 已连接，机器人编号=" + Config.DATABASE_BOT_ID);
         } catch (Exception e) {
             if (connectionPool != null) connectionPool.close();
             connectionPool = null;
-            System.err.println("[Database] MySQL 初始化失败，继续使用内存存储: " + e.getMessage());
+            ConsoleLog.warn("数据库", "MySQL 初始化失败，继续使用内存存储，" + ConsoleLog.errorSummary(e));
         }
     }
 
@@ -1551,7 +1552,7 @@ public final class MySqlStore implements AutoCloseable {
     }
 
     private void logFailure(String action, Exception error) {
-        System.err.println("[Database] " + action + "失败，继续使用内存数据: " + error.getMessage());
+        ConsoleLog.warn("数据库", action + "失败，继续使用内存数据，" + ConsoleLog.errorSummary(error));
     }
 
     /** 数据库中的一条聊天消息。 */

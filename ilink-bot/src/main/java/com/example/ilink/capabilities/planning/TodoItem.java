@@ -16,4 +16,8 @@ public record TodoItem(
     public TodoItem withStatus(String newStatus) {
         return new TodoItem(id, userId, title, dueAt, newStatus, calendarEventId, createdAt, LocalDateTime.now());
     }
+
+    public TodoItem withDueAt(LocalDateTime newDueAt) {
+        return new TodoItem(id, userId, title, newDueAt, status, calendarEventId, createdAt, LocalDateTime.now());
+    }
 }

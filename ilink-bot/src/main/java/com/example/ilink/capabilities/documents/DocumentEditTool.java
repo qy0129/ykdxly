@@ -80,7 +80,11 @@ public final class DocumentEditTool implements Tool {
         }
 
         String request = ToolArguments.requireString(arguments, "request");
-        String outputType = ToolArguments.string(arguments, "output_type", "docx").toLowerCase(Locale.ROOT);
+        String outputType = DocumentFileType.canonical(
+                ToolArguments.string(arguments, "output_type", "docx"));
+        if (!DocumentFileType.canEditOutput(outputType)) {
+            return ToolResult.failure("暂不支持将文档编辑为 " + outputType + " 格式");
+        }
         String imagePath = ToolArguments.string(arguments, "image_path", null);
         String inputExt = document.extension().toLowerCase();
 
@@ -93,7 +97,10 @@ public final class DocumentEditTool implements Tool {
                 System.err.println("[DocumentEditTool] Java 格式转换成功");
                 return buildSuccess(document, inputExt, outputType, converted);
             } catch (Exception e) {
-                return ToolResult.failure("格式转换失败: " + e.getMessage());
+                if (!java.util.Set.of("doc", "xls", "ppt").contains(inputExt)) {
+                    return ToolResult.failure("格式转换失败: " + e.getMessage());
+                }
+                System.err.println("[DocumentEditTool] 旧格式无法直接转换，降级为内容重建: " + e.getMessage());
             }
         }
 

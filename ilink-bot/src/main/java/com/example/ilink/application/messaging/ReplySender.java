@@ -79,7 +79,7 @@ public final class ReplySender {
                            String replyMode, String voiceStyle) throws Exception {
         String displayText = TextLinkFormatter.format(text);
         if (isImmediateDuplicate(userId, displayText)) {
-            System.out.println("[回复幂等] 跳过短时间内的相同回复 user=" + userId);
+            ConsoleLog.info("回复幂等", "跳过短时间内的相同回复，用户标识=" + userId);
             pendingReplyModes.remove(userId);
             return;
         }
@@ -123,7 +123,7 @@ public final class ReplySender {
                     if (!audio.isMp3()) {
                         throw mp3SendError;
                     }
-                    System.err.println("[TTS] MP3 发送失败，改用 WAV: " + mp3SendError.getMessage());
+                    ConsoleLog.warn("语音合成", "MP3 发送失败，改用 WAV，" + ConsoleLog.errorSummary(mp3SendError));
                     sendAudio(client, userId, text, audioService.synthesizeWav(text, resolvedVoiceStyle));
                 }
             } catch (Exception e) {
@@ -132,7 +132,7 @@ public final class ReplySender {
                     markReplySent(userId);
                     rememberText(userId, displayText);
                 }
-                System.err.println("[TTS] 语音回复失败: " + e.getMessage());
+                ConsoleLog.error("语音合成", "语音回复失败，" + ConsoleLog.errorSummary(e));
             }
         }
     }
@@ -157,7 +157,7 @@ public final class ReplySender {
     private void sendAudio(ReplyChannel client, String userId, String text,
                            SynthesizedAudio audio) throws Exception {
         String fileName = "reply." + audio.format();
-        System.out.println("[TTS] 准备发送 " + audio.format().toUpperCase()
+        ConsoleLog.info("语音合成", "准备发送 " + audio.format().toUpperCase()
                 + " 文件，字节数=" + audio.bytes().length);
         client.sendFile(userId, audio.bytes(), fileName, "语音回复");
         markReplySent(userId);
@@ -166,7 +166,7 @@ public final class ReplySender {
             Path savedAudio = mediaStore.save(userId, "audio", audio.bytes(), audio.format());
             audioHistory.add(userId, AudioSource.BOT, savedAudio.toString(), text);
         } catch (Exception e) {
-            System.err.println("[TTS] 语音已发送，但保存历史失败: " + e.getMessage());
+            ConsoleLog.warn("语音合成", "语音已发送，但保存历史失败，" + ConsoleLog.errorSummary(e));
         }
     }
 

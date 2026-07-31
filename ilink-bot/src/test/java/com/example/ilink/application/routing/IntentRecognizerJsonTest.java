@@ -1,5 +1,6 @@
 package com.example.ilink.application.routing;
 
+import com.example.ilink.bootstrap.Config;
 import com.google.gson.JsonObject;
 import org.junit.jupiter.api.Test;
 
@@ -59,6 +60,7 @@ class IntentRecognizerJsonTest {
                 new IntentContext(false, false, false, false, false), false, true);
 
         assertEquals("json_object", body.getAsJsonObject("response_format").get("type").getAsString());
+        assertEquals(Config.ROUTER_MAX_TOKENS, body.get("max_tokens").getAsInt());
         assertEquals(2, body.getAsJsonArray("messages").size());
         assertFalse(body.getAsJsonArray("messages").get(1).getAsJsonObject()
                 .get("content").getAsString().isBlank());
@@ -91,6 +93,76 @@ class IntentRecognizerJsonTest {
         assertEquals("edit", plan.actions().getFirst().route().imageAction());
         assertEquals("将上面生成那只小猫的眼睛上戴一个墨镜",
                 plan.actions().getFirst().route().imagePrompt());
+    }
+
+    @Test
+    void fallsBackToTodoWhenRoutingTimesOut() {
+        IntentRecognizer recognizer = new IntentRecognizer(body -> {
+            throw new IllegalStateException("request timed out");
+        });
+        String request = """
+                新建以下待办事项:
+                今晚 22:00 学习 Python 两小时
+                周六早上 11:30 规划下周健身计划
+                周日下午 3 点 整理所有学习打卡记录
+                每条任务临近前半小时推送提醒,后续你可以定期检查我完成情况。
+                """.trim();
+
+        IntentPlan plan = recognizer.recognize("user", request,
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals(MessageMode.COMMAND, plan.messageMode());
+        assertEquals(1, plan.actions().size());
+        assertEquals("todo", plan.actions().getFirst().route().intent());
+        assertEquals(request, plan.actions().getFirst().requestText());
+    }
+
+    @Test
+    void correctsModelChatResultToExplicitTodo() {
+        IntentRecognizer recognizer = new IntentRecognizer(body -> """
+                {
+                  "message_mode":"command",
+                  "requirements":[{"id":"r1","text":"新建以下待办事项：明天交周报","depends_on":[]}],
+                  "actions":[{
+                    "requirement_id":"r1",
+                    "action_text":"新建以下待办事项：明天交周报",
+                    "intent":"chat"
+                  }]
+                }
+                """);
+
+        IntentPlan plan = recognizer.recognize("user", "新建以下待办事项：明天交周报",
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals("todo", plan.actions().getFirst().route().intent());
+    }
+
+    @Test
+    void restoresFullBatchTodoWhenModelMistakesFirstTimedItemForCalendar() {
+        String request = "新建以下待办事项：今晚 20:00 学习 Python 两小时；今晚 20:00 规划下周健身计划；"
+                + "明天上午 10:00 整理学习打卡记录。每条任务提前半小时提醒，后续每天帮我复盘。";
+        IntentRecognizer recognizer = new IntentRecognizer(body -> """
+                {
+                  "message_mode":"command",
+                  "requirements":[{"id":"r1","text":"创建待办","depends_on":[]}],
+                  "actions":[{
+                    "requirement_id":"r1",
+                    "action_text":"今晚 20:00 学习 Python 两小时",
+                    "intent":"calendar_event",
+                    "calendar_action":"create",
+                    "calendar_title":"学习 Python 两小时",
+                    "calendar_time":"今晚 20:00"
+                  }]
+                }
+                """);
+
+        IntentPlan plan = recognizer.recognize("user", request,
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals(MessageMode.COMMAND, plan.messageMode());
+        assertEquals(1, plan.actions().size());
+        assertEquals("todo", plan.actions().getFirst().route().intent());
+        assertEquals(request, plan.actions().getFirst().requestText());
     }
 
     @Test

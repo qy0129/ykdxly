@@ -8,7 +8,7 @@
   "capabilities": [
     {"name":"document_summary","description":"总结当前文件","parameterHint":"document_action=summary","interactive":false},
     {"name":"document_question","description":"基于当前文件回答问题","parameterHint":"document_action=question","interactive":false},
-    {"name":"generate_file","description":"从零创建新文件","parameterHint":"output_file_type","interactive":true},
-    {"name":"document_edit","description":"编辑当前文件或转换格式","parameterHint":"document_action=edit, output_file_type","interactive":true}
+    {"name":"generate_file","description":"从零创建DOCX、PDF、XLSX、TXT、MD或CSV文件；不生成PPT/PPTX","parameterHint":"output_file_type=docx|pdf|xlsx|txt|md|csv","interactive":true},
+    {"name":"document_edit","description":"编辑当前文件、转换已有文件格式或把图片插入当前文档","parameterHint":"document_action=edit, output_file_type=docx|pdf|xlsx|pptx|txt|md|csv","interactive":true}
   ]
 }

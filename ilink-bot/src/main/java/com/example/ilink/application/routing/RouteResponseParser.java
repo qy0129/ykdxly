@@ -12,6 +12,9 @@ import java.io.StringReader;
 public final class RouteResponseParser {
 
     public JsonObject parseObject(String content) {
+        if (content == null || content.isBlank()) {
+            throw new IllegalArgumentException("路由模型未返回内容");
+        }
         String json = content.trim();
         if (json.startsWith("```")) {
             int firstLineEnd = json.indexOf('\n');

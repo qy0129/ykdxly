@@ -1,6 +1,7 @@
 package com.example.ilink.application.conversation;
 
 import com.example.ilink.application.routing.IntentResult;
+import com.example.ilink.capabilities.planning.TodoConflictState;
 import com.example.ilink.capabilities.weather.WeatherLocation;
 
 import java.util.List;
@@ -64,6 +65,14 @@ public interface UserSessionStore {
     boolean hasPendingExpress(String userId);
 
     void clearPendingExpress(String userId);
+
+    void setPendingTodoConflict(String userId, TodoConflictState state);
+
+    TodoConflictState getPendingTodoConflict(String userId);
+
+    boolean hasPendingTodoConflict(String userId);
+
+    void clearPendingTodoConflict(String userId);
 
     void setPendingWeatherLocations(String userId, List<WeatherLocation> locations, String weatherDay);
 

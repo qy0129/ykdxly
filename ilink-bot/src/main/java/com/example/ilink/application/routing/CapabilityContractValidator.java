@@ -1,5 +1,7 @@
 package com.example.ilink.application.routing;
 
+import com.example.ilink.capabilities.documents.DocumentFileType;
+
 /** 在工具执行前校验能力的必要条件，模型输出只能作为候选动作。 */
 public final class CapabilityContractValidator {
     private static final java.util.Set<String> REPLY_MODES = java.util.Set.of("keep", "text", "voice", "both");
@@ -41,6 +43,22 @@ public final class CapabilityContractValidator {
         }
         if ("generate_file".equals(intent) && !IntentPolicy.hasExplicitFileRequest(requestText)) {
             return Validation.fallbackToChat();
+        }
+        if ("generate_file".equals(intent)) {
+            String outputType = DocumentFileType.canonical(route.outputFileType());
+            if (DocumentFileType.isPresentation(outputType)) {
+                return Validation.requestInput("当前支持识别和编辑 PPT/PPTX，但暂不支持从零生成演示文稿。请选择 "
+                        + DocumentFileType.generatableLabel() + "。 ");
+            }
+            if (!"none".equals(outputType) && !DocumentFileType.canGenerate(outputType)) {
+                return Validation.requestInput("暂不支持生成该格式，请选择 " + DocumentFileType.generatableLabel() + "。 ");
+            }
+        }
+        if ("document_edit".equals(intent)) {
+            String outputType = DocumentFileType.canonical(route.outputFileType());
+            if (!"none".equals(outputType) && !DocumentFileType.canEditOutput(outputType)) {
+                return Validation.requestInput("暂不支持将文档编辑为该格式。 ");
+            }
         }
         if ("nearby_food".equals(intent)
                 && !IntentPolicy.isNearbyDiningRequest(requestText)

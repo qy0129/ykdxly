@@ -186,6 +186,16 @@ public final class ExecutiveTaskStore {
                 .limit(Math.max(1, limit)).toList();
     }
 
+    public List<OutboxMessage> pendingOutbox(LocalDateTime now, int limit) {
+        Map<String, OutboxMessage> merged = new LinkedHashMap<>();
+        for (OutboxMessage message : database.pendingOutbox(now, limit)) merged.put(message.id(), message);
+        outbox.values().stream().filter(message -> "PENDING".equals(message.status())
+                        && !message.availableAt().isAfter(now))
+                .forEach(message -> merged.put(message.id(), message));
+        return merged.values().stream().sorted(Comparator.comparing(OutboxMessage::createdAt))
+                .limit(Math.max(1, limit)).toList();
+    }
+
     private boolean due(ExecutiveTask task, LocalDateTime now) {
         if (task == null || !(task.status() == TaskStatus.READY || task.status() == TaskStatus.RETRYING)) return false;
         if (task.nextRunAt() == null || task.nextRunAt().isAfter(now)) return false;

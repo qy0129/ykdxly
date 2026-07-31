@@ -6,15 +6,25 @@ import com.example.ilink.capabilities.planning.TodoItem;
 import com.example.ilink.capabilities.planning.TodoStore;
 
 import java.time.LocalDateTime;
+import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.UUID;
 import java.util.ArrayList;
+import java.util.Locale;
+import java.util.regex.Pattern;
 
 /** 待办创建、查询、完成和取消服务。 */
 public final class TodoService {
 
     private static final DateTimeFormatter DISPLAY_TIME = DateTimeFormatter.ofPattern("M月d日 HH:mm");
+    private static final Pattern DATE_QUALIFIER = Pattern.compile(
+            "(?:今天|今日|明天|明日|后天|今晚|今早|明早|本周|这周|下周|下下周|周[一二三四五六日天]|"
+                    + "星期[一二三四五六日天]|\\d{4}[-年]\\d{1,2}(?:[-月]\\d{1,2})?)");
+    private static final Pattern CLOCK_TIME = Pattern.compile(
+            "(?:凌晨|早上|上午|中午|下午|晚上|傍晚)?[零一二三四五六七八九十两\\d]{1,3}"
+                    + "(?:点|时)(?:[零一二三四五六七八九十两\\d]{1,2}分?)?");
     private final TodoStore store;
     private final CalendarService calendarService;
 
@@ -74,6 +84,20 @@ public final class TodoService {
                 .toList();
     }
 
+    /** 修改未完成待办的时间，并同步重排关联的日历提醒。 */
+    public TodoItem reschedule(String userId, String todoId, LocalDateTime dueAt) {
+        TodoItem todo = store.list(userId).stream()
+                .filter(item -> item.id().equals(todoId) && "pending".equals(item.status()))
+                .findFirst().orElse(null);
+        if (todo == null || dueAt == null) return null;
+        TodoItem updated = todo.withDueAt(dueAt);
+        store.save(updated);
+        if (!todo.calendarEventId().isBlank()) {
+            calendarService.reschedule(todo.calendarEventId(), todo.title(), dueAt);
+        }
+        return updated;
+    }
+
     /** 按稳定 ID 完成待办，避免网页上存在同名事项时误操作。 */
     public boolean completeById(String userId, String todoId) {
         TodoItem todo = store.list(userId).stream()
@@ -111,8 +135,79 @@ public final class TodoService {
 
     private TodoItem findActive(String userId, String keyword) {
         if (keyword == null || keyword.isBlank()) return store.latestActive(userId);
+        TodoSelection selection = TodoSelection.from(keyword);
         return store.list(userId).stream()
-                .filter(todo -> "pending".equals(todo.status()) && todo.title().contains(keyword.trim()))
+                .filter(todo -> "pending".equals(todo.status()))
+                .filter(todo -> selection.matches(todo))
                 .findFirst().orElse(null);
+    }
+
+    /** 将自然语言中的操作词、时间限定和待办标题拆开，避免把整句话当成标题匹配。 */
+    private record TodoSelection(LocalDate dueDate, TimeWindow timeWindow, String titleKeyword) {
+
+        static TodoSelection from(String request) {
+            String value = request == null ? "" : request.trim();
+            LocalDate dueDate = DATE_QUALIFIER.matcher(value).find()
+                    ? DateTimeParser.parse(value) == null ? null : DateTimeParser.parse(value).toLocalDate()
+                    : null;
+            return new TodoSelection(dueDate, TimeWindow.from(value), normalizeTitle(value));
+        }
+
+        boolean matches(TodoItem todo) {
+            if (dueDate != null && (todo.dueAt() == null || !dueDate.equals(todo.dueAt().toLocalDate()))) {
+                return false;
+            }
+            if (!timeWindow.matches(todo.dueAt())) return false;
+            String title = normalizeForMatch(todo.title());
+            return titleKeyword.isBlank() || title.contains(titleKeyword) || titleKeyword.contains(title);
+        }
+
+        private static String normalizeTitle(String request) {
+            String value = request.replaceFirst("^(?:(?:请|麻烦|帮我|帮忙|请你|我要|我想|把|将|删除|取消|移除|作废|撤销)\\s*)+", "");
+            value = DATE_QUALIFIER.matcher(value).replaceAll("");
+            value = value.replaceAll("(?:凌晨|早上|上午|中午|下午|晚上|傍晚)", "");
+            value = CLOCK_TIME.matcher(value).replaceAll("");
+            value = value.replaceFirst("(?:待办事项|待办|事项|任务)(?:[。！？!?，,；;]\\s*)?$", "");
+            value = value.replaceFirst("^(?:的|这条|那个|这个|该|一条)\\s*", "");
+            return normalizeForMatch(value);
+        }
+
+        private static String normalizeForMatch(String value) {
+            return value == null ? "" : value.replaceAll("[\\s，,。！？!?：:；;\\\"“”'‘’（）()【】\\[\\]]", "")
+                    .toLowerCase(Locale.ROOT);
+        }
+    }
+
+    private enum TimeWindow {
+        ANY(LocalTime.MIN, LocalTime.MAX),
+        MORNING(LocalTime.of(6, 0), LocalTime.NOON),
+        NOON(LocalTime.NOON, LocalTime.of(14, 0)),
+        AFTERNOON(LocalTime.of(14, 0), LocalTime.of(18, 0)),
+        EVENING(LocalTime.of(18, 0), LocalTime.MAX),
+        EARLY_MORNING(LocalTime.MIN, LocalTime.of(6, 0));
+
+        private final LocalTime start;
+        private final LocalTime end;
+
+        TimeWindow(LocalTime start, LocalTime end) {
+            this.start = start;
+            this.end = end;
+        }
+
+        static TimeWindow from(String request) {
+            if (request.contains("凌晨")) return EARLY_MORNING;
+            if (request.contains("早上") || request.contains("上午") || request.contains("今早") || request.contains("明早")) return MORNING;
+            if (request.contains("中午")) return NOON;
+            if (request.contains("下午")) return AFTERNOON;
+            if (request.contains("晚上") || request.contains("傍晚") || request.contains("今晚")) return EVENING;
+            return ANY;
+        }
+
+        boolean matches(LocalDateTime dueAt) {
+            if (this == ANY) return true;
+            if (dueAt == null) return false;
+            LocalTime time = dueAt.toLocalTime();
+            return !time.isBefore(start) && (end.equals(LocalTime.MAX) || time.isBefore(end));
+        }
     }
 }

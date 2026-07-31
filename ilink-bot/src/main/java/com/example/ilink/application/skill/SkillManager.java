@@ -3,6 +3,7 @@ package com.example.ilink.application.skill;
 import com.example.ilink.application.routing.CapabilityDefinition;
 import com.example.ilink.application.routing.CapabilityRegistry;
 import com.example.ilink.application.tooling.ToolManager;
+import com.example.ilink.application.messaging.ConsoleLog;
 import com.google.gson.Gson;
 
 import java.io.IOException;
@@ -44,6 +45,12 @@ public final class SkillManager {
         if (loadedSkills.isEmpty()) throw new IllegalStateException("没有发现可用的 Skill");
         skills = Map.copyOf(loadedSkills);
         capabilities = Map.copyOf(loadedCapabilities);
+        for (Skill skill : skills.values()) {
+            SkillDefinition definition = skill.definition();
+            ConsoleLog.info("技能管理", "已加载 Skill：" + definition.name() + "，版本=" + definition.version()
+                    + "，能力=" + definition.capabilities().stream().map(SkillCapability::name).toList()
+                    + "，可调用工具=" + definition.toolNames());
+        }
     }
 
     public static SkillManager loadDefault(ToolManager toolManager) {
@@ -87,8 +94,29 @@ public final class SkillManager {
 
     public SkillResult execute(SkillRequest request, SkillContext context) {
         Skill skill = findByCapability(request.capability());
-        return skill == null ? SkillResult.failure("未找到能力：" + request.capability())
-                : skill.execute(request, context);
+        if (skill == null) {
+            ConsoleLog.warn("技能调用", "未找到能力，能力编号=" + request.capability());
+            return SkillResult.failure("未找到能力：" + request.capability());
+        }
+        long startedAt = System.nanoTime();
+        SkillDefinition definition = skill.definition();
+        ConsoleLog.info("技能调用", "开始执行 Skill：" + definition.name() + "，能力=" + request.capability()
+                + "，工具=" + request.toolName() + "，参数摘要=" + ConsoleLog.summary(request.arguments().toString()));
+        try {
+            SkillResult result = skill.execute(request, context);
+            ConsoleLog.info("技能结果", "Skill=" + definition.name() + "，执行状态="
+                    + (result.success() ? "成功" : "失败") + "，耗时=" + elapsedMillis(startedAt)
+                    + "毫秒，结果摘要=" + ConsoleLog.summary(result.output()));
+            return result;
+        } catch (RuntimeException error) {
+            ConsoleLog.error("技能结果", "Skill=" + definition.name() + "，执行状态=失败，耗时="
+                    + elapsedMillis(startedAt) + "毫秒，" + ConsoleLog.errorSummary(error));
+            throw error;
+        }
+    }
+
+    private static long elapsedMillis(long startedAt) {
+        return (System.nanoTime() - startedAt) / 1_000_000;
     }
 
     private static List<SkillDefinition> loadClasspathDefinitions() {

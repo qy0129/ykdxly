@@ -5,6 +5,7 @@ import com.example.ilink.application.conversation.ConversationSession;
 import com.example.ilink.application.conversation.UserSessionStore;
 import com.example.ilink.application.routing.IntentResult;
 import com.example.ilink.capabilities.persona.Personas;
+import com.example.ilink.capabilities.planning.TodoConflictState;
 import com.example.ilink.capabilities.weather.WeatherLocation;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
@@ -31,6 +32,7 @@ public final class DefaultUserSessionStore implements UserSessionStore {
     private static final String IMAGE_ANALYSIS = "last_image_analysis";
     private static final String FILE_EXPORT = "pending_file_export";
     private static final String EXPRESS = "pending_express";
+    private static final String TODO_CONFLICT = "pending_todo_conflict";
     private static final String WEATHER = "pending_weather";
 
     private final MySqlStore database;
@@ -45,6 +47,7 @@ public final class DefaultUserSessionStore implements UserSessionStore {
     private final Map<String, String> imageAnalyses = new ConcurrentHashMap<>();
     private final Map<String, PendingFileExport> pendingExports = new ConcurrentHashMap<>();
     private final Map<String, PendingExpressState> pendingExpress = new ConcurrentHashMap<>();
+    private final Map<String, TodoConflictState> pendingTodoConflicts = new ConcurrentHashMap<>();
     private final Map<String, PendingWeatherState> pendingWeather = new ConcurrentHashMap<>();
 
     public DefaultUserSessionStore() {
@@ -234,6 +237,38 @@ public final class DefaultUserSessionStore implements UserSessionStore {
     @Override
     public void clearPendingExpress(String userId) {
         removeState(userId, EXPRESS, pendingExpress);
+    }
+
+    @Override
+    public void setPendingTodoConflict(String userId, TodoConflictState state) {
+        if (state == null) {
+            clearPendingTodoConflict(userId);
+            return;
+        }
+        TodoConflictState value = state.withExpiresAt(expiresAt());
+        pendingTodoConflicts.put(stateKey(userId, TODO_CONFLICT), value);
+        saveState(userId, TODO_CONFLICT, value);
+    }
+
+    @Override
+    public TodoConflictState getPendingTodoConflict(String userId) {
+        TodoConflictState value = loadState(userId, TODO_CONFLICT,
+                TodoConflictState.class, pendingTodoConflicts);
+        if (value != null && value.expiresAtMillis() <= System.currentTimeMillis()) {
+            clearPendingTodoConflict(userId);
+            return null;
+        }
+        return value;
+    }
+
+    @Override
+    public boolean hasPendingTodoConflict(String userId) {
+        return getPendingTodoConflict(userId) != null;
+    }
+
+    @Override
+    public void clearPendingTodoConflict(String userId) {
+        removeState(userId, TODO_CONFLICT, pendingTodoConflicts);
     }
 
     @Override

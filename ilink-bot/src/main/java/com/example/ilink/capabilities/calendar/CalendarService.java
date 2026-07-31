@@ -249,6 +249,10 @@ public final class CalendarService {
         if (next != null) reminderStore.schedule(updated);
     }
 
+    public void releaseReminder(ReminderDelivery delivery) {
+        reminderStore.release(delivery);
+    }
+
     public void markReminderFailed(ReminderDelivery delivery, LocalDateTime now, String error) {
         reminderStore.markFailed(delivery, now, error);
     }

@@ -61,4 +61,11 @@ public record ExecutiveTask(
                 status, priority, deadlineAt, nextRunAt, scheduleRule, currentStep,
                 planVersion, retryCount, maxRetries, lastError, owner, until, createdAt, LocalDateTime.now());
     }
+
+    public ExecutiveTask withDeadline(LocalDateTime value) {
+        return new ExecutiveTask(id, userId, goal, sourceType, sourceId, dedupKey,
+                status, priority, value, nextRunAt, scheduleRule, currentStep,
+                planVersion, retryCount, maxRetries, lastError, lockOwner, lockedUntil,
+                createdAt, LocalDateTime.now());
+    }
 }

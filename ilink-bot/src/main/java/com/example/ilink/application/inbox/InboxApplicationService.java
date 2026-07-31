@@ -2,17 +2,18 @@ package com.example.ilink.application.inbox;
 
 import com.example.ilink.capabilities.calendar.CalendarService;
 import com.example.ilink.capabilities.inbox.InboxModule;
-import com.example.ilink.capabilities.inbox.model.ExtractedTask;
 import com.example.ilink.capabilities.inbox.model.MessageResult;
-import com.example.ilink.capabilities.inbox.model.MessageSummary;
 import com.example.ilink.capabilities.inbox.model.ProcessedMessage;
 import com.example.ilink.capabilities.inbox.model.RawMessage;
+import com.example.ilink.application.routing.IntentAction;
+import com.example.ilink.application.routing.IntentPlan;
+import com.example.ilink.application.routing.IntentResult;
+import com.example.ilink.capabilities.planning.DateTimeParser;
 import com.example.ilink.capabilities.planning.TodoItem;
 import com.example.ilink.capabilities.planning.TodoService;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
@@ -30,10 +31,23 @@ public final class InboxApplicationService {
         this.calendar = calendar;
     }
 
-    /** consumed=true 表示消息已由 Inbox 完整处理，不应再次进入通用对话路由。 */
+    /** 兼容旧调用；没有大模型分析结果时不自动创建待办。 */
     public HandleResult handle(String userId, String messageId, Instant receivedAt,
                                String sourceType, String text) {
-        if (text == null || text.isBlank() || looksLikeAgentCommand(text)) return HandleResult.pass();
+        return HandleResult.pass();
+    }
+
+    /** 仅处理大模型判定为被动通知的todo和日历动作。 */
+    public HandleResult handle(String userId, String messageId, Instant receivedAt,
+                               String sourceType, String text, IntentPlan plan) {
+        if (text == null || text.isBlank() || plan == null || !plan.isPassiveMessage()) {
+            return HandleResult.pass();
+        }
+        List<IntentAction> inboxActions = plan.actions().stream()
+                .filter(action -> "todo".equals(action.route().intent())
+                        || "calendar_event".equals(action.route().intent()))
+                .toList();
+        if (inboxActions.isEmpty()) return HandleResult.pass();
         RawMessage raw = new RawMessage(messageId, userId, userId, text, receivedAt,
                 sourceType(sourceType), "");
         MessageResult result = inbox.process(raw);
@@ -41,32 +55,32 @@ public final class InboxApplicationService {
         if (result.isDuplicate()) return new HandleResult(true, "");
 
         List<String> created = new ArrayList<>();
-        if (result.hasTasks()) {
-            LocalDateTime extractedTime = result.extraction().times().stream()
-                    .map(value -> value.resolvedAt()).findFirst().orElse(null);
-            for (ExtractedTask task : result.extraction().tasks()) {
-                LocalDateTime dueAt = task.deadline() == null ? extractedTime : task.deadline();
-                TodoItem todo = todos.create(userId, concise(task.title()), dueAt, dueAt == null ? 0 : 30);
+        for (IntentAction action : inboxActions) {
+            IntentResult route = action.route();
+            if ("todo".equals(route.intent())) {
+                LocalDateTime dueAt = parseTime(route.calendarTime(), action.requestText());
+                TodoItem todo = todos.create(userId, concise(action.requestText()), dueAt,
+                        dueAt == null ? 0 : 30);
                 created.add("待办：" + todo.title() + formatTime(todo.dueAt()));
+            } else if ("calendar_event".equals(route.intent())) {
+                LocalDateTime startAt = parseTime(route.calendarTime(), action.requestText());
+                if (startAt == null) continue;
+                String title = route.calendarTitle().isBlank()
+                        ? concise(action.requestText()) : concise(route.calendarTitle());
+                String recurrence = route.calendarRecurrence().isBlank()
+                        ? "none" : route.calendarRecurrence();
+                calendar.create(userId, title, "通知", startAt, recurrence,
+                        Math.max(0, route.calendarReminderMinutes()),
+                        "由大模型从被动通知中识别");
+                created.add("日历：" + title + formatTime(startAt));
             }
-        } else if (result.summary().messageType() == MessageSummary.MessageType.NOTIFICATION
-                && result.hasTimes()) {
-            LocalDateTime startAt = result.extraction().times().get(0).resolvedAt();
-            String title = concise(result.summary().summary());
-            calendar.create(userId, title, "通知", startAt, "none", 30,
-                    "由 Inbox Agent 从微信消息中提取");
-            created.add("日历：" + title + formatTime(startAt));
         }
-        if (created.isEmpty()) return HandleResult.pass();
+        if (created.isEmpty()) {
+            return HandleResult.pass();
+        }
 
-        String response = "已整理这条消息：\n" + result.summary().summary().trim()
-                + "\n\n已安排：\n- " + String.join("\n- ", created);
+        String response = "已从这条通知中识别并安排：\n- " + String.join("\n- ", created);
         return new HandleResult(true, response);
-    }
-
-    private static boolean looksLikeAgentCommand(String text) {
-        String value = text.strip();
-        return value.matches("^(帮我|请你|给我|我要|我想|你能|能不能|可以帮我|查一下|搜索|总结一下).*?");
     }
 
     private static ProcessedMessage.SourceType sourceType(String value) {
@@ -84,6 +98,11 @@ public final class InboxApplicationService {
 
     private static String formatTime(LocalDateTime value) {
         return value == null ? "" : "（" + value.format(TIME) + "）";
+    }
+
+    private static LocalDateTime parseTime(String preferred, String fallback) {
+        LocalDateTime value = DateTimeParser.parse(preferred);
+        return value == null ? DateTimeParser.parse(fallback) : value;
     }
 
     public record HandleResult(boolean consumed, String response) {

@@ -13,6 +13,7 @@ import com.example.ilink.bootstrap.Config;
 import com.example.ilink.capabilities.audio.AudioService;
 import com.example.ilink.capabilities.audio.AudioSource;
 import com.example.ilink.capabilities.documents.DocumentRecord;
+import com.example.ilink.capabilities.documents.DocumentFileType;
 import com.example.ilink.capabilities.documents.DocumentService;
 import com.example.ilink.capabilities.documents.rag.RagContextService;
 import com.example.ilink.capabilities.documents.rag.Retriever;
@@ -20,11 +21,11 @@ import com.example.ilink.capabilities.image.GeneratedImage;
 import com.example.ilink.capabilities.image.ImageService;
 import com.example.ilink.capabilities.memory.MemoryService;
 import com.example.ilink.platform.media.MediaStore;
+import com.example.ilink.application.routing.IntentPlan;
 
 import java.nio.file.Path;
 import java.util.Base64;
 import java.util.List;
-import java.util.Set;
 
 /** 处理一条已经适配的入站消息。 */
 public final class MessageProcessor {
@@ -81,7 +82,7 @@ public final class MessageProcessor {
         long startedAt = System.nanoTime();
         InboundMessageValidator.Result inputValidation = inboundValidator.validate(message);
         if (!inputValidation.valid()) {
-            System.err.println("[输入校验] " + inputValidation.message());
+            ConsoleLog.warn("输入校验", inputValidation.message());
             try {
                 replySender.sendReply(client, userId, "这条消息的格式无法处理：" + inputValidation.message());
             } catch (Exception ignored) { }
@@ -91,9 +92,9 @@ public final class MessageProcessor {
                 "wechat", "default", message == null ? "" : message.messageId(), userId,
                 java.time.Instant.now());
         if (!receipt.accepted()) {
-            System.out.println("[消息幂等] 跳过重复消息 user=" + userId
-                    + ", messageId=" + (message == null ? "" : message.messageId())
-                    + ", status=" + receipt.status());
+            ConsoleLog.info("消息幂等", "跳过重复消息，用户标识=" + userId
+                    + "，消息标识=" + (message == null ? "" : message.messageId())
+                    + "，当前状态=" + receipt.status());
             return;
         }
         boolean failed = false;
@@ -149,10 +150,10 @@ public final class MessageProcessor {
                 return;
             }
 
-            System.out.println("[" + userId + "] [未知消息类型]");
+            ConsoleLog.warn("消息处理", "收到未知消息类型，用户标识=" + userId);
         } catch (Exception error) {
             failed = true;
-            System.err.println("处理消息异常: " + error.getMessage());
+            ConsoleLog.error("消息处理", "处理消息异常，" + ConsoleLog.errorSummary(error));
             receiptStore.retryable(receipt);
             try {
                 replySender.sendReply(client, userId, "网络波动了，请再发一次～");
@@ -162,15 +163,17 @@ public final class MessageProcessor {
             if (!failed) receiptStore.complete(receipt);
             long elapsedMillis = (System.nanoTime() - startedAt) / 1_000_000;
             if (elapsedMillis >= 1_000) {
-                System.out.println("[Performance] user=" + userId + ", message_ms=" + elapsedMillis);
+            ConsoleLog.info("性能统计", "用户标识=" + userId + "，消息处理耗时=" + elapsedMillis + "毫秒");
             }
         }
     }
 
     private String sessionId(AgentContext context, String userId) {
-        return context.channel() == ChannelType.WEB
-                && context.conversationId() != null
+        boolean explicitConversation = context.conversationId() != null
                 && !context.conversationId().isBlank()
+                && (context.channel() == ChannelType.WEB
+                || !context.conversationId().equals(userId));
+        return explicitConversation
                 ? context.conversationId()
                 : sessions.getCurrentSession(userId).sessionId();
     }
@@ -187,7 +190,6 @@ public final class MessageProcessor {
 
         GeneratedImage receivedImage = GeneratedImage.from(image, null);
         Path saved = mediaStore.save(userId, "image", image, receivedImage.extension());
-        documentSessions.clear(userId);
         sessions.setLastImage(userId, saved.toString(), UserSessionStore.ImageSource.USER);
         sessions.setPendingImage(userId, saved.toString());
 
@@ -198,7 +200,7 @@ public final class MessageProcessor {
                             + "第一行先写不超过50字的摘要，之后按原始顺序完整列出识别内容，不要省略。",
                     Base64.getEncoder().encodeToString(image));
         } catch (Exception error) {
-            System.err.println("[Image] 自动图片描述失败: " + error.getMessage());
+            ConsoleLog.warn("图片识别", "自动图片描述失败，" + ConsoleLog.errorSummary(error));
         }
 
         if (description != null && !description.isBlank()) {
@@ -234,7 +236,7 @@ public final class MessageProcessor {
                 String modelText = audioService.transcribe(saved);
                 if (modelText != null && !modelText.isBlank()) text = modelText;
             } catch (Exception error) {
-                System.err.println("[Audio] 语音转写失败，继续使用 SDK 文本: " + error.getMessage());
+                ConsoleLog.warn("语音转写", "转写失败，继续使用微信文本，" + ConsoleLog.errorSummary(error));
             }
         }
 
@@ -259,10 +261,9 @@ public final class MessageProcessor {
         }
 
         String extension = DocumentService.extension(fileName);
-        if (!Set.of("pdf", "doc", "docx", "txt", "md", "csv", "xlsx", "xls", "pptx")
-                .contains(extension)) {
+        if (!DocumentFileType.supportsInput(extension)) {
             replySender.sendReply(client, userId,
-                    "当前支持解析 PDF、DOC、DOCX、TXT、MD、CSV、XLSX、XLS 和 PPTX 文件");
+                    "当前支持解析 " + DocumentFileType.supportedInputLabel() + " 文件");
             return;
         }
 
@@ -276,11 +277,12 @@ public final class MessageProcessor {
             try {
                 Retriever.IndexResult index = ragContextService.indexDocument(
                         userId, parsed.fileName(), parsed.indexText());
-                System.out.println(index.indexed()
-                        ? "[RAG] 已索引文件：" + fileName + "，片段数=" + index.chunkCount()
-                        : "[RAG] 文件内容已存在，跳过重复索引：" + fileName);
+                ConsoleLog.info("知识库索引", index.indexed()
+                        ? "已索引文件：" + fileName + "，片段数=" + index.chunkCount()
+                        : "文件内容已存在，跳过重复索引：" + fileName);
             } catch (Exception error) {
-                System.err.println("[RAG] 文件索引失败，文件问答继续使用全文模式: " + error.getMessage());
+                ConsoleLog.warn("知识库索引", "文件索引失败，文件问答继续使用全文模式，"
+                        + ConsoleLog.errorSummary(error));
             }
             chatHistory.addMedia(userId, "文件 " + fileName, saved.toString(), "文件已解析，可进行总结或问答");
             if (replyImmediately) {
@@ -288,7 +290,7 @@ public final class MessageProcessor {
                         + "。你可以让我总结文件，或直接提问文件内容。");
             }
         } catch (Exception error) {
-            System.err.println("[Document] 解析失败: " + error.getMessage());
+            ConsoleLog.error("文档解析", "解析失败，" + ConsoleLog.errorSummary(error));
             replySender.sendReply(client, userId, "文件已收到，但暂时无法解析其中的文字内容");
         }
     }
@@ -314,28 +316,34 @@ public final class MessageProcessor {
         text = inboundValidator.normalizeText(text);
         if (text.isBlank()) return;
         String userId = context.principalId();
-        System.out.println("[" + userId + "] " + text);
+        ConsoleLog.userMessage(context.channel(), userId, text);
         if (commandHandler.trySwitchSession(context.replyChannel(), userId, text)) return;
         CommandType commandType = commandRouter.route(text);
         if (commandType != CommandType.NONE) {
             commandHandler.handle(context.replyChannel(), userId, commandType);
             return;
         }
+        IntentPlan plan = null;
+        if (!capabilityDispatcher.hasPendingInteraction(userId)) {
+            plan = capabilityDispatcher.analyze(context, text);
+        }
         if (message != null) {
-            InboxApplicationService.HandleResult inbox = inboxService.handle(userId, message.messageId(),
-                    message.receivedAt(), message.sourceType(), text);
-            if (inbox.consumed()) {
-                if (!inbox.response().isBlank()) {
-                    replySender.sendReply(context.replyChannel(), userId, inbox.response());
+            if (plan != null && plan.isPassiveMessage()) {
+                InboxApplicationService.HandleResult inbox = inboxService.handle(userId, message.messageId(),
+                        message.receivedAt(), message.sourceType(), text, plan);
+                if (inbox.consumed()) {
+                    if (!inbox.response().isBlank()) {
+                        replySender.sendReply(context.replyChannel(), userId, inbox.response());
+                    }
+                    return;
                 }
-                return;
             }
         }
         String sessionId = sessionId(context, userId);
         chatHistory.setUserSessionId(userId, sessionId);
         chatHistory.addUserMessage(userId, text);
         memoryExtractor.extract(userId, text);
-        capabilityDispatcher.dispatch(context, text);
+        capabilityDispatcher.dispatch(context, text, plan);
     }
 
     private static String imageAnalysisPreview(String analysis) {

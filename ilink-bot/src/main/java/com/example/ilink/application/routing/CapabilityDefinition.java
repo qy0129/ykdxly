@@ -5,5 +5,14 @@ public record CapabilityDefinition(
         String name,
         String description,
         String parameterHint,
-        boolean interactive) {
+        boolean interactive,
+        String routingDomain,
+        String routingHint,
+        String routingGuide) {
+
+    public CapabilityDefinition(String name, String description, String parameterHint, boolean interactive) {
+        this(name, description, parameterHint, interactive,
+                RoutingGuideCatalog.domain(name), RoutingGuideCatalog.runtimeHint(name),
+                RoutingGuideCatalog.fullGuide(name));
+    }
 }

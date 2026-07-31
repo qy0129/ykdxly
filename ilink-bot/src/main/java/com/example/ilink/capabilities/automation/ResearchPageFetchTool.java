@@ -25,6 +25,8 @@ import java.util.regex.Pattern;
 public final class ResearchPageFetchTool implements Tool {
     public static final String NAME = "automation_research_page_fetch";
     private static final int MAX_BYTES = 1024 * 1024;
+    private static final int MAX_PAGES = 5;
+    private static final Duration PAGE_TIMEOUT = Duration.ofSeconds(8);
     private static final Set<Integer> REDIRECTS = Set.of(301, 302, 303, 307, 308);
     private static final Pattern CHARSET = Pattern.compile("(?i)charset=([a-zA-Z0-9._-]+)");
     private final ResearchPageGateway pages;
@@ -52,7 +54,7 @@ public final class ResearchPageFetchTool implements Tool {
             JsonArray results = source.getAsJsonArray("results");
             if (results == null || results.isEmpty()) return ToolResult.failure("没有可抓取的调研来源");
             JsonArray enriched = new JsonArray();
-            for (int index = 0; index < Math.min(12, results.size()); index++) {
+            for (int index = 0; index < Math.min(MAX_PAGES, results.size()); index++) {
                 JsonObject item = results.get(index).getAsJsonObject().deepCopy();
                 try {
                     String pageText = pages.fetch(string(item, "url"));
@@ -79,7 +81,7 @@ public final class ResearchPageFetchTool implements Tool {
     private static String fetchHttp(HttpClient client, String value) throws Exception {
         URI current = PublicUrlPolicy.requirePublic(value);
         for (int redirect = 0; redirect <= 3; redirect++) {
-            HttpRequest request = HttpRequest.newBuilder(current).timeout(Duration.ofSeconds(15))
+            HttpRequest request = HttpRequest.newBuilder(current).timeout(PAGE_TIMEOUT)
                     .header("User-Agent", "Mozilla/5.0 iLinkBot-Research/1.0").GET().build();
             HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
             if (REDIRECTS.contains(response.statusCode())) {

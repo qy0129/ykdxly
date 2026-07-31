@@ -15,7 +15,11 @@ public record AgentContext(AgentIdentity identity, ChannelType channel,
     }
 
     public static AgentContext wechat(String userId, ReplyChannel replyChannel) {
-        return new AgentContext(AgentIdentity.direct(userId), ChannelType.WECHAT,
+        return wechat(userId, userId, replyChannel);
+    }
+
+    public static AgentContext wechat(String userId, String conversationId, ReplyChannel replyChannel) {
+        return new AgentContext(new AgentIdentity(userId, conversationId), ChannelType.WECHAT,
                 ChannelCapabilities.wechat(), replyChannel, null);
     }
 

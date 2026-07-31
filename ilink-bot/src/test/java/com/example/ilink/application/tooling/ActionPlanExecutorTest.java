@@ -2,6 +2,7 @@ package com.example.ilink.application.tooling;
 
 import com.example.ilink.application.routing.IntentAction;
 import com.example.ilink.application.routing.IntentPlan;
+import com.example.ilink.application.routing.IntentResult;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -56,8 +57,8 @@ class ActionPlanExecutorTest {
 
     @Test
     void planOrdersDependentActionAfterItsRequirement() {
-        IntentAction total = new IntentAction("r2", "计算总费用", List.of("r1"), null);
-        IntentAction taxi = new IntentAction("r1", "查询打车报价", List.of(), null);
+        IntentAction total = new IntentAction("r2", "计算总费用", List.of("r1"), IntentResult.chat());
+        IntentAction taxi = new IntentAction("r1", "查询打车报价", List.of(), IntentResult.chat());
 
         IntentPlan plan = new IntentPlan(List.of(total, taxi));
 
@@ -66,6 +67,6 @@ class ActionPlanExecutorTest {
     }
 
     private IntentAction action(String text) {
-        return new IntentAction(text, null);
+        return new IntentAction(text, IntentResult.chat());
     }
 }

@@ -109,13 +109,14 @@ class ExecutiveCoreTest {
         Fixture fixture = fixture(successTool("daily result"));
         LocalDateTime now = LocalDateTime.now();
         ExecutiveTask task = fixture.tasks.submit("u1", "daily", "wechat", "m1", "daily",
-                "medium", null, now, ScheduleRule.DAILY, specs("test_tool")).task();
+                "medium", now.plusMinutes(5), now, ScheduleRule.DAILY, specs("test_tool")).task();
 
         fixture.engine.runDue(now.plusSeconds(1));
 
         ExecutiveTask recurring = fixture.store.findTask(task.id());
         assertEquals(TaskStatus.READY, recurring.status());
         assertTrue(recurring.nextRunAt().isAfter(now.plusHours(23)));
+        assertEquals(recurring.nextRunAt().plusMinutes(5), recurring.deadlineAt());
         assertEquals(StepStatus.PENDING, fixture.store.loadSteps(task.id()).get(0).status());
         List<OutboxMessage> pending = fixture.outbox.pending("u1", 10);
         assertFalse(pending.isEmpty());
@@ -123,6 +124,15 @@ class ExecutiveCoreTest {
         fixture.outbox.markSent(sent);
         assertTrue(fixture.store.pendingOutbox("u1", LocalDateTime.now(), 10).stream()
                 .noneMatch(message -> message.id().equals(sent.id())));
+    }
+
+    @Test
+    void exposesPendingNotificationsAcrossUsersForDeliveryWorker() {
+        Fixture fixture = fixture(successTool("ok"));
+        fixture.outbox.enqueue("TASK-1", "u1", "TASK_COMPLETED", "one");
+        fixture.outbox.enqueue("TASK-2", "u2", "TASK_FAILED", "two");
+
+        assertEquals(2, fixture.outbox.pending(10).size());
     }
 
     @Test

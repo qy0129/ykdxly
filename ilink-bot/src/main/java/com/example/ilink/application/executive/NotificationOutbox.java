@@ -22,6 +22,10 @@ public final class NotificationOutbox {
         return store.pendingOutbox(userId, LocalDateTime.now(), limit);
     }
 
+    public List<OutboxMessage> pending(int limit) {
+        return store.pendingOutbox(LocalDateTime.now(), limit);
+    }
+
     public void markSent(OutboxMessage message) {
         store.saveOutbox(new OutboxMessage(message.id(), message.taskId(), message.userId(),
                 message.type(), message.content(), "SENT", message.attempts(), message.availableAt(),

@@ -2,6 +2,7 @@ package com.example.ilink.adapter.outbound.web;
 
 import com.example.ilink.application.messaging.AgentEvent;
 import com.example.ilink.application.messaging.ChannelType;
+import com.example.ilink.application.messaging.ConsoleLog;
 import com.example.ilink.application.messaging.ReplyChannel;
 import com.example.ilink.application.messaging.RequestLogContext;
 import com.example.ilink.application.conversation.ChatHistoryStore;
@@ -70,8 +71,6 @@ public final class WebReplyChannel implements ReplyChannel {
     @Override
     public void sendText(String recipientId, String text) {
         ensureCanPublish(recipientId);
-        System.out.println(logPrefix("回复发送", recipientId) + " kind=text chars="
-                + (text == null ? 0 : text.length()) + " preview=" + RequestLogContext.preview(text));
         rememberCompletedText(text);
         if (wechatBridge != null && text != null && !text.isBlank()) {
             RequestScope scope = requestScope.get();
@@ -79,6 +78,7 @@ public final class WebReplyChannel implements ReplyChannel {
         }
         publishScoped(recipientId, new AgentEvent(
                 AgentEvent.Type.COMPLETED, text, Map.of("kind", "text", "state", "idle")));
+        ConsoleLog.botMessage(ChannelType.WEB, recipientId, text);
     }
 
     @Override
@@ -86,9 +86,9 @@ public final class WebReplyChannel implements ReplyChannel {
         ensureCanPublish(recipientId);
         RequestScope scope = requestScope.get();
         String ownerId = scope == null ? recipientId : scope.recipientId();
-        System.out.println(logPrefix("回复发送", recipientId) + " kind=image file="
-                + RequestLogContext.preview(fileName) + " bytes=" + (content == null ? 0 : content.length)
-                + " caption=" + RequestLogContext.preview(caption));
+        ConsoleLog.info("回复发送", "向用户发送图片，用户标识=" + recipientId + "，文件名="
+                + ConsoleLog.summary(fileName) + "，文件大小=" + (content == null ? 0 : content.length)
+                + "字节，说明=" + ConsoleLog.summary(caption));
         WebArtifactStore.Artifact artifact = artifacts.save(ownerId, content, fileName, imageContentType(fileName));
         AgentEvent event = artifactEvent("image", artifact, caption);
         rememberArtifact(ownerId, artifact, event, "image");
@@ -101,9 +101,9 @@ public final class WebReplyChannel implements ReplyChannel {
         ensureCanPublish(recipientId);
         RequestScope scope = requestScope.get();
         String ownerId = scope == null ? recipientId : scope.recipientId();
-        System.out.println(logPrefix("回复发送", recipientId) + " kind=file file="
-                + RequestLogContext.preview(fileName) + " bytes=" + (content == null ? 0 : content.length)
-                + " caption=" + RequestLogContext.preview(caption));
+        ConsoleLog.info("回复发送", "向用户发送文件，用户标识=" + recipientId + "，文件名="
+                + ConsoleLog.summary(fileName) + "，文件大小=" + (content == null ? 0 : content.length)
+                + "字节，说明=" + ConsoleLog.summary(caption));
         WebArtifactStore.Artifact artifact = artifacts.save(ownerId, content, fileName, "");
         AgentEvent event = artifactEvent("file", artifact, caption);
         rememberArtifact(ownerId, artifact, event, "file");

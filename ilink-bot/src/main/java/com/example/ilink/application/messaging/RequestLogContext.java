@@ -31,16 +31,22 @@ public final class RequestLogContext {
 
     public static String prefix(String event) {
         Context context = CURRENT.get();
-        if (context == null) return "[SYS][" + cleanEvent(event) + "]";
+        if (context == null) return "[系统][" + cleanEvent(event) + "]";
         return prefix(context.channel(), event, context.userId(), context.sessionId(), context.requestId());
+    }
+
+    /** Returns the session pinned to the current request, or an empty value outside a request. */
+    public static String sessionId() {
+        Context context = CURRENT.get();
+        return context == null ? "" : context.sessionId();
     }
 
     public static String prefix(ChannelType channel, String event, String userId,
                                 String sessionId, String requestId) {
         StringBuilder value = new StringBuilder()
-                .append('[').append(channel == ChannelType.WEB ? "W" : "WX").append(']');
+                .append('[').append(channel == ChannelType.WEB ? "网页" : "微信").append(']');
         String request = shortId(requestId);
-        if (!request.isBlank()) value.append("[r=").append(request).append(']');
+        if (!request.isBlank()) value.append("[请求=").append(request).append(']');
         value.append('[').append(cleanEvent(event)).append(']');
         return value.toString();
     }
