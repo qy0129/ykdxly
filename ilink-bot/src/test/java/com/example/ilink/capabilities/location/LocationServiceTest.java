@@ -37,6 +37,8 @@ class LocationServiceTest {
 
         assertEquals("浙江省杭州市西湖区", savedAddress.get());
         assertEquals("浙江省杭州市西湖区", update.address());
+        assertEquals("120.1551", service.currentPlace("user-1").longitude());
+        assertEquals("30.2741", service.currentPlace("user-1").latitude());
         assertFalse(service.isTokenActive(token));
         assertThrows(IllegalArgumentException.class,
                 () -> service.submitGps(token, 30.2741, 120.1551, 15.0));

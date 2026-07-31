@@ -39,6 +39,7 @@ class IntentPolicyTest {
         assertTrue(IntentPolicy.isExplicitImageEdit("将上面生成那只小猫的眼睛上戴一个墨镜"));
         assertTrue(IntentPolicy.isExplicitImageEdit("帮我在刚刚那只小猫的图片上再加一个小狗"));
         assertTrue(IntentPolicy.isExplicitDocumentEdit("把文档第三段删除"));
+        assertTrue(IntentPolicy.isExplicitDocumentEdit("在这个文件后面增加一段文字"));
         assertTrue(IntentPolicy.isDocumentImageInsertion("把刚才的图片插入文档第二页"));
         assertTrue(IntentPolicy.isExplicitDocumentEdit("把第三段里的甲方替换成乙方"));
         assertFalse(IntentPolicy.isExplicitDocumentEdit("把这张图片改成水彩风格"));
@@ -220,5 +221,123 @@ class IntentPolicyTest {
 
         assertEquals("chat", action.get("intent").getAsString());
         assertEquals("", action.get("nearby_location").getAsString());
+    }
+
+    @Test
+    void explicitBusinessRequestsAreSeparatedFromChat() {
+        assertTrue(IntentPolicy.isExplicitFoodOrderRequest("帮我点外卖"));
+        assertTrue(IntentPolicy.isExplicitFoodOrderRequest("帮我点外婆家外卖"));
+        assertEquals("food_order", IntentPolicy.explicitBusinessIntent("帮我点外卖"));
+        assertEquals("nearby_food", IntentPolicy.explicitBusinessIntent("我在西湖附近有什么好吃的"));
+        assertEquals("news_search", IntentPolicy.explicitBusinessIntent("帮我查询今天的 AI 新闻"));
+        assertEquals("web_search", IntentPolicy.explicitBusinessIntent("帮我搜索 Java 虚拟线程资料"));
+        assertEquals("weather", IntentPolicy.explicitBusinessIntent("查一下杭州今天的天气"));
+        assertEquals("taxi_trip", IntentPolicy.explicitBusinessIntent("帮我打车去机场"));
+        assertEquals("", IntentPolicy.explicitBusinessIntent("我最近经常点外卖"));
+    }
+
+    @Test
+    void modelChatIntentIsCorrectedForExplicitFoodOrder() throws Exception {
+        IntentRecognizer recognizer = new IntentRecognizer(HttpClient.newHttpClient());
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "chat");
+
+        Method normalize = IntentRecognizer.class.getDeclaredMethod(
+                "normalizeAction", String.class, String.class, JsonObject.class, IntentContext.class);
+        normalize.setAccessible(true);
+        normalize.invoke(recognizer, "帮我点外卖", "帮我点外卖", action,
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals("food_order", action.get("intent").getAsString());
+    }
+
+    @Test
+    void missingFoodOrderRestaurantIsRecoveredFromOriginalRequest() throws Exception {
+        IntentRecognizer recognizer = new IntentRecognizer(HttpClient.newHttpClient());
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "food_order");
+
+        Method normalize = IntentRecognizer.class.getDeclaredMethod(
+                "normalizeAction", String.class, String.class, JsonObject.class, IntentContext.class);
+        normalize.setAccessible(true);
+        String request = "帮我点个外卖，我想吃麦当劳";
+        normalize.invoke(recognizer, request, request, action,
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals("麦当劳", action.get("food_order_restaurants").getAsString());
+        assertEquals("麦当劳", IntentRecognizer.inferFoodOrderRestaurant("帮我点麦当劳外卖"));
+        assertEquals("喜茶", IntentRecognizer.inferFoodOrderRestaurant("帮我订一杯喜茶外卖"));
+        assertEquals("", IntentRecognizer.inferFoodOrderRestaurant("帮我点外卖"));
+    }
+
+    @Test
+    void modelFoodOrderRestaurantIsNotOverwritten() throws Exception {
+        IntentRecognizer recognizer = new IntentRecognizer(HttpClient.newHttpClient());
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "food_order");
+        action.addProperty("food_order_restaurants", "麦当劳（万和路店）");
+
+        Method normalize = IntentRecognizer.class.getDeclaredMethod(
+                "normalizeAction", String.class, String.class, JsonObject.class, IntentContext.class);
+        normalize.setAccessible(true);
+        normalize.invoke(recognizer, "帮我点麦当劳外卖", "帮我点麦当劳外卖", action,
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals("麦当劳（万和路店）", action.get("food_order_restaurants").getAsString());
+    }
+
+    @Test
+    void explicitFoodOrderSurvivesModelFailure() {
+        IntentRecognizer recognizer = new IntentRecognizer(body -> {
+            throw new IllegalStateException("model unavailable");
+        });
+
+        IntentPlan plan = recognizer.recognize("user", "帮我点外卖",
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals("food_order", plan.actions().getFirst().route().intent());
+        assertEquals(MessageMode.COMMAND, plan.messageMode());
+    }
+
+    @Test
+    void foodOrderRestaurantSurvivesModelFailure() {
+        IntentRecognizer recognizer = new IntentRecognizer(body -> {
+            throw new IllegalStateException("model unavailable");
+        });
+
+        IntentPlan plan = recognizer.recognize("user", "帮我点个外卖，我想吃麦当劳",
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals("food_order", plan.actions().getFirst().route().intent());
+        assertEquals("麦当劳", plan.actions().getFirst().route().foodOrderRestaurants());
+    }
+
+    @Test
+    void businessActionWinsOverModelChatMode() {
+        IntentRecognizer recognizer = new IntentRecognizer(body -> """
+                {"message_mode":"chat","requirements":[{"id":"r1","text":"帮我点外卖","depends_on":[]}],
+                 "actions":[{"requirement_id":"r1","action_text":"帮我点外卖","intent":"food_order"}]}
+                """);
+
+        IntentPlan plan = recognizer.recognize("user", "帮我点外卖",
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals("food_order", plan.actions().getFirst().route().intent());
+        assertEquals(MessageMode.COMMAND, plan.messageMode());
+    }
+
+    @Test
+    void originalMessageRecoversRestaurantWhenModelShortensActionText() {
+        IntentRecognizer recognizer = new IntentRecognizer(body -> """
+                {"message_mode":"command",
+                 "requirements":[{"id":"r1","text":"帮我点个外卖，我想吃麦当劳","depends_on":[]}],
+                 "actions":[{"requirement_id":"r1","action_text":"帮我点个外卖","intent":"food_order"}]}
+                """);
+
+        IntentPlan plan = recognizer.recognize("user", "帮我点个外卖，我想吃麦当劳",
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals("food_order", plan.actions().getFirst().route().intent());
+        assertEquals("麦当劳", plan.actions().getFirst().route().foodOrderRestaurants());
     }
 }

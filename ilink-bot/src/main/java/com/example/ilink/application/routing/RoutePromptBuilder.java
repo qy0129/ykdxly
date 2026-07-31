@@ -173,6 +173,11 @@ public final class RoutePromptBuilder {
         return """
 
                 参数规则：
+                - 路由优先级为：系统等待状态 > 明确专用能力 > 多动作业务路由 > 参数校验 > chat最终兜底。
+                - chat不是与其他能力竞争的普通意图；用户明确要求点外卖、查新闻、联网搜索、查天气、打车或生成图片时，禁止返回chat。
+                - 缺少餐厅、地址、目的地或城市属于参数不完整，保留原业务intent并追问，不能因为缺参数改成chat。
+                - food_order表示点餐、下单或外卖入口；nearby_food只表示寻找附近餐厅。出现“附近”但同时明确“点外卖/下单”时优先food_order。
+                - food_order中只要用户提到品牌、餐厅或菜品，就必须原样填写food_order_restaurants，例如“帮我点个外卖，我想吃麦当劳”必须填写“麦当劳”，不能省略。
                 - 打车用taxi_trip；一般路线/导航用travel_plan；指定品牌点外卖用food_order；附近餐厅搜索用nearby_food。
                 - 创建提醒用calendar_event/create。费用预估、总价、算术和换算用calculator，并把完整表达保留在action_text。
                 - weather_day使用today|tomorrow|today_morning|today_afternoon|today_evening|tomorrow_morning|tomorrow_afternoon|tomorrow_evening。
@@ -180,7 +185,7 @@ public final class RoutePromptBuilder {
                 - 用户没有明确生成图片时不能选择draw；格式转换属于document_edit，不属于generate_file。
                 - document_summary用于总结当前文件；document_question用于基于当前文件回答问题。
                 - generate_file用于从零生成可下载文件，支持docx|pdf|xlsx|txt|md|csv，不允许生成ppt或pptx。
-                - document_edit用于修改当前文件、转换已有文件格式，或把图片插入当前文档。
+                - document_edit用于修改当前文件、转换已有文件格式，或把图片插入当前文档。用户提到明确文件名时按文件名选择；用户说“这个文件”“当前文件”“刚才的文件”且未给文件名时，默认使用最近一次上传或生成的文件。
                 - “修改图片内容”用image_action；“把图片插入文档”用document_edit；“根据图片生成Excel”用generate_file。
                 - actions公共必填字段只有requirement_id、depends_on、action_text、intent。
                 - 只添加当前能力实际需要的参数；未使用字段必须省略，禁止输出大批空字符串、0、空数组或none占位。

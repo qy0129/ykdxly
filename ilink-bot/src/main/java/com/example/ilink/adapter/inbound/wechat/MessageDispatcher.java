@@ -17,6 +17,7 @@ import com.example.ilink.application.messaging.ReplySender;
 import com.example.ilink.application.messaging.UserRequestHandler;
 import com.example.ilink.application.welcome.WelcomeHandler;
 import com.example.ilink.application.workflow.visual.VisualDeckSender;
+import com.example.ilink.application.workflow.food.FoodOrderWorkflow;
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.capabilities.calendar.CalendarEvent;
 import com.example.ilink.capabilities.calendar.CalendarService;
@@ -66,6 +67,7 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
     private final DailyReflectionService reflectionService;
     private final InterestRadarService interestRadarService;
     private final LocationService locationService;
+    private final FoodOrderWorkflow foodOrderWorkflow;
     private final ScheduledExecutorService progressScheduler = Executors.newScheduledThreadPool(1);
     private final ScheduledExecutorService reminderScheduler = Executors.newScheduledThreadPool(1);
     private final ScheduledExecutorService executiveNotificationScheduler =
@@ -94,7 +96,8 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
                              ExecutiveRuntime executiveRuntime,
                              DailyReflectionService reflectionService,
                              InterestRadarService interestRadarService,
-                             LocationService locationService) {
+                             LocationService locationService,
+                             FoodOrderWorkflow foodOrderWorkflow) {
         this.messageProcessor = messageProcessor;
         this.replySender = replySender;
         this.chatService = chatService;
@@ -111,6 +114,7 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         this.reflectionService = reflectionService;
         this.interestRadarService = interestRadarService;
         this.locationService = locationService;
+        this.foodOrderWorkflow = foodOrderWorkflow;
         this.locationService.onLocationUpdated(this::sendLocationUpdated);
         webBridge.attach(this);
         dailyDashboardServer.start();
@@ -456,7 +460,9 @@ public final class MessageDispatcher implements AutoCloseable, WechatWebBridge.G
         ILinkClient client = activeClient;
         if (client == null || !client.isLoggedIn() || !hasSendContext(client, userId)) return;
         try {
-            channel(client).sendText(userId, "当前位置已更新：" + address);
+            WechatReplyChannel replyChannel = channel(client);
+            replyChannel.sendText(userId, "当前位置已更新：" + address);
+            foodOrderWorkflow.resumeAfterLocationUpdate(replyChannel, userId);
         } catch (WechatContextInvalidException error) {
             releaseContextAfterFailure(userId);
             System.err.println("[位置] 会话上下文失效，暂不发送位置更新");

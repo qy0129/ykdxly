@@ -198,12 +198,12 @@ public final class RoutingGuideCatalog {
                 "“这份报告的预算是多少”→document_question；“总结报告”→document_summary。");
         add(specs, "generate_file", "document", "用户明确授权从零生成或导出可下载的 DOCX、PDF、XLSX、TXT、MD 或 CSV 文件。",
                 "只要求在聊天中写内容、修改当前文件、转换已有文件，或从零生成 PPT/PPTX。",
-                "关键是从零加文件交付；已有文件变更属于 document_edit；没有“文件”授权时默认 chat。",
+                "关键是从零加文件交付；已有文件变更属于 document_edit；没有“文件”授权时默认 chat。文档请求若明确写出文件名，必须保留文件名用于定位；只说“这个文件”“当前文件”时，默认定位最近一次上传或生成的文件。",
                 "“把学习计划生成 Excel 文件”→generate_file；“把当前 Word 转成 PDF”→document_edit。");
         add(specs, "document_edit", "document", "用户要编辑当前文件、修订文字、调整格式、转换已有文件格式或将图片插入当前文档。",
                 "没有当前文件时要求从零制作文件，或只是问文件内容。",
                 "edit 以现有文件为输入；generate_file 从零产出；图片插文档不属于 image_action。",
-                "“把这份 Word 的标题改成蓝色”→document_edit；“根据这段话生成 Word”→generate_file。");
+                "“把这份 Word 的标题改成蓝色”→document_edit；“修改报告A.docx末尾文字”→document_edit并保留报告A.docx；“在这个文件后面追加一段文字”→document_edit并使用最新文件；“根据这段话生成 Word”→generate_file。");
 
         add(specs, "draw", "media", "用户明确要求从零画、生成、设计一张图片、海报、头像、封面、插画或视觉素材。",
                 "用户已发送图片并要求分析或修改，或只是要求生成结构化业务卡片。",
@@ -242,10 +242,10 @@ public final class RoutingGuideCatalog {
                 "已指定品牌并要下单，或只是泛泛讨论饮食计划。",
                 "nearby_food 是发现和推荐；food_order 是明确下单；diet_plan 是长期饮食规划。",
                 "“我在西湖附近吃什么”→nearby_food；“点一份附近麦当劳外卖”→food_order。");
-        add(specs, "food_order", "travel_food", "用户明确要点外卖、下单，通常给出品牌、餐厅、菜品或配送地点。",
+        add(specs, "food_order", "travel_food", "用户明确要点外卖、下单，或希望基于当前位置推荐可点外卖的门店；可以给出品牌、餐厅、菜品或配送地点，也可以暂时不提供具体餐厅。",
                 "只要推荐附近餐厅、问菜品热量、制定饮食计划或查询路线。",
-                "下单意图必须明确；“附近有没有麦当劳”仍是 nearby_food，不得自动创建订单。",
-                "“帮我点一份麦当劳外卖”→food_order；“附近有麦当劳吗”→nearby_food。");
+                "下单或点外卖意图必须明确；“附近有没有麦当劳”仍是 nearby_food，不得自动创建订单；没有餐厅时由外卖工作流推荐附近门店。",
+                "“帮我点一份麦当劳外卖”→food_order；“帮我点外卖”→food_order并根据位置推荐；“附近有麦当劳吗”→nearby_food。");
 
         add(specs, "bilibili_search", "web", "用户明确要在哔哩哔哩寻找视频、课程、音乐、剧集或相关内容入口。",
                 "需要百科式影视音乐资料、普通网页检索或最新新闻。",

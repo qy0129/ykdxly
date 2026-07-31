@@ -3,24 +3,32 @@ package com.example.ilink.capabilities.location;
 import com.example.ilink.application.conversation.UserSessionStore;
 import com.example.ilink.bootstrap.Config;
 import com.example.ilink.capabilities.travel.AmapService;
+import com.example.ilink.platform.persistence.MySqlStore;
+import com.google.gson.Gson;
 
 import java.net.URI;
 import java.time.Clock;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BiConsumer;
 
 /** 管理一次性定位授权、逆地理编码和地图分享链接。 */
 public final class LocationService {
+
+    private static final String PRECISE_LOCATION_KEY = "precise_location";
 
     private final AmapService amapService;
     private final UserSessionStore sessions;
     private final LocationLinkParser linkParser;
     private final Clock clock;
     private final Map<String, PendingLocation> pending = new ConcurrentHashMap<>();
+    private final Map<String, AmapService.Place> currentPlaces = new ConcurrentHashMap<>();
+    private final MySqlStore database = MySqlStore.getInstance();
+    private final Gson gson = new Gson();
     private volatile String baseUrl = "";
-    private volatile BiConsumer<String, String> updateListener = (userId, address) -> { };
+    private final CopyOnWriteArrayList<BiConsumer<String, String>> updateListeners = new CopyOnWriteArrayList<>();
 
     public LocationService(AmapService amapService, UserSessionStore sessions, LocationLinkParser linkParser) {
         this(amapService, sessions, linkParser, Clock.systemUTC());
@@ -109,17 +117,46 @@ public final class LocationService {
     }
 
     public void onLocationUpdated(BiConsumer<String, String> listener) {
-        updateListener = listener == null ? (userId, address) -> { } : listener;
+        if (listener != null) updateListeners.add(listener);
+    }
+
+    /** 返回本进程内由 GPS 或地图链接确认过的精确坐标。 */
+    public AmapService.Place currentPlace(String userId) {
+        if (userId == null || userId.isBlank()) return null;
+        AmapService.Place cached = currentPlaces.get(userId);
+        if (cached != null) return cached;
+        String value = database.loadUserState(userId, PRECISE_LOCATION_KEY);
+        if (value.isBlank()) return null;
+        try {
+            StoredPlace stored = gson.fromJson(value, StoredPlace.class);
+            if (stored == null || stored.name() == null || stored.longitude() == null || stored.latitude() == null
+                    || stored.name().isBlank() || stored.longitude().isBlank() || stored.latitude().isBlank()) {
+                database.deleteUserState(userId, PRECISE_LOCATION_KEY);
+                return null;
+            }
+            AmapService.Place restored = new AmapService.Place(
+                    stored.name(), stored.longitude(), stored.latitude());
+            currentPlaces.put(userId, restored);
+            return restored;
+        } catch (RuntimeException error) {
+            database.deleteUserState(userId, PRECISE_LOCATION_KEY);
+            return null;
+        }
     }
 
     private LocationUpdate save(String userId, AmapService.Place place, boolean notify) {
         sessions.setCurrentLocation(userId, place.name());
+        currentPlaces.put(userId, place);
+        database.saveUserState(userId, PRECISE_LOCATION_KEY,
+                gson.toJson(new StoredPlace(place.name(), place.longitude(), place.latitude())));
         LocationUpdate update = new LocationUpdate(userId, place.name(),
                 Double.parseDouble(place.longitude()), Double.parseDouble(place.latitude()));
         if (notify) {
-            try {
-                updateListener.accept(userId, place.name());
-            } catch (RuntimeException ignored) {
+            for (BiConsumer<String, String> listener : updateListeners) {
+                try {
+                    listener.accept(userId, place.name());
+                } catch (RuntimeException ignored) {
+                }
             }
         }
         return update;
@@ -138,6 +175,8 @@ public final class LocationService {
     }
 
     private record PendingLocation(String userId, long expiresAtMillis) { }
+
+    private record StoredPlace(String name, String longitude, String latitude) { }
 
     public record LocationUpdate(String userId, String address, double longitude, double latitude) { }
 

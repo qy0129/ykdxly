@@ -22,7 +22,8 @@ public final class IntentPolicy {
             "(?:(?:修改|编辑|改写|重写|删除|移除|添加|插入|补充|替换|纠正|修正|调整)"
                     + "[^，。！？]{0,40}(?:文档|文件|正文|内容|标题|段落|第.+段|格式|字体|错别字|页|表格|单元格|sheet|幻灯片|这份|里面)"
                     + "|(?:文档|文件|正文|内容|标题|段落|第.+段|格式|字体|错别字|页|表格|单元格|sheet|幻灯片|这份|里面)"
-                    + "[^，。！？]{0,40}(?:修改|编辑|改写|重写|删除|移除|添加|插入|补充|替换|纠正|修正|调整))",
+                    + "[^，。！？]{0,40}(?:修改|编辑|改写|重写|删除|移除|添加|插入|补充|替换|纠正|修正|调整)"
+                    + "|.*(?:这个|当前|刚才的)(?:文件|文档).*(?:增加|添加|追加|补充|插入).*)",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern DOCUMENT_IMAGE_INSERT = Pattern.compile(
             "(?:(?:插入|添加到|放到|放入|放在|加入)[^，。！？]{0,36}(?:文档|文件|报告|合同|word|pdf|第.+页|第.+段)"
@@ -128,9 +129,57 @@ public final class IntentPolicy {
                 && !value.matches(".*(想吃|想喝|附近|餐厅|美食|天气|导航|路线|打车|外卖|下单).*" );
     }
 
+    /** 明确新闻查询应在模型超时或格式错误时仍保留为新闻能力。 */
+    public static boolean isExplicitNewsSearch(String text) {
+        return text != null && text.matches(".*(查.{0,20}新闻|查询.{0,20}新闻|搜.{0,20}新闻|最新新闻|新闻资讯|热点新闻|今天.*新闻|最近.*新闻).*");
+    }
+
+    /** 明确联网检索应优先于普通聊天。 */
+    public static boolean isExplicitWebSearch(String text) {
+        return text != null && text.matches(".*(帮我搜索|帮我搜一下|联网查|网上查|查一下资料|找一下网页|搜索.*(?:资料|信息|官网|文档|网页)).*");
+    }
+
+    /** 天气属于只读查询，缺少城市时应追问或使用当前位置。 */
+    public static boolean isExplicitWeatherQuery(String text) {
+        return text != null && text.matches(".*(天气预报|天气怎么样|天气如何|查天气|查询天气|今天.*天气|明天.*天气|温度多少|气温多少|会不会下雨).*");
+    }
+
+    /** 打车属于明确执行请求；目的地缺失由打车工作流补充。 */
+    public static boolean isExplicitTaxiRequest(String text) {
+        return text != null && text.matches(".*(帮我打车|帮我叫车|叫个车|打车去|叫车去|叫网约车).*");
+    }
+
+    /** 返回确定性业务路由；空字符串表示应继续走模型或最终聊天兜底。 */
+    public static String explicitBusinessIntent(String text) {
+        if (isExplicitFoodOrderRequest(text)) return "food_order";
+        if (isExplicitNewsSearch(text)) return "news_search";
+        if (isExplicitWeatherQuery(text)) return "weather";
+        if (isExplicitTaxiRequest(text)) return "taxi_trip";
+        if (isExplicitWebSearch(text)) return "web_search";
+        if (isNearbyDiningRequest(text)) return "nearby_food";
+        return "";
+    }
+
+    /** 用于等待状态：明确的新业务命令不应被上一轮的补充输入吞掉。 */
+    public static boolean isExplicitFreshRequest(String text) {
+        return !explicitBusinessIntent(text).isBlank()
+                || isExplicitTodoCreation(text)
+                || isExplicitImageCreation(text)
+                || isExplicitImageEdit(text)
+                || hasExplicitFileRequest(text);
+    }
+
     /** 用户是否明确要求点餐、下单或获取外卖入口。 */
     public static boolean isExplicitFoodOrderRequest(String text) {
-        return text != null && text.matches(".*(点外卖|外卖下单|下单|点餐|美团|饿了么|外卖链接).*" );
+        if (text == null || text.isBlank()) return false;
+        String value = text.trim();
+        boolean directOrder = value.matches("^(?:请|帮我|给我|替我|我要|我想|我需要|现在|立刻|马上)?"
+                + "(?:点外卖|外卖下单|点餐|打开美团|打开饿了么|美团外卖|饿了么外卖|外卖链接).*")
+                || value.matches(".*(?:帮我|给我|替我|我要|我想).{0,8}"
+                + "(?:点外卖|外卖下单|点餐|美团|饿了么|外卖链接).*");
+        return directOrder
+                || text.matches(".*(?:帮我|给我|替我).{0,4}(?:点|订|下单).{0,18}"
+                + "(?:饭|餐|汉堡|奶茶|咖啡|面|披萨|炸鸡|麦当劳|肯德基|外婆家|老乡鸡).*");
     }
 
     /** 用户是否明确授权生成或导出文档文件。 */

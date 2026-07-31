@@ -8,6 +8,7 @@ import com.example.ilink.application.messaging.AgentContext;
 import com.example.ilink.capabilities.food.FoodOrderService;
 import com.example.ilink.capabilities.travel.AmapService;
 import com.example.ilink.application.routing.IntentResult;
+import com.example.ilink.capabilities.location.LocationService;
 import com.example.ilink.platform.persistence.MySqlStore;
 import com.google.gson.Gson;
 import com.google.gson.JsonSyntaxException;
@@ -28,17 +29,26 @@ public final class FoodOrderWorkflow {
     private final AmapService amapService;
     private final FoodOrderService foodOrderService;
     private final ReplySender replySender;
+    private final LocationService locationService;
     private final Map<String, PendingOrder> pendingOrders = new ConcurrentHashMap<>();
+    private final Map<String, ReplyChannel> pendingChannels = new ConcurrentHashMap<>();
     private final Set<String> loadedUsers = ConcurrentHashMap.newKeySet();
     private final MySqlStore database = MySqlStore.getInstance();
     private final Gson gson = new Gson();
 
     public FoodOrderWorkflow(UserSessionStore sessions, AmapService amapService,
                              FoodOrderService foodOrderService, ReplySender replySender) {
+        this(sessions, amapService, foodOrderService, replySender, null);
+    }
+
+    public FoodOrderWorkflow(UserSessionStore sessions, AmapService amapService,
+                             FoodOrderService foodOrderService, ReplySender replySender,
+                             LocationService locationService) {
         this.sessions = sessions;
         this.amapService = amapService;
         this.foodOrderService = foodOrderService;
         this.replySender = replySender;
+        this.locationService = locationService;
     }
 
     public boolean hasPending(String userId) {
@@ -48,6 +58,7 @@ public final class FoodOrderWorkflow {
 
     public boolean acceptsPendingReply(String text) {
         String value = text == null ? "" : text.trim();
+        if (com.example.ilink.application.routing.IntentPolicy.isExplicitFreshRequest(value)) return false;
         if ("取消".equals(value) || value.matches("\\d+")) return true;
         return !value.matches(".*(天气|快递|物流|待办|新闻|路线|导航|日历|提醒|查一下|搜索).*" );
     }
@@ -56,26 +67,46 @@ public final class FoodOrderWorkflow {
         clearPendingOrder(userId);
     }
 
+    /** 由应用启动时注册，定位更新后自动恢复 Web 或微信原会话。 */
+    public void enableLocationContinuation() {
+        if (locationService != null) locationService.onLocationUpdated(this::onLocationUpdated);
+    }
+
     public void handle(AgentContext context, IntentResult route) throws Exception {
         handle(context.replyChannel(), context.principalId(), route);
     }
 
     public void handle(ReplyChannel client, String userId, IntentResult route) throws Exception {
+        pendingChannels.put(userId, client);
         String query = firstRestaurant(route.foodOrderRestaurants());
-        if (query.isBlank()) {
-            replySender.sendReply(client, userId, "请告诉我你想点哪个餐厅，例如“帮我点外婆家”。");
-            return;
-        }
-
         String routeLocation = route.nearbyLocation() == null ? "" : route.nearbyLocation().trim();
         if (!routeLocation.isBlank()) sessions.setCurrentLocation(userId, routeLocation);
         String location = sessions.getCurrentLocation(userId);
         if (location == null || location.isBlank()) {
             savePendingOrder(userId, PendingOrder.waitingLocation(query));
-            replySender.sendReply(client, userId, "请告诉我你现在的位置或收货地址，我才能确定具体分店。");
+            requestLocation(client, userId, query);
             return;
         }
-        findLocation(client, userId, query, location);
+        findLocationOrUseCurrentCoordinates(client, userId, query, location);
+    }
+
+    /** 定位授权完成后由消息分发器调用，自动恢复本次点餐或附近推荐。 */
+    public void resumeAfterLocationUpdate(ReplyChannel client, String userId) throws Exception {
+        PendingOrder pending = pendingOrder(userId);
+        if (pending == null || pending.stage() != Stage.LOCATION_TEXT) return;
+        String location = sessions.getCurrentLocation(userId);
+        if (location == null || location.isBlank()) return;
+        findLocationOrUseCurrentCoordinates(client, userId, pending.query(), location);
+    }
+
+    private void onLocationUpdated(String userId, String address) {
+        ReplyChannel client = pendingChannels.get(userId);
+        if (client == null) return;
+        try {
+            resumeAfterLocationUpdate(client, userId);
+        } catch (Exception error) {
+            System.err.println("[外卖] 定位完成后恢复推荐失败 user=" + userId + ": " + error.getMessage());
+        }
     }
 
     public void handlePending(AgentContext context, String text) throws Exception {
@@ -83,6 +114,7 @@ public final class FoodOrderWorkflow {
     }
 
     public void handlePending(ReplyChannel client, String userId, String text) throws Exception {
+        pendingChannels.put(userId, client);
         PendingOrder pending = pendingOrder(userId);
         if (pending == null) return;
         String answer = text.trim();
@@ -128,6 +160,17 @@ public final class FoodOrderWorkflow {
         findStores(client, userId, query, locations.getFirst());
     }
 
+    /** GPS 已确认当前位置时直接使用其坐标，避免把同一园区再次拆成多个 POI 候选。 */
+    private void findLocationOrUseCurrentCoordinates(ReplyChannel client, String userId,
+                                                     String query, String location) throws Exception {
+        AmapService.Place precisePlace = locationService == null ? null : locationService.currentPlace(userId);
+        if (precisePlace != null && precisePlace.name().equals(location)) {
+            findStores(client, userId, query, precisePlace);
+            return;
+        }
+        findLocation(client, userId, query, location);
+    }
+
     private void selectLocation(ReplyChannel client, String userId,
                                 PendingOrder pending, String answer) throws Exception {
         int choice = choice(answer, pending.locations().size());
@@ -142,12 +185,13 @@ public final class FoodOrderWorkflow {
 
     private void findStores(ReplyChannel client, String userId, String query,
                             AmapService.Place center) throws Exception {
-        List<AmapService.Restaurant> stores = amapService.nearbyRestaurants(center, query);
+        String keyword = query == null || query.isBlank() ? "美食" : query;
+        List<AmapService.Restaurant> stores = amapService.nearbyRestaurants(center, keyword);
         if (stores.isEmpty()) {
             clearPendingOrder(userId);
             replySender.sendReply(client, userId,
-                    "附近没有找到“" + query + "”的具体分店，先给你平台搜索入口：\n\n"
-                            + foodOrderService.generateLinks(query));
+                    "附近没有找到可推荐的外卖餐厅，先告诉我想吃的类型或具体餐厅。\n\n"
+                            + (query == null || query.isBlank() ? "" : foodOrderService.generateLinks(query)));
             return;
         }
         if (stores.size() == 1) {
@@ -184,7 +228,8 @@ public final class FoodOrderWorkflow {
     }
 
     private String storeChoices(String query, List<AmapService.Restaurant> stores) {
-        StringBuilder reply = new StringBuilder("找到以下“").append(query)
+        String label = query == null || query.isBlank() ? "附近可点外卖的餐厅" : query;
+        StringBuilder reply = new StringBuilder("找到以下“").append(label)
                 .append("”相关分店，请回复序号：\n");
         for (int index = 0; index < stores.size(); index++) {
             AmapService.Restaurant store = stores.get(index);
@@ -215,6 +260,24 @@ public final class FoodOrderWorkflow {
                 .replaceAll("^[：:，, ]+", "").trim();
     }
 
+    private void requestLocation(ReplyChannel client, String userId, String query) throws Exception {
+        if (locationService != null) {
+            String url = locationService.createAuthorizationUrl(userId);
+            if (!url.isBlank()) {
+                replySender.sendReply(client, userId,
+                        (query == null || query.isBlank()
+                                ? "我可以按你当前位置推荐附近可点外卖的店。"
+                                : "我可以按你当前位置查找“" + query + "”附近的门店。")
+                                + "\n请打开下面的定位链接并允许定位，定位成功后我会自动继续：\n" + url);
+                return;
+            }
+        }
+        replySender.sendReply(client, userId,
+                (query == null || query.isBlank()
+                        ? "请告诉我你的当前位置或收货地址，我才能推荐附近的外卖店。"
+                        : "请告诉我你现在的位置或收货地址，我才能确定具体分店。"));
+    }
+
     private enum Stage { LOCATION_TEXT, LOCATION_SELECTION, STORE_SELECTION }
 
     private void savePendingOrder(String userId, PendingOrder order) {
@@ -232,6 +295,7 @@ public final class FoodOrderWorkflow {
     private void clearPendingOrder(String userId) {
         loadedUsers.add(userId);
         pendingOrders.remove(userId);
+        pendingChannels.remove(userId);
         database.deleteUserState(userId, PENDING_KEY);
     }
 
