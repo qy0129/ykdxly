@@ -78,6 +78,12 @@ public interface UserSessionStore {
 
     List<String> getLastCreatedTodoIds(String userId);
 
+    void setPendingTodoCandidates(String userId, List<String> titles);
+
+    List<String> getPendingTodoCandidates(String userId);
+
+    void clearPendingTodoCandidates(String userId);
+
     void setPendingWeatherLocations(String userId, List<WeatherLocation> locations, String weatherDay);
 
     List<WeatherLocation> getPendingWeatherLocations(String userId);
@@ -135,6 +141,12 @@ public interface UserSessionStore {
     record RecentTodoBatch(List<String> todoIds, long expiresAtMillis) {
         public RecentTodoBatch {
             todoIds = todoIds == null ? List.of() : List.copyOf(todoIds);
+        }
+    }
+
+    record PendingTodoCandidates(List<String> titles, long expiresAtMillis) {
+        public PendingTodoCandidates {
+            titles = titles == null ? List.of() : List.copyOf(titles);
         }
     }
 

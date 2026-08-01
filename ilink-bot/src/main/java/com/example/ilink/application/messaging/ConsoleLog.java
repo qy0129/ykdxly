@@ -146,7 +146,6 @@ public final class ConsoleLog {
                 .replace("running", "执行中")
                 .replace("unknown", "未知")
                 .replace("error", "错误")
-                .replace("Google News", "Google 新闻")
                 .replace("kind=", "类型=")
                 .replace("label=", "名称=")
                 .replace("source=", "来源=")

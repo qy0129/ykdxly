@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
+import java.io.IOException;
 import java.net.http.HttpClient;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -115,6 +116,25 @@ class IntentRecognizerJsonTest {
         assertEquals(1, plan.actions().size());
         assertEquals("todo", plan.actions().getFirst().route().intent());
         assertEquals(request, plan.actions().getFirst().requestText());
+    }
+
+    @Test
+    void retriesOnceAfterConnectionReset() {
+        AtomicInteger calls = new AtomicInteger();
+        IntentRecognizer recognizer = new IntentRecognizer(body -> {
+            if (calls.getAndIncrement() == 0) throw new IOException("Connection reset");
+            return """
+                    {"message_mode":"command",
+                     "requirements":[{"id":"r1","text":"查询杭州天气","depends_on":[]}],
+                     "actions":[{"requirement_id":"r1","action_text":"查询杭州天气","intent":"weather"}]}
+                    """;
+        });
+
+        IntentPlan plan = recognizer.recognize("user", "查询杭州天气",
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals(2, calls.get());
+        assertEquals("weather", plan.actions().getFirst().route().intent());
     }
 
     @Test

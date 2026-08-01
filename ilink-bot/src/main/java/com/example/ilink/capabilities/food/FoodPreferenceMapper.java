@@ -79,6 +79,9 @@ public final class FoodPreferenceMapper {
         if (matches(text, "早餐|早饭")) {
             add(keywords, "粥", "包子", "馄饨", "面馆");
         }
+        if (matches(text, "午餐|午饭|中饭")) {
+            add(keywords, "家常菜", "面馆", "快餐");
+        }
         if (matches(text, "夜宵|宵夜")) {
             add(keywords, "烧烤", "小龙虾", "炸鸡", "粥");
         }

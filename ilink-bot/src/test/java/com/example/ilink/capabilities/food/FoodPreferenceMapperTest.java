@@ -45,6 +45,16 @@ class FoodPreferenceMapperTest {
     }
 
     @Test
+    void mapsLunchRequestWithoutCallingModel() {
+        StubHttpClient client = new StubHttpClient("");
+        FoodPreferenceMapper mapper = mapper(client);
+
+        assertEquals(java.util.List.of("家常菜", "面馆", "快餐"),
+                mapper.mapKeywords("适合午餐"));
+        assertEquals(0, client.requestCount);
+    }
+
+    @Test
     void usesModelForUnmappedAbstractPreference() {
         String response = "{\"choices\":[{\"message\":{\"content\":"
                 + "\"[\\\"粤菜\\\",\\\"炖汤\\\",\\\"砂锅\\\"]\"}}]}";

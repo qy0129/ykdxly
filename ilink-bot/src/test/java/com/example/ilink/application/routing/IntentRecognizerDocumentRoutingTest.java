@@ -98,9 +98,9 @@ class IntentRecognizerDocumentRoutingTest {
         String prompt = new RoutePromptBuilder(CapabilityRegistry.defaults()).buildUnifiedPrompt(context);
 
         assertTrue(prompt.contains("p".repeat(100) + "..."));
-        assertTrue(prompt.contains("m".repeat(800) + "..."));
-        assertTrue(prompt.contains("s".repeat(800) + "..."));
-        assertTrue(prompt.contains("k".repeat(1500) + "..."));
+        assertTrue(prompt.contains("m".repeat(400) + "..."));
+        assertTrue(prompt.contains("s".repeat(400) + "..."));
+        assertTrue(prompt.contains("k".repeat(700) + "..."));
     }
 
     @Test

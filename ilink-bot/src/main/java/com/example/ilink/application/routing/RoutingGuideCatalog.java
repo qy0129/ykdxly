@@ -223,8 +223,8 @@ public final class RoutingGuideCatalog {
                 "“把刚才第二段语音转文字”→audio_transcribe；“以后语音回复我”→本地回复偏好。");
         add(specs, "visual_card", "media", "用户要把已有业务结果展示为计划表、证书、搜索结果、互动卡片或结构化视觉卡片。",
                 "从零创作艺术图片、编辑用户图片、生成可下载文档。",
-                "卡片服务于结构化信息展示；它不替代 draw，也不应该承载普通文本回答。",
-                "“把本周计划做成卡片”→visual_card；“画一张健身海报”→draw。");
+                "卡片服务于结构化信息展示；它不替代 draw，也不应该承载普通文本回答。根据前一步新闻或调研结果继续整理时，应保留 visual_card 或 chat，不能改成新的 news_search。",
+                "“把本周计划做成卡片”→visual_card；“根据刚才的新闻结果整理技术资讯”→visual_card；“画一张健身海报”→draw。");
 
         add(specs, "weather", "travel_food", "用户询问指定地点在今天、明天或某时段的天气、温度、降雨、风力等气象信息。",
                 "查询新闻、路线、空气质量以外的泛搜索，或根据天气创建提醒。",
@@ -265,8 +265,8 @@ public final class RoutingGuideCatalog {
                 "“查 1234567890 这个快递到哪了”→express_query；“我的外卖到哪了”→food_order。");
         add(specs, "news_search", "web", "用户要最新新闻、实时资讯、热搜、今日事件或某主题的新闻动态。",
                 "需要通用网页资料、深度持续调研、历史知识解释或天气查询。",
-                "news_search 关注时效和新闻源；web_search 是一般实时资料；automation_research 是多步产出。",
-                "“今天 AI 有什么新闻”→news_search；“查一下 Java 虚拟机资料”→web_search。");
+                "news_search 只负责获取新闻。‘根据/基于新闻结果生成、整理、分析’属于下游动作，不得再次选择 news_search；web_search 是一般实时资料；automation_research 是多步产出。",
+                "“今天 AI 有什么新闻”→news_search；“根据今天的新闻结果生成技术资讯摘要”→chat 或 visual_card；“查一下 Java 虚拟机资料”→web_search。");
         add(specs, "web_search", "web", "用户要求联网查网页、公开资料、实时信息、官方链接或一般性网络搜索。",
                 "明确是新闻、快递、邮箱、视频平台、岗位、长期调研或专业媒体资料。",
                 "web_search 是通用检索兜底，但不能吞掉数据源明确的专用能力。",

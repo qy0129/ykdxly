@@ -155,8 +155,14 @@ public class AmapService {
 
     /** 在指定坐标附近按餐品关键词搜索，例如“面馆”或“杭帮菜”。 */
     public List<Restaurant> nearbyRestaurants(Place center, String keyword) throws Exception {
+        return nearbyRestaurants(center, keyword, 5);
+    }
+
+    /** 在指定坐标附近按餐品关键词搜索，并按调用方要求控制返回数量。 */
+    public List<Restaurant> nearbyRestaurants(Place center, String keyword, int limit) throws Exception {
+        int resultLimit = Math.max(1, Math.min(20, limit));
         String query = "location=" + center.location() + "&keywords=" + encode(keyword)
-                + "&types=050000&radius=2000&offset=5&page=1&extensions=base";
+                + "&types=050000&radius=2000&offset=" + resultLimit + "&page=1&extensions=base";
         JsonObject json = getJson("https://restapi.amap.com/v3/place/around", query);
         JsonArray pois = json.getAsJsonArray("pois");
         if (pois == null) return List.of();

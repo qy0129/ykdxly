@@ -52,7 +52,8 @@ public final class IntentPolicy {
                     + "(?:以下|下面|这些|一下|一个|一条|几条)?\\s*(?:待办事项|待办|任务清单)"
                     + "(?:[：:，,。\\s]|$)"
                     + "|^.+(?:加入|添加到|记到|放进|放入)\\s*(?:我的)?(?:待办事项|待办|任务清单)"
-                    + "[。！!\\s]*$",
+                    + "[。！!\\s]*$"
+                    + "|^.+(?:创建|新建|新增)(?:这些|上述|以上|上面(?:的)?)(?:待办事项|待办|任务)[。！!\\s]*$",
             Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
     private static final Pattern TODO_OBJECT = Pattern.compile("(?:待办事项|待办|任务清单)");
 
@@ -95,6 +96,9 @@ public final class IntentPolicy {
 
     public static String inferTodoAction(String text) {
         if (isExplicitTodoQuery(text)) return "list";
+        if (isDocumentTodoExtractionRequest(text)) {
+            return requestsTodoCreation(text) ? "create" : "extract";
+        }
         if (isTodoCompletionReport(text)) return "complete";
         if (text != null && text.trim().matches("^(完成|办完|搞定).*?(待办事项|待办|任务).*")) return "complete";
         if (text != null && text.trim().matches("^(取消|删除|移除|作废|撤销).*?(待办事项|待办|任务).*")) return "delete";
@@ -103,6 +107,26 @@ public final class IntentPolicy {
             return "reschedule";
         }
         return isExplicitTodoCreation(text) ? "create" : "unknown";
+    }
+
+    /** 从当前文件提取待办属于待办能力，是否立即创建由同一句中的创建动词决定。 */
+    public static boolean isDocumentTodoExtractionRequest(String text) {
+        return text != null
+                && text.matches("(?s).*(?:提取|整理|识别|找出).*(?:文件|文档|上个文件|当前文件|刚才的文件).*(?:待办事项|待办|任务清单).*"
+                + "|(?s).*(?:文件|文档|上个文件|当前文件|刚才的文件).*(?:提取|整理|识别|找出).*(?:待办事项|待办|任务清单).*");
+    }
+
+    public static boolean requestsTodoCreation(String text) {
+        return text != null && text.matches("(?s).*(?:(?:并|然后|再|并且)(?:创建|新建|新增)(?:这些|上述|提取的)?(?:待办事项|待办|任务)?"
+                + "|(?:创建|新建|新增|添加|加入|记到|放进|放入).*(?:待办事项|待办|任务清单)).*");
+    }
+
+    /** “这些/上面/刚才提取的”明确引用最近候选列表。 */
+    public static boolean isPendingTodoCreationReply(String text) {
+        if (text == null) return false;
+        String value = text.trim().replaceAll("[。！!]+$", "");
+        return value.matches("^(?:请)?(?:帮我)?(?:创建|新建|添加|加入)(?:这些|上述|上面(?:的)?|刚才(?:提取)?(?:的)?)?(?:待办事项|待办|任务)?$"
+                + "|^(?:把|将)(?:这些|上述|上面(?:的)?|刚才(?:提取)?(?:的)?)(?:内容|事项|任务)?(?:创建|加入|添加到|记到|放进)(?:我的)?(?:待办事项|待办|任务清单)$");
     }
 
     /** 用户在汇报某个具体事项已经完成，而不是询问如何完成。 */
@@ -167,7 +191,14 @@ public final class IntentPolicy {
 
     /** 明确新闻查询应在模型超时或格式错误时仍保留为新闻能力。 */
     public static boolean isExplicitNewsSearch(String text) {
-        return text != null && text.matches(".*(查.{0,20}新闻|查询.{0,20}新闻|搜.{0,20}新闻|最新新闻|新闻资讯|热点新闻|今天.*新闻|最近.*新闻).*");
+        if (text == null || isNewsResultTransformation(text)) return false;
+        return text.matches(".*(查.{0,20}新闻|查询.{0,20}新闻|搜.{0,20}新闻|最新新闻|新闻资讯|热点新闻|今天.*新闻|最近.*新闻).*");
+    }
+
+    /** 使用已有新闻或调研结果生成、整理、分析内容，不是再次发起新闻查询。 */
+    public static boolean isNewsResultTransformation(String text) {
+        return text != null && text.matches(".*(?:根据|基于|结合).*(?:新闻|资讯|调研结果).*"
+                + "(?:生成|制作|整理|总结|分析|判断|说明|做成|转成).*");
     }
 
     /** 明确联网检索应优先于普通聊天。 */
@@ -180,6 +211,17 @@ public final class IntentPolicy {
         return text != null && text.matches(".*(天气预报|天气怎么样|天气如何|查天气|查询天气|今天.*天气|明天.*天气|温度多少|气温多少|会不会下雨).*");
     }
 
+    /** 条件词描述的是后续分支，不属于天气查询地点。 */
+    public static String cleanWeatherLocation(String location) {
+        if (location == null) return "";
+        return location.trim()
+                .replaceFirst("^(?:如果|若是?|假如|倘若|要是)\\s*", "")
+                .replaceFirst("^(?:天气|明天|今天|后天)\\s*", "")
+                .replaceFirst("(?:会)?(?:下雨|降雨|有雨).*$", "")
+                .replaceAll("^[，,；;。\\s]+|[，,；;。\\s]+$", "")
+                .trim();
+    }
+
     /** 打车属于明确执行请求；目的地缺失由打车工作流补充。 */
     public static boolean isExplicitTaxiRequest(String text) {
         return text != null && text.matches(".*(帮我打车|帮我叫车|叫个车|打车去|叫车去|叫网约车|叫滴滴|滴滴打车|网约车去).*");
@@ -188,6 +230,7 @@ public final class IntentPolicy {
     /** 返回确定性业务路由；空字符串表示应继续走模型或最终聊天兜底。 */
     public static String explicitBusinessIntent(String text) {
         if (isExplicitTodoQuery(text)) return "todo";
+        if (isDocumentTodoExtractionRequest(text) || isPendingTodoCreationReply(text)) return "todo";
         if (isExplicitFoodOrderRequest(text)) return "food_order";
         if (isExplicitNewsSearch(text)) return "news_search";
         if (isExplicitWeatherQuery(text)) return "weather";

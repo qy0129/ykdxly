@@ -34,6 +34,7 @@ public final class DefaultUserSessionStore implements UserSessionStore {
     private static final String EXPRESS = "pending_express";
     private static final String TODO_CONFLICT = "pending_todo_conflict";
     private static final String RECENT_TODO_BATCH = "recent_todo_batch";
+    private static final String TODO_CANDIDATES = "pending_todo_candidates";
     private static final String WEATHER = "pending_weather";
 
     private final MySqlStore database;
@@ -50,6 +51,7 @@ public final class DefaultUserSessionStore implements UserSessionStore {
     private final Map<String, PendingExpressState> pendingExpress = new ConcurrentHashMap<>();
     private final Map<String, TodoConflictState> pendingTodoConflicts = new ConcurrentHashMap<>();
     private final Map<String, RecentTodoBatch> recentTodoBatches = new ConcurrentHashMap<>();
+    private final Map<String, PendingTodoCandidates> pendingTodoCandidates = new ConcurrentHashMap<>();
     private final Map<String, PendingWeatherState> pendingWeather = new ConcurrentHashMap<>();
 
     public DefaultUserSessionStore() {
@@ -294,6 +296,34 @@ public final class DefaultUserSessionStore implements UserSessionStore {
             return List.of();
         }
         return value.todoIds();
+    }
+
+    @Override
+    public void setPendingTodoCandidates(String userId, List<String> titles) {
+        if (titles == null || titles.isEmpty()) {
+            clearPendingTodoCandidates(userId);
+            return;
+        }
+        PendingTodoCandidates value = new PendingTodoCandidates(titles, expiresAt());
+        pendingTodoCandidates.put(stateKey(userId, TODO_CANDIDATES), value);
+        saveState(userId, TODO_CANDIDATES, value);
+    }
+
+    @Override
+    public List<String> getPendingTodoCandidates(String userId) {
+        PendingTodoCandidates value = loadState(userId, TODO_CANDIDATES,
+                PendingTodoCandidates.class, pendingTodoCandidates);
+        if (value == null) return List.of();
+        if (value.expiresAtMillis() <= System.currentTimeMillis()) {
+            clearPendingTodoCandidates(userId);
+            return List.of();
+        }
+        return value.titles();
+    }
+
+    @Override
+    public void clearPendingTodoCandidates(String userId) {
+        removeState(userId, TODO_CANDIDATES, pendingTodoCandidates);
     }
 
     @Override

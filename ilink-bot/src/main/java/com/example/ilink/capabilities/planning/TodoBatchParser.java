@@ -7,19 +7,23 @@ import java.util.regex.Pattern;
 
 /** 处理高频、低风险的复合待办快路径，避免把整句话存成一个标题。 */
 public final class TodoBatchParser {
-    private static final Pattern SEPARATOR = Pattern.compile("\\s*[，,；;。]\\s*");
+    private static final Pattern SEPARATOR = Pattern.compile("\\s*[，,；;。]\\s*|\\s*然后\\s*");
     private static final Pattern TIME_MARKER = Pattern.compile(
             "(今天|明天|后天|本周|下周|周[一二三四五六日天]|星期[一二三四五六日天]|\\d{1,2}月\\d{1,2}日|[上下]午|\\d{1,2}点|\\d{1,2}[:：]\\d{2})");
     private static final Pattern DATE_MARKER = Pattern.compile(
             "(今天|今日|明天|明日|后天|本周|这周|下周|下下周|周[一二三四五六日天]|星期[一二三四五六日天]|\\d{1,2}月\\d{1,2}(?:日|号)?)");
     private static final Pattern LINE_SEPARATOR = Pattern.compile("\\R+");
+    private static final Pattern LIST_ITEM = Pattern.compile(
+            "^\\s*(?:\\d{1,3}[.．、]|[-*•])\\s*(.+?)\\s*$");
 
     public List<TodoDraft> parse(String text) {
         if (text == null || text.isBlank()) return List.of();
         String normalized = text.trim();
-        List<String> pieces = new ArrayList<>();
-        for (String line : LINE_SEPARATOR.split(normalized)) {
-            for (String piece : SEPARATOR.split(line)) pieces.add(piece);
+        List<String> pieces = listItems(normalized);
+        if (pieces.isEmpty()) {
+            for (String line : LINE_SEPARATOR.split(normalized)) {
+                for (String piece : SEPARATOR.split(line)) pieces.add(piece);
+            }
         }
         List<TodoDraft> result = new ArrayList<>();
         String inheritedDate = "";
@@ -39,6 +43,25 @@ public final class TodoBatchParser {
             result.add(new TodoDraft("todo_" + (result.size() + 1), source, title, dueAt));
         }
         return List.copyOf(result);
+    }
+
+    /** 从文档问答输出中提取编号或项目符号列表，供下一轮“创建这些待办”续接。 */
+    public List<String> extractCandidateTitles(String text) {
+        List<String> result = new ArrayList<>();
+        for (String source : listItems(text)) {
+            String title = cleanTitle(source).replaceFirst("[。；;]+$", "").trim();
+            if (!title.isBlank() && !isInstructionOnly(title)) result.add(title);
+        }
+        return List.copyOf(result);
+    }
+
+    private List<String> listItems(String text) {
+        List<String> result = new ArrayList<>();
+        for (String line : LINE_SEPARATOR.split(text)) {
+            var matcher = LIST_ITEM.matcher(line);
+            if (matcher.matches()) result.add(matcher.group(1).trim());
+        }
+        return result;
     }
 
     public boolean looksLikeCompound(String text) {
@@ -63,7 +86,8 @@ public final class TodoBatchParser {
                 .replaceAll("(上午|中午|下午|傍晚|晚上|今晚)?[零一二三四五六七八九十两\\d]{1,3}点(半)?", "")
                 .replaceAll("\\d{1,2}[：:]\\d{2}", "")
                 .replaceAll("^(提醒我|请提醒我|提醒|安排|记得|别忘了)[：:，, ]*", "")
-                .replaceAll("[，, ]+", " ")
+                .replaceFirst("[。；;\\s]*(?:创建|新建|新增)(?:这些|上述|以上|上面(?:的)?)(?:待办事项|待办|任务)[。！!\\s]*$", "")
+                .replaceAll(" +", " ")
                 .trim();
         return title;
     }

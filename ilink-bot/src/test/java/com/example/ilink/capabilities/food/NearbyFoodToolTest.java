@@ -36,4 +36,17 @@ class NearbyFoodToolTest {
                 NearbyFoodTool.displayKeyword(
                         "清淡一点", List.of("粥", "汤面", "馄饨", "蒸菜")));
     }
+
+    @Test
+    void removesLocationCandidatesUnrelatedToTheRequestedPlace() {
+        List<AmapService.Place> candidates = List.of(
+                new AmapService.Place("杭州西湖风景名胜区（西湖区龙井路）", "120.1", "30.2"),
+                new AmapService.Place("西湖天地（南山路）", "120.2", "30.3"),
+                new AmapService.Place("阿里巴巴高桥云港园区（万和路）", "120.3", "30.4"));
+
+        List<AmapService.Place> filtered = NearbyFoodTool.relevantCandidates("西湖附近", candidates);
+
+        assertEquals(2, filtered.size());
+        assertTrue(filtered.stream().allMatch(place -> place.name().contains("西湖")));
+    }
 }

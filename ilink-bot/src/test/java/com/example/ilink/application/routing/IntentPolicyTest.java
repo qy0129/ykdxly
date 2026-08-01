@@ -13,6 +13,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class IntentPolicyTest {
 
     @Test
+    void explicitLocationAndRestaurantRequestUsesUnifiedRouting() {
+        IntentRecognizer recognizer = new IntentRecognizer(body -> """
+                {"message_mode":"command",
+                 "requirements":[{"id":"r1","text":"推荐西湖附近三家午餐餐厅","depends_on":[]}],
+                 "actions":[{"requirement_id":"r1","action_text":"推荐西湖附近三家午餐餐厅",
+                 "intent":"nearby_food","nearby_location":"西湖","meal_keyword":"午餐"}]}
+                """);
+
+        IntentPlan plan = recognizer.recognize("user",
+                "我现在在西湖附近，推荐三家适合午餐的餐厅。",
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals(1, plan.actions().size());
+        assertEquals("nearby_food", plan.actions().getFirst().route().intent());
+        assertEquals("午餐", plan.actions().getFirst().route().mealKeyword());
+        assertEquals(MessageMode.COMMAND, plan.messageMode());
+    }
+
+    @Test
     void imageRequestDoesNotAuthorizeDocumentOutput() {
         assertTrue(IntentPolicy.isExplicitImageCreation("帮我生成一张猫咪图片"));
         assertTrue(IntentPolicy.isExplicitImageCreation("帮我生成一张小猫照片"));
@@ -66,6 +85,16 @@ class IntentPolicyTest {
         assertTrue(IntentPolicy.isExplicitTodoCreation("帮我把明天买菜加入待办"));
         assertFalse(IntentPolicy.isExplicitTodoCreation("如何创建待办？"));
         assertFalse(IntentPolicy.isExplicitTodoCreation("我们讨论一下待办管理功能"));
+        assertTrue(IntentPolicy.isExplicitTodoCreation("1. 修复一般性 Bug。\n2. 准备部署环境。创建这些待办"));
+    }
+
+    @Test
+    void documentTodoExtractionUsesTodoCapability() {
+        assertEquals("extract", IntentPolicy.inferTodoAction("提取上个文件的待办"));
+        assertEquals("create", IntentPolicy.inferTodoAction("提取文件中的待办并创建"));
+        assertEquals("todo", IntentPolicy.explicitBusinessIntent("提取文件中的待办并创建"));
+        assertTrue(IntentPolicy.isPendingTodoCreationReply("创建"));
+        assertTrue(IntentPolicy.isPendingTodoCreationReply("创建这些待办"));
     }
 
     @Test
@@ -241,6 +270,8 @@ class IntentPolicyTest {
         assertEquals("food_order", IntentPolicy.explicitBusinessIntent("帮我点外卖"));
         assertEquals("nearby_food", IntentPolicy.explicitBusinessIntent("我在西湖附近有什么好吃的"));
         assertEquals("news_search", IntentPolicy.explicitBusinessIntent("帮我查询今天的 AI 新闻"));
+        assertEquals("", IntentPolicy.explicitBusinessIntent(
+                "根据今天的新闻和调研结果，生成一张简洁的技术资讯卡片"));
         assertEquals("web_search", IntentPolicy.explicitBusinessIntent("帮我搜索 Java 虚拟线程资料"));
         assertEquals("weather", IntentPolicy.explicitBusinessIntent("查一下杭州今天的天气"));
         assertEquals("taxi_trip", IntentPolicy.explicitBusinessIntent("帮我打车去机场"));
@@ -260,6 +291,23 @@ class IntentPolicyTest {
                 new IntentContext(false, false, false, false, false));
 
         assertEquals("food_order", action.get("intent").getAsString());
+    }
+
+    @Test
+    void earlierNewsRequestDoesNotOverwriteDependentVisualAction() throws Exception {
+        IntentRecognizer recognizer = new IntentRecognizer(HttpClient.newHttpClient());
+        JsonObject action = new JsonObject();
+        action.addProperty("intent", "news_search");
+        String original = "搜索今天最重要的三条人工智能新闻，并根据新闻和调研结果生成技术资讯卡片";
+        String current = "根据今天的新闻和调研结果，生成一张简洁的技术资讯卡片";
+
+        Method normalize = IntentRecognizer.class.getDeclaredMethod(
+                "normalizeAction", String.class, String.class, JsonObject.class, IntentContext.class);
+        normalize.setAccessible(true);
+        normalize.invoke(recognizer, original, current, action,
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals("visual_card", action.get("intent").getAsString());
     }
 
     @Test

@@ -133,21 +133,21 @@ public final class LoginBriefingService {
         return text;
     }
 
-    static List<SearchResult> searchNews(NewsProvider publicSearch, NewsProvider googleNews) {
+    static List<SearchResult> searchNews(NewsProvider publicSearch, NewsProvider fallbackNews) {
         if (publicSearch != null) {
             try {
                 List<SearchResult> results = publicSearch.search("今日热点新闻", 3);
                 if (results != null && !results.isEmpty()) return results;
             } catch (Exception e) {
-                System.err.println("[登录简报] 公共新闻查询失败，尝试 Google News: " + e.getMessage());
+                System.err.println("[登录简报] 公共新闻查询失败，尝试备用新闻源: " + e.getMessage());
             }
         }
-        if (googleNews != null) {
+        if (fallbackNews != null) {
             try {
-                List<SearchResult> results = googleNews.search("最新热点 when:1d", 3);
+                List<SearchResult> results = fallbackNews.search("今日最新热点", 3);
                 return results == null ? List.of() : results;
             } catch (Exception e) {
-                System.err.println("[登录简报] Google News 查询失败: " + e.getMessage());
+                System.err.println("[登录简报] 备用新闻源查询失败: " + e.getMessage());
             }
         }
         return List.of();

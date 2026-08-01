@@ -5,6 +5,7 @@ import com.example.ilink.application.messaging.ReplySender;
 import com.example.ilink.application.messaging.AgentContext;
 
 import com.example.ilink.capabilities.calendar.CalendarService;
+import com.example.ilink.capabilities.location.LocationService;
 import com.example.ilink.capabilities.travel.AmapService;
 import com.example.ilink.capabilities.travel.RouteMealPlanner;
 import com.example.ilink.application.routing.IntentResult;
@@ -19,6 +20,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /** 负责多段出行路线、地图输出、顺路餐饮和出发提醒的衔接。 */
 public final class TravelWorkflow {
@@ -27,19 +31,36 @@ public final class TravelWorkflow {
     private final RouteMealPlanner routeMealPlanner;
     private final CalendarService calendarService;
     private final ReplySender replySender;
+    private final Function<String, AmapService.Place> currentPlaceFinder;
     private final Map<String, PendingTravel> pendingTravels = new ConcurrentHashMap<>();
     private final Set<String> loadedPendingUsers = ConcurrentHashMap.newKeySet();
     private final MySqlStore database = MySqlStore.getInstance();
     private final Gson gson = new Gson();
     private static final String PENDING_TRAVEL_KEY = "pending_travel";
     private static final long PENDING_TTL_MILLIS = 24L * 60 * 60 * 1000;
+    private static final Pattern CURRENT_LOCATION_CHAIN = Pattern.compile(
+            "(?:从)?(?:当前位置|当前所在(?:位置)?|这里|我这里)(?:出发)?(?:去|到)([^，,。；;：:]{1,40}?)"
+                    + "(?:[，,。；;：:]\\s*(?:再|然后)?(?:去|到))([^，,。；;：:]{1,40})");
+    private static final Pattern CURRENT_LOCATION_DESTINATION = Pattern.compile(
+            "(?:从)?(?:当前位置|当前所在(?:位置)?|这里|我这里)(?:出发)?(?:去|到)([^，,。；;：:]{1,40})");
+    private static final Pattern VISIT_DESTINATION = Pattern.compile(
+            "(?:上午|早上|中午|下午|晚上)?\\s*(?:去|到)([^，,。；;：:]{1,40})");
+    private static final Pattern LOCATION_PLAN_SUFFIX = Pattern.compile(
+            "(?:的)?(?:行程|路线|路线规划|出行计划|旅行计划|旅游计划|半日游|一日游)$");
 
     /** 注入路线、日历和回复服务。 */
-    public TravelWorkflow(AmapService amapService, CalendarService calendarService, ReplySender replySender) {
+    public TravelWorkflow(AmapService amapService, CalendarService calendarService,
+                          ReplySender replySender, LocationService locationService) {
+        this(amapService, calendarService, replySender, locationService::currentPlace);
+    }
+
+    TravelWorkflow(AmapService amapService, CalendarService calendarService,
+                   ReplySender replySender, Function<String, AmapService.Place> currentPlaceFinder) {
         this.amapService = amapService;
         this.routeMealPlanner = new RouteMealPlanner(amapService);
         this.calendarService = calendarService;
         this.replySender = replySender;
+        this.currentPlaceFinder = currentPlaceFinder;
     }
 
     /** 判断用户是否正在确认起点、途经点或终点。 */
@@ -49,24 +70,36 @@ public final class TravelWorkflow {
 
     /** 把模型提取的起点、途经点和终点组成有序地点链并开始逐个确认。 */
     public void handle(AgentContext context, IntentResult route) throws Exception {
-        handle(context.replyChannel(), context.principalId(), route);
+        handle(context.replyChannel(), context.principalId(), route, "");
     }
 
     public void handle(ReplyChannel client, String userId, IntentResult route) throws Exception {
-        String origin = route.travelOrigin().trim();
-        String destination = route.travelDestination().trim();
-        if (origin.isBlank() || destination.isBlank()) {
+        handle(client, userId, route, "");
+    }
+
+    /** 原始请求只用于补齐模型遗漏的地点字段，路线计算仍使用统一的结构化结果。 */
+    public void handle(ReplyChannel client, String userId, IntentResult route,
+                       String requestText) throws Exception {
+        ResolvedRoute resolved = resolveRoute(route, requestText);
+        String origin = resolved.origin();
+        String destination = resolved.destination();
+        AmapService.Place savedOrigin = resolveSavedOrigin(userId, origin);
+        if (destination.isBlank()) {
             replySender.sendReply(client, userId,
-                    "请告诉我完整的起点和最终终点，例如“从高桥云港园区先去西湖，再到杭州西站”。");
+                    "请告诉我最终目的地，例如“从当前位置去西湖，再到杭州西站”。");
+            return;
+        }
+        if (origin.isBlank() && savedOrigin == null) {
+            replySender.sendReply(client, userId,
+                    "我还没有可用的当前位置。请发送地图位置链接，或先回复“获取我的位置”完成定位；也可以直接告诉我起点。 ");
             return;
         }
 
         List<String> locationNames = new ArrayList<>();
-        locationNames.add(origin);
-        if (route.travelStops() != null) {
-            for (String stop : route.travelStops()) {
-                if (stop != null && !stop.isBlank()) locationNames.add(stop.trim());
-            }
+        if (!origin.isBlank()) locationNames.add(origin);
+        else locationNames.add(savedOrigin.name());
+        for (String stop : resolved.stops()) {
+            if (!stop.isBlank()) locationNames.add(stop);
         }
         locationNames.add(destination);
 
@@ -76,9 +109,14 @@ public final class TravelWorkflow {
             return;
         }
         try {
-            PendingTravel travel = new PendingTravel(locationNames, List.of(), 0,
+            List<AmapService.Place> confirmedLocations = savedOrigin == null ? List.of() : List.of(savedOrigin);
+            int currentLocationIndex = savedOrigin == null ? 0 : 1;
+            PendingTravel travel = new PendingTravel(locationNames, confirmedLocations, currentLocationIndex,
                     route.travelDepartureTime(), Math.max(0, route.timeBudgetMinutes()),
                     route.mealKeyword().trim(), route.originCity(), route.destinationCity(), List.of());
+            if (savedOrigin != null) {
+                System.out.println("[出行规划] 使用已确认当前位置作为起点：" + savedOrigin.name());
+            }
             askForCurrentLocation(client, userId, travel);
         } catch (Exception error) {
             clearPendingTravel(userId);
@@ -122,6 +160,88 @@ public final class TravelWorkflow {
     public void clearPending(String userId) {
         clearPendingTravel(userId);
     }
+
+    /** 没有明确起点时才允许复用用户刚确认过的精确定位。 */
+    AmapService.Place resolveSavedOrigin(String userId, String explicitOrigin) {
+        return explicitOrigin == null || explicitOrigin.isBlank() ? currentPlaceFinder.apply(userId) : null;
+    }
+
+    /** 将“从当前位置去西湖，再到杭州西站”补齐为可执行的地点链。 */
+    ResolvedRoute resolveRoute(IntentResult route, String requestText) {
+        String origin = normalizeOrigin(route.travelOrigin());
+        String destination = cleanLocation(route.travelDestination());
+        List<String> stops = new ArrayList<>();
+        if (route.travelStops() != null) {
+            for (String stop : route.travelStops()) {
+                String value = cleanLocation(stop);
+                if (!value.isBlank()) stops.add(value);
+            }
+        }
+        if (!destination.isBlank()) return new ResolvedRoute(origin, destination, List.copyOf(stops));
+
+        RouteText fallback = parseRouteText(requestText);
+        if (origin.isBlank()) origin = fallback.origin();
+        for (String stop : fallback.stops()) {
+            if (!stop.isBlank() && !stops.contains(stop)) stops.add(stop);
+        }
+        destination = fallback.destination();
+        return new ResolvedRoute(origin, destination, List.copyOf(stops));
+    }
+
+    static RouteText parseRouteText(String requestText) {
+        String text = requestText == null ? "" : requestText.trim();
+        Matcher chain = CURRENT_LOCATION_CHAIN.matcher(text);
+        if (chain.find()) {
+            return new RouteText("", cleanLocation(chain.group(2)), List.of(cleanLocation(chain.group(1))));
+        }
+        Matcher currentDestination = CURRENT_LOCATION_DESTINATION.matcher(text);
+        if (currentDestination.find()) {
+            return new RouteText("", cleanLocation(currentDestination.group(1)), List.of());
+        }
+        Matcher visit = VISIT_DESTINATION.matcher(text);
+        if (visit.find()) {
+            return new RouteText("", cleanLocation(visit.group(1)), List.of());
+        }
+        return new RouteText("", "", List.of());
+    }
+
+    private String normalizeOrigin(String origin) {
+        String value = cleanLocation(origin);
+        return value.matches("(?:当前位置|当前所在(?:位置)?|这里|我这里)") ? "" : value;
+    }
+
+    static String cleanLocation(String value) {
+        return value == null ? "" : value.trim()
+                .replaceFirst("^(?:先|再|然后)", "")
+                .replaceAll("(?:附近餐厅|找餐厅|吃饭)$", "")
+                .replaceFirst(LOCATION_PLAN_SUFFIX.pattern(), "")
+                .trim();
+    }
+
+    /** 地图检索可能返回包含关键词的商户，路线地点只保留真正命中地点名的候选。 */
+    static List<AmapService.Place> relevantLocationCandidates(String location,
+                                                               List<AmapService.Place> candidates) {
+        String keyword = cleanLocation(location).replaceAll("[\\s，,。；;：:]", "");
+        if (keyword.length() < 2) return candidates;
+        return candidates.stream()
+                .filter(candidate -> candidate.name().replaceAll("\\s", "").contains(keyword))
+                .sorted((left, right) -> Integer.compare(locationMatchScore(left.name(), keyword),
+                        locationMatchScore(right.name(), keyword)))
+                .toList();
+    }
+
+    private static int locationMatchScore(String candidate, String keyword) {
+        String poiName = candidate == null ? "" : candidate.replaceAll("\\s", "")
+                .replaceFirst("（.*$", "");
+        if (poiName.equals(keyword)) return 0;
+        if (poiName.startsWith(keyword) || poiName.endsWith(keyword)) return 1;
+        if (poiName.contains(keyword)) return 2;
+        return 3;
+    }
+
+    record ResolvedRoute(String origin, String destination, List<String> stops) { }
+
+    record RouteText(String origin, String destination, List<String> stops) { }
 
     /** 搜索当前待确认地点；唯一结果自动确认，多条结果必须让用户选择。 */
     private void askForCurrentLocation(ReplyChannel client, String userId, PendingTravel travel) throws Exception {
@@ -178,7 +298,7 @@ public final class TravelWorkflow {
             if (fallback == null && city != null && !city.isBlank()) fallback = amapService.geocode(locationName);
             if (fallback != null) candidates.add(fallback);
         }
-        return candidates;
+        return relevantLocationCandidates(locationName, candidates);
     }
 
     /** 为地点链的每两个相邻地点生成一段路线，并汇总全程结果。 */

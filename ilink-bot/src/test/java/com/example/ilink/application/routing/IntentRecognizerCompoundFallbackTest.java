@@ -86,6 +86,138 @@ class IntentRecognizerCompoundFallbackTest {
         assertEquals(2, index.get());
     }
 
+    @Test
+    void routesCompositeHalfDayTripThroughModelAndKeepsThreeActions() {
+        AtomicInteger calls = new AtomicInteger();
+        IntentRecognizer recognizer = new IntentRecognizer(body -> {
+            calls.incrementAndGet();
+            return """
+                    {
+                      "message_mode":"command",
+                      "requirements":[
+                        {"id":"r1","text":"明天上午从当前位置去西湖","depends_on":[]},
+                        {"id":"r2","text":"中午查找西湖附近适合用餐的餐厅","depends_on":["r1"]},
+                        {"id":"r3","text":"明天下午4点提醒返程","depends_on":[]}
+                      ],
+                      "actions":[
+                        {"requirement_id":"r1","action_text":"明天上午从当前位置去西湖", "intent":"travel_plan",
+                         "travel_origin":"当前位置","travel_destination":"西湖","travel_departure_time":"明天上午"},
+                        {"requirement_id":"r2","depends_on":["r1"],
+                         "action_text":"中午查找西湖附近适合用餐的餐厅","intent":"nearby_food",
+                         "nearby_location":"西湖","meal_keyword":"午餐"},
+                        {"requirement_id":"r3","action_text":"明天下午4点提醒返程","intent":"calendar_event",
+                         "calendar_action":"create","calendar_title":"返程","calendar_time":"明天下午4点"}
+                      ]
+                    }
+                    """;
+        });
+
+        IntentPlan plan = recognizer.recognize("user",
+                "帮我规划明天杭州半日游：上午去西湖，中午找附近餐厅，下午 4 点提醒我返程",
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals(List.of("travel_plan", "nearby_food", "calendar_event"),
+                plan.actions().stream().map(action -> action.route().intent()).toList());
+        assertEquals("西湖", plan.actions().get(1).route().nearbyLocation());
+        assertEquals("午餐", plan.actions().get(1).route().mealKeyword());
+        assertEquals("明天下午4点", plan.actions().get(2).route().calendarTime());
+        assertEquals(1, calls.get());
+    }
+
+    @Test
+    void cleansConditionalPrefixFromWeatherLocationAndKeepsBranches() {
+        IntentRecognizer recognizer = new IntentRecognizer(body -> """
+                {
+                  "message_mode":"command",
+                  "requirements":[
+                    {"id":"r1","text":"查询明天杭州天气","depends_on":[]},
+                    {"id":"r2","text":"如果适合出行，帮我打车去杭州东站","depends_on":["r1"]},
+                    {"id":"r3","text":"如果下雨，提醒我带伞","depends_on":["r1"]}
+                  ],
+                  "actions":[
+                    {"requirement_id":"r1","action_text":"查询明天杭州天气","intent":"weather",
+                     "weather_location":"如果杭州","weather_day":"tomorrow"},
+                    {"requirement_id":"r2","action_text":"如果适合出行，帮我打车去杭州东站","intent":"taxi_trip",
+                     "travel_destination":"杭州东站","depends_on":["r1"]},
+                    {"requirement_id":"r3","action_text":"如果下雨，提醒我带伞","intent":"calendar_event",
+                     "calendar_title":"带伞","calendar_time":"明天早上","depends_on":["r1"]}
+                  ]
+                }
+                """);
+
+        IntentPlan plan = recognizer.recognize("user",
+                "查询明天杭州天气;如果适合出行，帮我打车去杭州东站;如果下雨，提醒我带伞。",
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals(List.of("weather", "taxi_trip", "calendar_event"),
+                plan.actions().stream().map(action -> action.route().intent()).toList());
+        assertEquals("杭州", plan.actions().getFirst().route().weatherLocation());
+    }
+
+    @Test
+    void locallyRestoresConditionalBranchesWhenModelReturnsOnlyWeather() {
+        IntentRecognizer recognizer = new IntentRecognizer(body -> """
+                {
+                  "message_mode":"command",
+                  "requirements":[{"id":"r1","text":"查询明天杭州天气","depends_on":[]}],
+                  "actions":[{"requirement_id":"r1","action_text":"查询明天杭州天气","intent":"weather",
+                    "weather_location":"杭州","weather_day":"tomorrow"}]
+                }
+                """);
+        String request = "查询明天杭州天气;如果适合出行，帮我打车去杭州东站;如果下雨，提醒我带伞。";
+
+        IntentPlan plan = recognizer.recognize("user", request,
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals(List.of("weather", "taxi_trip", "calendar_event"),
+                plan.actions().stream().map(action -> action.route().intent()).toList());
+        assertEquals("杭州东站", plan.actions().get(1).route().travelDestination());
+        assertEquals("带伞", plan.actions().get(2).route().calendarTitle());
+        assertEquals(List.of("r1"), plan.actions().get(1).dependsOn());
+        assertEquals(List.of("r1"), plan.actions().get(2).dependsOn());
+    }
+
+    @Test
+    void conditionalWeatherFallbackKeepsTomorrowAndRestoresBranches() {
+        IntentRecognizer recognizer = new IntentRecognizer(body -> {
+            throw new IllegalStateException("timeout");
+        });
+        String request = "查询明天杭州天气;如果适合出行，帮我打车去杭州东站;如果下雨，提醒我带伞。";
+
+        IntentPlan plan = recognizer.recognize("user", request,
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals(List.of("weather", "taxi_trip", "calendar_event"),
+                plan.actions().stream().map(action -> action.route().intent()).toList());
+        assertEquals("tomorrow", plan.actions().getFirst().route().weatherDay());
+    }
+
+    @Test
+    void restoresWeatherBeforeConditionalTaxiWhenModelOmitsWeatherAndDependency() {
+        IntentRecognizer recognizer = new IntentRecognizer(body -> """
+                {
+                  "message_mode":"command",
+                  "requirements":[
+                    {"id":"r2","text":"如果适合出行，帮我打车去杭州东站","depends_on":[]}
+                  ],
+                  "actions":[
+                    {"requirement_id":"r2","action_text":"如果适合出行，帮我打车去杭州东站",
+                     "intent":"taxi_trip","travel_destination":"杭州东站"}
+                  ]
+                }
+                """);
+        String request = "查询明天杭州天气;如果适合出行，帮我打车去杭州东站;如果下雨，提醒我带伞。";
+
+        IntentPlan plan = recognizer.recognize("user", request,
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals(List.of("weather", "taxi_trip", "calendar_event"),
+                plan.actions().stream().map(action -> action.route().intent()).toList());
+        assertEquals("杭州", plan.actions().getFirst().route().weatherLocation());
+        assertEquals(List.of(plan.actions().getFirst().requirementId()), plan.actions().get(1).dependsOn());
+        assertEquals(List.of(plan.actions().getFirst().requirementId()), plan.actions().get(2).dependsOn());
+    }
+
     private static String requirement(String id, String text) {
         return "{\"id\":\"" + id + "\",\"text\":\"" + text + "\",\"depends_on\":[]}";
     }

@@ -64,7 +64,16 @@ public final class TodoPlanningService {
         String routedTodos = normalize(todoText);
         if (routedTodos.isBlank()) routedTodos = original;
         try {
-            TodoPlan result = parseModelPlan(planClient.request(buildRequest(original, routedTodos)), original, routedTodos);
+            String modelContent = planClient.request(buildRequest(original, routedTodos));
+            TodoPlan result;
+            try {
+                result = parseModelPlan(modelContent, original, routedTodos);
+            } catch (IllegalArgumentException validationError) {
+                if (!isRepairableModelOutput(validationError)) throw validationError;
+                System.err.println("[待办规划] 模型输出结构异常，尝试修复 JSON：" + validationError.getMessage());
+                String repaired = planClient.request(buildRepairRequest(original, routedTodos, modelContent));
+                result = parseModelPlan(repaired, original, routedTodos);
+            }
             System.out.println("[待办规划] 模型拆分完成 items=" + result.drafts().size());
             return result;
         } catch (Exception error) {
@@ -78,7 +87,10 @@ public final class TodoPlanningService {
         body.addProperty("model", Config.MODEL);
         body.addProperty("temperature", 0.1);
         body.addProperty("enable_thinking", false);
-        body.addProperty("max_tokens", 2000);
+        body.addProperty("max_tokens", Config.TODO_PLANNER_MAX_TOKENS);
+        JsonObject responseFormat = new JsonObject();
+        responseFormat.addProperty("type", "json_object");
+        body.add("response_format", responseFormat);
 
         JsonArray messages = new JsonArray();
         messages.add(message("system", """
@@ -101,6 +113,34 @@ public final class TodoPlanningService {
         messages.add(message("user", gson.toJson(input)));
         body.add("messages", messages);
         return body;
+    }
+
+    private JsonObject buildRepairRequest(String originalText, String todoText, String modelContent) {
+        JsonObject body = new JsonObject();
+        body.addProperty("model", Config.MODEL);
+        body.addProperty("temperature", 0);
+        body.addProperty("enable_thinking", false);
+        body.addProperty("max_tokens", Config.TODO_PLANNER_MAX_TOKENS);
+        JsonObject responseFormat = new JsonObject();
+        responseFormat.addProperty("type", "json_object");
+        body.add("response_format", responseFormat);
+        JsonArray messages = new JsonArray();
+        messages.add(message("system", "你是 JSON 修复器。只能输出合法 JSON 对象，必须包含 items 数组；不要解释、不要 Markdown。items 中每个元素必须有 title 和 time_text。"));
+        JsonObject input = new JsonObject();
+        input.addProperty("original_message", originalText);
+        input.addProperty("todo_requirements", todoText);
+        String invalid = modelContent == null ? "" : modelContent;
+        input.addProperty("invalid_model_output", invalid.substring(0, Math.min(4000, invalid.length())));
+        messages.add(message("user", gson.toJson(input)));
+        body.add("messages", messages);
+        return body;
+    }
+
+    private boolean isRepairableModelOutput(IllegalArgumentException error) {
+        String message = error.getMessage();
+        if (message == null) return false;
+        return message.contains("JSON") || message.contains("合法的待办列表")
+                || message.contains("待办条目不是对象") || message.contains("任务只有说明文字");
     }
 
     private TodoPlan parseModelPlan(String content, String originalText, String todoText) {

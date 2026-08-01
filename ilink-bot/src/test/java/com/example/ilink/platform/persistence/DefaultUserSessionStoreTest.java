@@ -37,4 +37,16 @@ class DefaultUserSessionStoreTest {
         store.createNewSession(userId);
         assertEquals(List.of(), store.getLastCreatedTodoIds(userId));
     }
+
+    @Test
+    void keepsExtractedTodoCandidatesOnlyInsideCurrentSession() {
+        DefaultUserSessionStore store = new DefaultUserSessionStore();
+        String userId = "todo-candidate-session-test-user";
+
+        store.setPendingTodoCandidates(userId, List.of("修复 Bug", "准备部署环境"));
+
+        assertEquals(List.of("修复 Bug", "准备部署环境"), store.getPendingTodoCandidates(userId));
+        store.createNewSession(userId);
+        assertEquals(List.of(), store.getPendingTodoCandidates(userId));
+    }
 }

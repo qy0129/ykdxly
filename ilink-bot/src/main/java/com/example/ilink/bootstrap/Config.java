@@ -56,6 +56,8 @@ public class Config {
             loadProperty("router.max_tokens", "1800"));
     public static final Duration TODO_PLANNER_REQ_TIMEOUT = Duration.ofSeconds(
             Long.parseLong(loadProperty("todo.planner.request.timeout.seconds", "30")));
+    public static final int TODO_PLANNER_MAX_TOKENS = Integer.parseInt(
+            loadProperty("todo.planner.max_tokens", "900"));
     public static final boolean REFLECTION_AI_ENABLED =
             Boolean.parseBoolean(loadProperty("reflection.ai.enabled", "true"));
     public static final Duration REFLECTION_AI_TIMEOUT = Duration.ofSeconds(
