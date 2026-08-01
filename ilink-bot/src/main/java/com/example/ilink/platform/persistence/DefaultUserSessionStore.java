@@ -33,6 +33,7 @@ public final class DefaultUserSessionStore implements UserSessionStore {
     private static final String FILE_EXPORT = "pending_file_export";
     private static final String EXPRESS = "pending_express";
     private static final String TODO_CONFLICT = "pending_todo_conflict";
+    private static final String RECENT_TODO_BATCH = "recent_todo_batch";
     private static final String WEATHER = "pending_weather";
 
     private final MySqlStore database;
@@ -48,6 +49,7 @@ public final class DefaultUserSessionStore implements UserSessionStore {
     private final Map<String, PendingFileExport> pendingExports = new ConcurrentHashMap<>();
     private final Map<String, PendingExpressState> pendingExpress = new ConcurrentHashMap<>();
     private final Map<String, TodoConflictState> pendingTodoConflicts = new ConcurrentHashMap<>();
+    private final Map<String, RecentTodoBatch> recentTodoBatches = new ConcurrentHashMap<>();
     private final Map<String, PendingWeatherState> pendingWeather = new ConcurrentHashMap<>();
 
     public DefaultUserSessionStore() {
@@ -272,6 +274,29 @@ public final class DefaultUserSessionStore implements UserSessionStore {
     }
 
     @Override
+    public void setLastCreatedTodoIds(String userId, List<String> todoIds) {
+        if (todoIds == null || todoIds.isEmpty()) {
+            removeState(userId, RECENT_TODO_BATCH, recentTodoBatches);
+            return;
+        }
+        RecentTodoBatch value = new RecentTodoBatch(todoIds, expiresAt());
+        recentTodoBatches.put(stateKey(userId, RECENT_TODO_BATCH), value);
+        saveState(userId, RECENT_TODO_BATCH, value);
+    }
+
+    @Override
+    public List<String> getLastCreatedTodoIds(String userId) {
+        RecentTodoBatch value = loadState(userId, RECENT_TODO_BATCH,
+                RecentTodoBatch.class, recentTodoBatches);
+        if (value == null) return List.of();
+        if (value.expiresAtMillis() <= System.currentTimeMillis()) {
+            removeState(userId, RECENT_TODO_BATCH, recentTodoBatches);
+            return List.of();
+        }
+        return value.todoIds();
+    }
+
+    @Override
     public void setPendingWeatherLocations(String userId, List<WeatherLocation> locations, String weatherDay) {
         if (locations == null || locations.isEmpty()) return;
         PendingWeatherState value = new PendingWeatherState(List.copyOf(locations),
@@ -308,6 +333,13 @@ public final class DefaultUserSessionStore implements UserSessionStore {
         String value = location.trim();
         currentLocations.put(userId, value);
         database.saveUserState(userId, LOCATION, value);
+    }
+
+    @Override
+    public void clearCurrentLocation(String userId) {
+        if (blank(userId)) return;
+        currentLocations.remove(userId);
+        database.deleteUserState(userId, LOCATION);
     }
 
     @Override

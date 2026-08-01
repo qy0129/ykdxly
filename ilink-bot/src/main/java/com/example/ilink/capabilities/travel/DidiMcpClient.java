@@ -164,7 +164,20 @@ public final class DidiMcpClient {
                 .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(requestJson))).build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() != 200) throw new IllegalStateException("滴滴 Sandbox 暂时不可用（HTTP " + response.statusCode() + "）");
-        JsonObject body = JsonParser.parseString(response.body()).getAsJsonObject();
+        String contentType = response.headers().firstValue("Content-Type").orElse("");
+        if (!contentType.isBlank() && !contentType.toLowerCase(java.util.Locale.ROOT).contains("json")) {
+            throw new IllegalStateException("滴滴 MCP 返回了非 JSON 内容（" + contentType + "）");
+        }
+        String responseBody = response.body() == null ? "" : response.body().trim();
+        if (responseBody.isBlank()) throw new IllegalStateException("滴滴 MCP 返回内容为空");
+        JsonObject body;
+        try {
+            JsonElement parsed = JsonParser.parseString(responseBody);
+            if (!parsed.isJsonObject()) throw new IllegalStateException("滴滴 MCP 返回的不是 JSON 对象");
+            body = parsed.getAsJsonObject();
+        } catch (RuntimeException error) {
+            throw new IllegalStateException("滴滴 MCP 返回 JSON 格式异常，内容摘要：" + responseSummary(responseBody), error);
+        }
         if (body.has("error")) throw new IllegalStateException("滴滴 Sandbox 调用失败：" + value(object(body, "error"), "message"));
         JsonObject result = object(body, "result");
         if (result == null) throw new IllegalStateException("滴滴 Sandbox 返回缺少 result");
@@ -241,6 +254,10 @@ public final class DidiMcpClient {
     private static String objectValue(JsonObject source, String objectName, String propertyName) { return value(object(source, objectName), propertyName); }
     private static String value(JsonObject source, String name) { return source != null && source.has(name) && !source.get(name).isJsonNull() ? source.get(name).getAsString() : ""; }
     private static String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8); }
+    private static String responseSummary(String value) {
+        String normalized = value.replaceAll("\\s+", " ").trim();
+        return normalized.length() <= 160 ? normalized : normalized.substring(0, 160) + "...";
+    }
 
     private static String firstUrl(JsonElement value) {
         if (value == null || value.isJsonNull()) return "";

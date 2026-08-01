@@ -18,7 +18,7 @@
     {"name":"plan_progress","description":"查询当前计划进度","parameterHint":"action_text","interactive":false},
     {"name":"deadline_countdown","description":"计算距离截止时间还有多久","parameterHint":"plan_deadline","interactive":false},
     {"name":"calendar_event","description":"创建、查询、完成、取消或延后提醒","parameterHint":"calendar_action, calendar_title, calendar_time, recurrence","interactive":true},
-    {"name":"todo","description":"创建、查看、完成或删除独立待办","parameterHint":"action_text","interactive":false},
+    {"name":"todo","description":"创建、查看、完成、删除或改期独立待办","parameterHint":"todo_action=create|list|complete|delete|reschedule, action_text","interactive":false},
     {"name":"planning_capabilities","description":"介绍可用的规划能力","parameterHint":"","interactive":false},
     {"name":"diet_plan","description":"营养、减脂、增肌等饮食规划","parameterHint":"diet_goal","interactive":true}
   ]

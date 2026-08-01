@@ -14,7 +14,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class UserRequestHandlerTodoCoalescingTest {
 
-    private static final IntentResult TODO = new Gson().fromJson("{\"intent\":\"todo\"}", IntentResult.class);
+    private static final IntentResult TODO = new Gson().fromJson(
+            "{\"intent\":\"todo\",\"todoAction\":\"create\"}", IntentResult.class);
+    private static final IntentResult WEATHER = new Gson().fromJson(
+            "{\"intent\":\"weather\",\"weather_location\":\"杭州\",\"weather_day\":\"tomorrow\"}",
+            IntentResult.class);
 
     @Test
     void mergesTodoCreationLoopIntoOneBatchAction() {
@@ -50,6 +54,31 @@ class UserRequestHandlerTodoCoalescingTest {
         assertEquals(3, merged.actions().size());
         assertEquals(List.of("r1"), merged.actions().get(1).dependsOn());
         assertEquals("查看我的待办", merged.actions().get(2).requestText());
+    }
+
+    @Test
+    void mergesWeatherAdviceChatIntoWeatherAction() {
+        IntentAction weather = new IntentAction(
+                "r1", "查询明天杭州的天气", List.of(), WEATHER);
+        IntentAction advice = new IntentAction(
+                "r2", "判断是否适合去西湖", List.of("r1"), IntentResult.chat());
+        IntentAction dependent = new IntentAction(
+                "r3", "完成后记录结果", List.of("r2"), IntentResult.chat());
+        IntentPlan plan = new IntentPlan(List.of(weather, advice, dependent), MessageMode.COMMAND);
+
+        IntentPlan merged = UserRequestHandler.coalesceDependentActions(plan);
+
+        assertEquals(2, merged.actions().size());
+        assertEquals("weather", merged.actions().getFirst().route().intent());
+        assertTrue(merged.actions().getFirst().requestText().contains("判断是否适合去西湖"));
+        assertEquals(List.of("r1"), merged.actions().get(1).dependsOn());
+    }
+
+    @Test
+    void queryTextOverridesIncorrectCreateAction() {
+        assertEquals("list", UserRequestHandler.resolveTodoAction(
+                "create", "查询我刚才创建的待办事项和提醒安排"));
+        assertEquals("unknown", UserRequestHandler.resolveTodoAction("", "待办"));
     }
 
     private IntentAction todo(String id, String text) {

@@ -44,6 +44,7 @@ public record IntentResult(
         String dietGoal,
         String nearbyLocation,
         String nearbyAction,
+        String todoAction,
         String calendarAction,
         String calendarTitle,
         String calendarTime,
@@ -62,9 +63,13 @@ public record IntentResult(
         String foodOrderRestaurants) {
 
     public static IntentResult chat() {
-        return new IntentResult("chat", "", "", "none", "keep", "default", "", "none", "", "none", 0,
-                "none", "none", "", "today", "", "", "", "", "", "", "", "", "", "", "",
-                List.of(), "", "", "", 0, "", "", "", "", "none", "", "", "none", 0, "auto", 0,
-                "none", 0, "", "", "", "", "", "", "");
+        return new IntentResult(
+                "chat", "", "", "none", "keep", "default", "", "none", "", "none", 0,
+                "none", "none", "", "today", "", "", "",
+                "", "", "", "", "", "",
+                "", "", List.of(), "", "", "", 0,
+                "", "", "", "search", "unknown",
+                "none", "", "", "none", 0, "auto", 0L, "", 0,
+                "", "video", "", "music", "unread", "", "");
     }
 }

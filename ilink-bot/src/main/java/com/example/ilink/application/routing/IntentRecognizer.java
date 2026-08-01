@@ -15,6 +15,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -31,6 +32,10 @@ public final class IntentRecognizer {
     private static final Pattern FOOD_ORDER_ITEM = Pattern.compile(
             "(?:想吃|想喝|想点|要点|帮我点|给我点|替我点|帮我订|给我订|替我订|点|订|下单)"
                     + "(?:一份|一个|个|一杯|杯|份)?\\s*([^，,。！？?!；;]{1,30})");
+    private static final Pattern TAXI_ORIGIN_DESTINATION = Pattern.compile(
+            "(?:从|由)\\s*([^，。！？；;]+?)\\s*(?:打车|叫车|叫网约车)?\\s*(?:到|去往|去)\\s*([^，。！？；;]+)");
+    private static final Pattern TAXI_DESTINATION = Pattern.compile(
+            "(?:打车|叫车|叫网约车)\\s*(?:去|到|前往)\\s*([^，。！？；;]+)");
 
     private final HttpClient httpClient;
     private final RouteClient routeClient;
@@ -39,6 +44,7 @@ public final class IntentRecognizer {
     private final RoutePromptBuilder promptBuilder;
     private final RouteResponseParser responseParser = new RouteResponseParser();
     private final IntentNormalizer normalizer;
+    private final ThreadLocal<Long> routeDeadlineNanos = new ThreadLocal<>();
 
     public IntentRecognizer(HttpClient httpClient) {
         this(httpClient, CapabilityRegistry.defaults());
@@ -77,6 +83,7 @@ public final class IntentRecognizer {
 
     /** 生产快路径：一次模型调用同时完成需求拆分、能力分配和参数提取。 */
     private IntentPlan recognizeUnified(String userMessage, RoutingContext context) {
+        routeDeadlineNanos.set(System.nanoTime() + Config.ROUTER_TOTAL_TIMEOUT.toNanos());
         try {
             JsonObject result = requestJson(promptBuilder.buildUnifiedPrompt(context, userMessage), userMessage);
             MessageMode messageMode = MessageMode.fromModel(string(result, "message_mode"));
@@ -119,6 +126,9 @@ public final class IntentRecognizer {
                 actions.add(action);
             }
             if (actions.isEmpty()) return fallbackPlan(userMessage, context);
+            if (actions.size() == 1 && IntentPolicy.isExplicitTodoQuery(userMessage)) {
+                return todoPlan(userMessage, "list");
+            }
             // 批量待办要求 action_text 保留完整原文；模型缩写成首条任务时仍以原命令为准。
             if (actions.size() == 1 && IntentPolicy.isExplicitTodoCreation(userMessage)) {
                 return todoPlan(userMessage);
@@ -131,6 +141,8 @@ public final class IntentRecognizer {
         } catch (Exception error) {
             System.err.println("[统一意图识别] 识别失败：" + error.getMessage());
             return fallbackPlan(userMessage, context);
+        } finally {
+            routeDeadlineNanos.remove();
         }
     }
 
@@ -279,6 +291,7 @@ public final class IntentRecognizer {
     }
 
     private String requestRoute(JsonObject body) throws Exception {
+        routeTimeout();
         return routeClient.request(body);
     }
 
@@ -286,7 +299,7 @@ public final class IntentRecognizer {
         String requestBody = gson.toJson(body);
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(Config.API_BASE_URL))
-                .timeout(Config.ROUTER_REQ_TIMEOUT)
+                .timeout(routeTimeout())
                 .header("Authorization", "Bearer " + Config.API_KEY)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(requestBody))
@@ -320,6 +333,15 @@ public final class IntentRecognizer {
         return (System.nanoTime() - startedAt) / 1_000_000;
     }
 
+    private Duration routeTimeout() {
+        Long deadline = routeDeadlineNanos.get();
+        if (deadline == null) return Config.ROUTER_REQ_TIMEOUT;
+        long remainingNanos = deadline - System.nanoTime();
+        if (remainingNanos <= 0) throw new IllegalStateException("路由总时限已到");
+        Duration remaining = Duration.ofNanos(remainingNanos);
+        return remaining.compareTo(Config.ROUTER_REQ_TIMEOUT) < 0 ? remaining : Config.ROUTER_REQ_TIMEOUT;
+    }
+
     @FunctionalInterface
     interface RouteClient {
         String request(JsonObject body) throws Exception;
@@ -345,8 +367,9 @@ public final class IntentRecognizer {
 
     /** 路由调用失败时保留明确、低歧义的核心能力。 */
     private IntentPlan fallbackPlan(String userMessage, RoutingContext context) {
-        if (IntentPolicy.isExplicitTodoCreation(userMessage)) {
-            return todoPlan(userMessage);
+        String todoAction = IntentPolicy.inferTodoAction(userMessage);
+        if (!"unknown".equals(todoAction)) {
+            return todoPlan(userMessage, todoAction);
         }
         String documentIntent = deterministicDocumentIntent(userMessage, context.mediaContext());
         if (!documentIntent.isBlank()) {
@@ -383,6 +406,7 @@ public final class IntentRecognizer {
         if ("food_order".equals(intent)) {
             action.addProperty("food_order_restaurants", inferFoodOrderRestaurant(userMessage));
         }
+        if ("taxi_trip".equals(intent)) applyTaxiFallbackFields(action, userMessage);
         if ("nearby_food".equals(intent)) {
             action.addProperty("nearby_action", "search");
             action.addProperty("meal_keyword", "");
@@ -392,6 +416,17 @@ public final class IntentRecognizer {
                 MessageMode.COMMAND);
     }
 
+    private void applyTaxiFallbackFields(JsonObject action, String userMessage) {
+        Matcher originDestination = TAXI_ORIGIN_DESTINATION.matcher(userMessage);
+        if (originDestination.find()) {
+            action.addProperty("travel_origin", originDestination.group(1).trim());
+            action.addProperty("travel_destination", originDestination.group(2).trim());
+            return;
+        }
+        Matcher destination = TAXI_DESTINATION.matcher(userMessage);
+        if (destination.find()) action.addProperty("travel_destination", destination.group(1).trim());
+    }
+
     private MessageMode resolveMessageMode(MessageMode modelMode, List<IntentAction> actions) {
         boolean hasBusinessAction = actions.stream()
                 .anyMatch(action -> !"chat".equals(action.route().intent()));
@@ -399,8 +434,13 @@ public final class IntentRecognizer {
     }
 
     private IntentPlan todoPlan(String userMessage) {
+        return todoPlan(userMessage, "create");
+    }
+
+    private IntentPlan todoPlan(String userMessage, String todoAction) {
         JsonObject action = new JsonObject();
         action.addProperty("intent", "todo");
+        action.addProperty("todo_action", todoAction);
         action.addProperty("reply_mode", "keep");
         action.addProperty("voice_style", "default");
         return new IntentPlan(List.of(new IntentAction("r1", userMessage, List.of(), toIntentResult(action))),
@@ -479,6 +519,13 @@ public final class IntentRecognizer {
         }
         if (IntentPolicy.isExplicitTodoCreation(userMessage) && !"todo".equals(intent)) {
             action.addProperty("intent", "todo");
+            action.addProperty("todo_action", "create");
+            clearOutputFields(action);
+            return;
+        }
+        if (IntentPolicy.isExplicitTodoQuery(userMessage) && !"todo".equals(intent)) {
+            action.addProperty("intent", "todo");
+            action.addProperty("todo_action", "list");
             clearOutputFields(action);
             return;
         }
@@ -542,6 +589,11 @@ public final class IntentRecognizer {
             action.addProperty("image_action", normalizeImageAction(string(action, "image_action")));
             if (string(action, "image_prompt").isBlank()) action.addProperty("image_prompt", actionText);
         }
+        if ("todo".equals(string(action, "intent"))) {
+            String localAction = IntentPolicy.inferTodoAction(userMessage);
+            String modelAction = normalizeTodoAction(string(action, "todo_action"));
+            action.addProperty("todo_action", "unknown".equals(localAction) ? modelAction : localAction);
+        }
         if ("nearby_food".equals(intent) && !isNearbyDiningRequest(userMessage)
                 && !IntentPolicy.isExplicitLocationRememberRequest(userMessage)) {
             action.addProperty("intent", "chat");
@@ -596,6 +648,7 @@ public final class IntentRecognizer {
                 integer(result, "time_budget_minutes", 0), string(result, "meal_keyword"),
                 string(result, "diet_goal"), string(result, "nearby_location"),
                 defaultString(result, "nearby_action", "search"),
+                defaultString(result, "todo_action", "unknown"),
                 defaultString(result, "calendar_action", "create"), string(result, "calendar_title"),
                 string(result, "calendar_time"), defaultString(result, "calendar_recurrence", "none"),
                 integer(result, "calendar_reminder_minutes", 0),
@@ -743,6 +796,13 @@ public final class IntentRecognizer {
             case "solve", "answer" -> "solve";
             case "clarify" -> "clarify";
             default -> "none";
+        };
+    }
+
+    private String normalizeTodoAction(String value) {
+        return switch (value == null ? "" : value.trim().toLowerCase()) {
+            case "create", "list", "complete", "delete", "reschedule" -> value.trim().toLowerCase();
+            default -> "unknown";
         };
     }
 

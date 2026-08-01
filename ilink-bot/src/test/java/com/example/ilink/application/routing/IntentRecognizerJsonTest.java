@@ -138,6 +138,35 @@ class IntentRecognizerJsonTest {
     }
 
     @Test
+    void correctsTodoQueryEvenWhenModelRequestsCreation() {
+        IntentRecognizer recognizer = new IntentRecognizer(body -> """
+                {"message_mode":"command",
+                 "requirements":[{"id":"r1","text":"查询我刚才创建的待办事项和提醒安排","depends_on":[]}],
+                 "actions":[{"requirement_id":"r1","action_text":"查询我刚才创建的待办事项和提醒安排",
+                 "intent":"todo","todo_action":"create"}]}
+                """);
+
+        IntentPlan plan = recognizer.recognize("user", "查询我刚才创建的待办事项和提醒安排",
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals("todo", plan.actions().getFirst().route().intent());
+        assertEquals("list", plan.actions().getFirst().route().todoAction());
+    }
+
+    @Test
+    void todoQuerySurvivesRouterTimeout() {
+        IntentRecognizer recognizer = new IntentRecognizer(body -> {
+            throw new IllegalStateException("request timed out");
+        });
+
+        IntentPlan plan = recognizer.recognize("user", "查询我刚才创建的待办事项和提醒安排",
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals("todo", plan.actions().getFirst().route().intent());
+        assertEquals("list", plan.actions().getFirst().route().todoAction());
+    }
+
+    @Test
     void restoresFullBatchTodoWhenModelMistakesFirstTimedItemForCalendar() {
         String request = "新建以下待办事项：今晚 20:00 学习 Python 两小时；今晚 20:00 规划下周健身计划；"
                 + "明天上午 10:00 整理学习打卡记录。每条任务提前半小时提醒，后续每天帮我复盘。";

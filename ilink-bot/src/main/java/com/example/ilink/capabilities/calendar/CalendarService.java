@@ -122,6 +122,10 @@ public final class CalendarService {
         return store.findActive(userId, titleKeyword, day);
     }
 
+    public CalendarEvent findById(String eventId) {
+        return eventId == null || eventId.isBlank() ? null : store.get(eventId);
+    }
+
     public String completeById(String eventId) {
         CalendarEvent event = store.get(eventId);
         if (event == null || !"active".equals(event.status())) return "这条日历事件已经不存在或已结束。";

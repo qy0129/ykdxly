@@ -571,28 +571,53 @@ public final class UserRequestHandler {
 
     /** 查询和变更直接本地执行，只有创建动作进入独立待办规划模型。 */
     private void handleTodoAction(ReplyChannel client, String userId,
-                                  String text, String originalText) throws Exception {
+                                  String text, String originalText, IntentResult route) throws Exception {
         String normalized = text == null ? "" : text.trim();
         if (normalized.isBlank()) {
-            replySender.sendReply(client, userId, "请告诉我要创建、查看、完成还是删除待办。");
+            replySender.sendReply(client, userId, "请告诉我要创建、查询、完成、删除还是改期待办。");
             return;
         }
 
-        if (normalized.matches("^(查看|查询|列出|打开)?(我的)?待办(事项|列表)?$|^我还有什么待办.*")) {
-            replySender.sendReply(client, userId, todoService.list(userId));
+        String action = IntentPolicy.isExplicitTodoQuery(originalText)
+                ? "list" : resolveTodoAction(route.todoAction(), normalized);
+        if ("list".equals(action)) {
+            String reply = asksForRecentTodos(originalText)
+                    ? todoService.listRecentWithReminders(userId, sessions.getLastCreatedTodoIds(userId))
+                    : todoService.listWithReminders(userId);
+            replySender.sendReply(client, userId, reply);
             return;
         }
-        if (normalized.matches("^(完成|办完|搞定)(这个|最后一个|最新的)?待办.*")) {
+        if ("complete".equals(action)) {
             String keyword = normalized.replaceFirst("^(完成|办完|搞定)(这个|最后一个|最新的)?待办[：:，, ]*", "").trim();
             replySender.sendReply(client, userId, todoService.complete(userId, keyword));
             return;
         }
-        if (normalized.matches("^(取消|删除)(这个|最后一个|最新的)?待办.*")) {
-            String keyword = normalized.replaceFirst("^(取消|删除)(这个|最后一个|最新的)?待办[：:，, ]*", "").trim();
+        if ("delete".equals(action)) {
+            String keyword = normalized.replaceFirst("^(取消|删除|移除|作废|撤销)(这个|最后一个|最新的)?待办[：:，, ]*", "").trim();
             replySender.sendReply(client, userId, todoService.cancel(userId, keyword));
             return;
         }
-        createTodo(client, userId, normalized, originalText);
+        if ("reschedule".equals(action)) {
+            replySender.sendReply(client, userId, todoService.reschedule(userId, normalized));
+            return;
+        }
+        if ("create".equals(action)) {
+            createTodo(client, userId, normalized, originalText);
+            return;
+        }
+        replySender.sendReply(client, userId, "请告诉我是要创建、查询、完成、删除还是改期待办。");
+    }
+
+    static String resolveTodoAction(String routedAction, String text) {
+        String local = IntentPolicy.inferTodoAction(text);
+        if (!"unknown".equals(local)) return local;
+        String route = routedAction == null ? "" : routedAction.trim().toLowerCase(Locale.ROOT);
+        return Set.of("create", "list", "complete", "delete", "reschedule").contains(route)
+                ? route : "unknown";
+    }
+
+    private static boolean asksForRecentTodos(String text) {
+        return text != null && text.matches(".*(刚才|刚刚|上次|最近).*(待办事项|待办|任务清单).*" );
     }
 
     private boolean isExpressCommand(String text) {
@@ -758,6 +783,9 @@ public final class UserRequestHandler {
     private void sendTodoCreatedReply(ReplyChannel client, String userId,
                                       TodoConflictResolver.Resolution resolution) throws Exception {
         List<com.example.ilink.capabilities.planning.TodoItem> created = resolution.created();
+        if (!created.isEmpty()) {
+            sessions.setLastCreatedTodoIds(userId, created.stream().map(todo -> todo.id()).toList());
+        }
         StringBuilder reply = new StringBuilder("好，已经记到待办里了：");
         for (int index = 0; index < created.size(); index++) {
             var todo = created.get(index);
@@ -857,7 +885,7 @@ public final class UserRequestHandler {
         }
         java.util.regex.Matcher weatherMarker = WEATHER_MARKER.matcher(text);
         String locationText = weatherMarker.find() ? text.substring(0, weatherMarker.start()) : text;
-        return locationText.replaceFirst("^(请)?(帮我)?(查|查询|看看|看一下)?", "")
+        return locationText.replaceFirst("^(请)?(帮我)?(查询|查|看一下|看看)?", "")
                 .replaceFirst("^(我(?:现在|目前|当前)?在|当前位置是|我的位置是)\\s*", "")
                 .replaceAll("(今天|今日|明天|明日|后天|未来七天|未来7天)", "")
                 .replaceAll("(?:(?:\\d{4})年)?\\d{1,2}月\\d{1,2}(?:日|号)?", "")
@@ -900,6 +928,11 @@ public final class UserRequestHandler {
         publishActivity("执行流程：" + actionName, "workflow", "running", Map.of(
                 "intent", route.intent(), "action", actionName));
         try {
+            if (!"todo".equals(route.intent()) && handleMatchingTodoCompletion(client, userId, actionText)) {
+                publishActivity("流程完成：独立待办", "workflow", "success", Map.of(
+                        "intent", "todo", "action", "完成待办"));
+                return;
+            }
             switch (route.intent()) {
             case "chat" -> executeChatAction(context, actionText, route);
             case "draw" -> handleDraw(client, userId, actionText, route);
@@ -918,7 +951,7 @@ public final class UserRequestHandler {
             case "bilibili_search" -> searchBilibili(client, userId, route);
             case "media_lookup" -> lookupMedia(client, userId, actionText, route);
             case "email_query" -> queryEmail(client, userId, route);
-            case "todo" -> handleTodoAction(client, userId, actionText, originalText);
+            case "todo" -> handleTodoAction(client, userId, actionText, originalText, route);
             case "express_query" -> queryExpress(client, userId, actionText);
             case "news_search" -> searchNews(client, userId, actionText);
             case "web_search" -> searchWeb(client, userId, actionText);
@@ -964,6 +997,16 @@ public final class UserRequestHandler {
                     "intent", route.intent(), "action", actionName));
             throw error;
         }
+    }
+
+    /** 路由误判为长期计划或聊天时，以用户真实存在的独立待办为准。 */
+    private boolean handleMatchingTodoCompletion(ReplyChannel client, String userId, String text) throws Exception {
+        if (!IntentPolicy.isTodoCompletionReport(text)) return false;
+        TodoService.CompletionResult result = todoService.tryComplete(userId, text);
+        if (!result.matched()) return false;
+        System.out.println("[待办纠偏] 用户原话匹配到独立待办，优先记录完成情况");
+        replySender.sendReply(client, userId, result.reply());
+        return true;
     }
 
     private void executeChatAction(AgentContext context, String text, IntentResult route) throws Exception {
@@ -1183,6 +1226,7 @@ public final class UserRequestHandler {
 
     /** 路线动作已负责创建带导航链接的日历，去掉同一行程的重复日历动作。 */
     static IntentPlan coalesceDependentActions(IntentPlan plan) {
+        plan = coalesceWeatherAdvice(plan);
         IntentAction travel = plan.actions().stream()
                 .filter(action -> "travel_plan".equals(action.route().intent()))
                 .filter(action -> !action.route().travelDepartureTime().isBlank())
@@ -1232,12 +1276,53 @@ public final class UserRequestHandler {
         return new IntentPlan(result, plan.messageMode());
     }
 
+    private static IntentPlan coalesceWeatherAdvice(IntentPlan plan) {
+        IntentAction weather = plan.actions().stream()
+                .filter(action -> "weather".equals(action.route().intent()))
+                .findFirst().orElse(null);
+        if (weather == null) return plan;
+        List<IntentAction> advice = plan.actions().stream()
+                .filter(action -> "chat".equals(action.route().intent()))
+                .filter(action -> isWeatherAdviceRequest(action.requestText())).toList();
+        if (advice.isEmpty()) return plan;
+
+        Set<String> mergedIds = advice.stream().map(IntentAction::requirementId)
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        mergedIds.add(weather.requirementId());
+        List<String> dependencies = java.util.stream.Stream.concat(
+                        weather.dependsOn().stream(), advice.stream().flatMap(action -> action.dependsOn().stream()))
+                .filter(dependency -> !mergedIds.contains(dependency)).distinct().toList();
+        String request = java.util.stream.Stream.concat(java.util.stream.Stream.of(weather.requestText()),
+                        advice.stream().map(IntentAction::requestText))
+                .filter(value -> value != null && !value.isBlank()).collect(java.util.stream.Collectors.joining("；"));
+        IntentAction merged = new IntentAction(weather.requirementId(), request, dependencies, weather.route());
+
+        List<IntentAction> result = new ArrayList<>();
+        for (IntentAction action : plan.actions()) {
+            if (action == weather) {
+                result.add(merged);
+                continue;
+            }
+            if (advice.contains(action)) continue;
+            List<String> remapped = action.dependsOn().stream()
+                    .map(dependency -> mergedIds.contains(dependency) ? weather.requirementId() : dependency)
+                    .distinct().toList();
+            result.add(remapped.equals(action.dependsOn()) ? action
+                    : new IntentAction(action.requirementId(), action.requestText(), remapped, action.route()));
+        }
+        return new IntentPlan(result, plan.messageMode());
+    }
+
+    private static boolean isWeatherAdviceRequest(String text) {
+        if (text == null || text.isBlank()) return false;
+        return text.matches(".*(是否适合|适不适合|适合不适合|能不能).*(去|出行|户外|游玩|旅游|前往).*")
+                || text.matches(".*(判断|分析).*(适合).*(去|出行|户外|游玩|旅游|前往).*");
+    }
+
     private static boolean isTodoCreateAction(IntentAction action) {
         if (!"todo".equals(action.route().intent())) return false;
         String text = action.requestText() == null ? "" : action.requestText().trim();
-        return !text.matches("^(查看|查询|列出|打开)?(我的)?待办(事项|列表)?$|^我还有什么待办.*")
-                && !text.matches("^(完成|办完|搞定)(这个|最后一个|最新的)?待办.*")
-                && !text.matches("^(取消|删除)(这个|最后一个|最新的)?待办.*");
+        return "create".equals(resolveTodoAction(action.route().todoAction(), text));
     }
 
     /** 搜索哔哩哔哩内容；具体视频不可用时服务会返回官方搜索入口。 */
@@ -1475,9 +1560,35 @@ public final class UserRequestHandler {
                     route.replyMode(), route.voiceStyle());
             return;
         }
-        chatHistory.add(userId, userText, result.output());
+        String reply = result.output();
+        if (isWeatherAdviceRequest(userText)) {
+            reply += "\n\n出行建议：" + weatherSuitabilityAdvice(reply, userText);
+        }
+        chatHistory.add(userId, userText, reply);
         replySender.applyReplyMode(userId, route.replyMode());
-        replySender.sendReply(client, userId, result.output(), route.replyMode(), route.voiceStyle());
+        replySender.sendReply(client, userId, reply, route.replyMode(), route.voiceStyle());
+    }
+
+    private static String weatherSuitabilityAdvice(String weatherText, String requestText) {
+        String value = weatherText == null ? "" : weatherText;
+        String target = weatherAdviceTarget(requestText);
+        if (value.matches(".*(暴雨|大雨|雷暴|雷雨|台风|冰雹|暴雪|沙尘暴).*")) {
+            return "天气风险较高，不建议前往" + target + "。";
+        }
+        if (value.matches(".*(小雨|阵雨|中雨|雨夹雪|小雪|中雪|大风|雾|霾|高温).*")) {
+            return "可以前往" + target + "，但建议携带雨具或做好相应防护，并根据实时天气调整行程。";
+        }
+        return "从当前预报看总体适合前往" + target + "，出发前再确认一次实时天气即可。";
+    }
+
+    private static String weatherAdviceTarget(String requestText) {
+        if (requestText == null || requestText.isBlank()) return "该户外地点";
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("(?:去|前往)([^，。！？；,.!?;\\s吗呢吧]{1,20})")
+                .matcher(requestText);
+        if (!matcher.find()) return "该户外地点";
+        String target = matcher.group(1).replaceFirst("(游玩|旅游|旅行|出行)$", "");
+        return target.isBlank() ? "该户外地点" : target;
     }
 
     /** 处理用户对同名地点的序号选择或补充地点信息。 */

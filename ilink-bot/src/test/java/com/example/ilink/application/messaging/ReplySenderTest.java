@@ -42,6 +42,18 @@ class ReplySenderTest {
         assertEquals(1, channel.files.size());
     }
 
+    @Test
+    void sendsIdenticalRepliesForSeparateRequests() throws Exception {
+        ReplySender sender = new ReplySender(null, new MediaStore(), new AudioHistoryStore(),
+                new ToolManager(), new DefaultUserSessionStore(), null);
+        RecordingChannel channel = new RecordingChannel();
+
+        sender.sendReply(channel, "u1", "操作已完成");
+        sender.sendReply(channel, "u1", "操作已完成");
+
+        assertEquals(List.of("操作已完成", "操作已完成"), channel.texts);
+    }
+
     private static final class FakeSpeechTool implements Tool {
         private final ToolDefinition definition;
 
