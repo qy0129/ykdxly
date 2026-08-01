@@ -78,11 +78,6 @@ public final class ReplySender {
     public void sendReply(ReplyChannel client, String userId, String text,
                            String replyMode, String voiceStyle) throws Exception {
         String displayText = TextLinkFormatter.format(text);
-        if (isImmediateDuplicate(userId, displayText)) {
-            ConsoleLog.info("回复幂等", "跳过短时间内的相同回复，用户标识=" + userId);
-            pendingReplyModes.remove(userId);
-            return;
-        }
         String oneShotMode = pendingReplyModes.remove(userId);
         String requestedMode = replyMode == null || replyMode.isBlank() || "keep".equalsIgnoreCase(replyMode)
                 ? oneShotMode : replyMode;
@@ -217,9 +212,4 @@ public final class ReplySender {
         return userId == null ? "" : lastTextReplies.getOrDefault(userId, "");
     }
 
-    private boolean isImmediateDuplicate(String userId, String text) {
-        if (userId == null || text == null || text.isBlank()) return false;
-        return text.equals(lastTextReplies.get(userId))
-                && System.currentTimeMillis() - lastReplyTimes.getOrDefault(userId, 0L) < 3_000;
-    }
 }

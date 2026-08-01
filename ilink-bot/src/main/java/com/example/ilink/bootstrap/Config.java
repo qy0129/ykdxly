@@ -50,6 +50,8 @@ public class Config {
             Long.parseLong(loadProperty("request.timeout.seconds", "180")));
     public static final Duration ROUTER_REQ_TIMEOUT = Duration.ofSeconds(
             Long.parseLong(loadProperty("router.request.timeout.seconds", "30")));
+    public static final Duration ROUTER_TOTAL_TIMEOUT = Duration.ofSeconds(
+            Long.parseLong(loadProperty("router.total.timeout.seconds", "35")));
     public static final int ROUTER_MAX_TOKENS = Integer.parseInt(
             loadProperty("router.max_tokens", "1800"));
     public static final Duration TODO_PLANNER_REQ_TIMEOUT = Duration.ofSeconds(

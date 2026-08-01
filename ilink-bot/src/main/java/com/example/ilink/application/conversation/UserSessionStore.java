@@ -74,6 +74,10 @@ public interface UserSessionStore {
 
     void clearPendingTodoConflict(String userId);
 
+    void setLastCreatedTodoIds(String userId, List<String> todoIds);
+
+    List<String> getLastCreatedTodoIds(String userId);
+
     void setPendingWeatherLocations(String userId, List<WeatherLocation> locations, String weatherDay);
 
     List<WeatherLocation> getPendingWeatherLocations(String userId);
@@ -85,6 +89,8 @@ public interface UserSessionStore {
     void clearPendingWeatherLocations(String userId);
 
     void setCurrentLocation(String userId, String location);
+
+    void clearCurrentLocation(String userId);
 
     String getCurrentLocation(String userId);
 
@@ -125,6 +131,12 @@ public interface UserSessionStore {
     record PendingFileExport(String userText, IntentResult route, long expiresAtMillis) { }
 
     record PendingExpressState(String stage, String referenceNo) { }
+
+    record RecentTodoBatch(List<String> todoIds, long expiresAtMillis) {
+        public RecentTodoBatch {
+            todoIds = todoIds == null ? List.of() : List.copyOf(todoIds);
+        }
+    }
 
     static String extractCity(String location) {
         if (location == null || location.isBlank()) return "";

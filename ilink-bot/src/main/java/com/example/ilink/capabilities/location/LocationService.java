@@ -18,13 +18,14 @@ import java.util.function.BiConsumer;
 public final class LocationService {
 
     private static final String PRECISE_LOCATION_KEY = "precise_location";
+    private static final long PRECISE_LOCATION_TTL_MILLIS = 30L * 60 * 1000;
 
     private final AmapService amapService;
     private final UserSessionStore sessions;
     private final LocationLinkParser linkParser;
     private final Clock clock;
     private final Map<String, PendingLocation> pending = new ConcurrentHashMap<>();
-    private final Map<String, AmapService.Place> currentPlaces = new ConcurrentHashMap<>();
+    private final Map<String, StoredPlace> currentPlaces = new ConcurrentHashMap<>();
     private final MySqlStore database = MySqlStore.getInstance();
     private final Gson gson = new Gson();
     private volatile String baseUrl = "";
@@ -123,21 +124,13 @@ public final class LocationService {
     /** 返回本进程内由 GPS 或地图链接确认过的精确坐标。 */
     public AmapService.Place currentPlace(String userId) {
         if (userId == null || userId.isBlank()) return null;
-        AmapService.Place cached = currentPlaces.get(userId);
-        if (cached != null) return cached;
+        StoredPlace cached = currentPlaces.get(userId);
+        if (cached != null) return restoreCurrentPlace(userId, cached);
         String value = database.loadUserState(userId, PRECISE_LOCATION_KEY);
         if (value.isBlank()) return null;
         try {
             StoredPlace stored = gson.fromJson(value, StoredPlace.class);
-            if (stored == null || stored.name() == null || stored.longitude() == null || stored.latitude() == null
-                    || stored.name().isBlank() || stored.longitude().isBlank() || stored.latitude().isBlank()) {
-                database.deleteUserState(userId, PRECISE_LOCATION_KEY);
-                return null;
-            }
-            AmapService.Place restored = new AmapService.Place(
-                    stored.name(), stored.longitude(), stored.latitude());
-            currentPlaces.put(userId, restored);
-            return restored;
+            return restoreCurrentPlace(userId, stored);
         } catch (RuntimeException error) {
             database.deleteUserState(userId, PRECISE_LOCATION_KEY);
             return null;
@@ -146,9 +139,10 @@ public final class LocationService {
 
     private LocationUpdate save(String userId, AmapService.Place place, boolean notify) {
         sessions.setCurrentLocation(userId, place.name());
-        currentPlaces.put(userId, place);
+        StoredPlace stored = new StoredPlace(place.name(), place.longitude(), place.latitude(), clock.millis());
+        currentPlaces.put(userId, stored);
         database.saveUserState(userId, PRECISE_LOCATION_KEY,
-                gson.toJson(new StoredPlace(place.name(), place.longitude(), place.latitude())));
+                gson.toJson(stored));
         LocationUpdate update = new LocationUpdate(userId, place.name(),
                 Double.parseDouble(place.longitude()), Double.parseDouble(place.latitude()));
         if (notify) {
@@ -167,6 +161,23 @@ public final class LocationService {
         pending.entrySet().removeIf(entry -> entry.getValue().expiresAtMillis() <= now);
     }
 
+    private AmapService.Place restoreCurrentPlace(String userId, StoredPlace stored) {
+        long now = clock.millis();
+        if (stored == null || stored.name() == null || stored.longitude() == null || stored.latitude() == null
+                || stored.name().isBlank() || stored.longitude().isBlank() || stored.latitude().isBlank()
+                || stored.savedAtMillis() <= 0 || stored.savedAtMillis() > now
+                || now - stored.savedAtMillis() > PRECISE_LOCATION_TTL_MILLIS) {
+            currentPlaces.remove(userId);
+            if (stored != null && stored.name() != null && stored.name().equals(sessions.getCurrentLocation(userId))) {
+                sessions.clearCurrentLocation(userId);
+            }
+            database.deleteUserState(userId, PRECISE_LOCATION_KEY);
+            return null;
+        }
+        currentPlaces.put(userId, stored);
+        return new AmapService.Place(stored.name(), stored.longitude(), stored.latitude());
+    }
+
     private void validateCoordinate(double longitude, double latitude) {
         if (!Double.isFinite(longitude) || !Double.isFinite(latitude)
                 || longitude < -180 || longitude > 180 || latitude < -90 || latitude > 90) {
@@ -176,7 +187,7 @@ public final class LocationService {
 
     private record PendingLocation(String userId, long expiresAtMillis) { }
 
-    private record StoredPlace(String name, String longitude, String latitude) { }
+    private record StoredPlace(String name, String longitude, String latitude, long savedAtMillis) { }
 
     public record LocationUpdate(String userId, String address, double longitude, double latitude) { }
 

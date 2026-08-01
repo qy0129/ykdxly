@@ -54,6 +54,7 @@ public final class IntentPolicy {
                     + "|^.+(?:加入|添加到|记到|放进|放入)\\s*(?:我的)?(?:待办事项|待办|任务清单)"
                     + "[。！!\\s]*$",
             Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+    private static final Pattern TODO_OBJECT = Pattern.compile("(?:待办事项|待办|任务清单)");
 
     private IntentPolicy() {
     }
@@ -80,6 +81,41 @@ public final class IntentPolicy {
         if (value.endsWith("?") || value.endsWith("？")
                 || value.matches("^(如何|怎么|怎样|为什么).*")) return false;
         return TODO_CREATION.matcher(value).find();
+    }
+
+    /** 明确的待办查询必须覆盖带“刚才创建”“提醒安排”等修饰语的自然表达。 */
+    public static boolean isExplicitTodoQuery(String text) {
+        if (text == null || text.isBlank()) return false;
+        String value = text.trim();
+        if (!TODO_OBJECT.matcher(value).find() || value.matches(".*(如何|怎么|怎样|为什么).*")) return false;
+        return value.matches("^(?:(?:请|麻烦)?(?:帮我|给我)?\\s*)?"
+                + "(?:查询|查看|列出|打开|看看|显示|告诉我|我还有|有哪些|有什么|还有什么).*" )
+                || value.matches(".*(?:待办事项|待办|任务清单).*(?:有哪些|有什么)[。！？!?\\s]*$");
+    }
+
+    public static String inferTodoAction(String text) {
+        if (isExplicitTodoQuery(text)) return "list";
+        if (isTodoCompletionReport(text)) return "complete";
+        if (text != null && text.trim().matches("^(完成|办完|搞定).*?(待办事项|待办|任务).*")) return "complete";
+        if (text != null && text.trim().matches("^(取消|删除|移除|作废|撤销).*?(待办事项|待办|任务).*")) return "delete";
+        if (text != null && (text.trim().matches("^(改期|延期|推迟|调整|修改).*?(待办事项|待办|任务).*")
+                || text.trim().matches("^(把|将).*?(待办事项|待办|任务).*(改到|改为|延期到|推迟到|调整到|修改到).*"))) {
+            return "reschedule";
+        }
+        return isExplicitTodoCreation(text) ? "create" : "unknown";
+    }
+
+    /** 用户在汇报某个具体事项已经完成，而不是询问如何完成。 */
+    public static boolean isTodoCompletionReport(String text) {
+        if (text == null || text.isBlank()) return false;
+        String value = text.trim();
+        if (value.matches("^(如何|怎么|怎样|为什么).*")) return false;
+        if (value.matches(".*(?:未|没|没有|还没|尚未|无法|不能)(?:能)?(?:完成|做完|办完|搞定).*") ) return false;
+        String assertion = value.replace("完成情况", "").replace("完成状态", "");
+        boolean completion = assertion.matches(".*(?:已经|已|刚刚|刚才)?(?:完成|做完|办完|搞定)(?:了)?.*")
+                || assertion.matches(".*(?:待办|任务|事项).*(?:完成|做完|办完|搞定)(?:了)?.*");
+        boolean concreteTask = value.matches(".*(?:待办|任务|事项).*" );
+        return completion && concreteTask;
     }
 
     /** 用户是否明确要求创建视觉内容。 */
@@ -146,11 +182,12 @@ public final class IntentPolicy {
 
     /** 打车属于明确执行请求；目的地缺失由打车工作流补充。 */
     public static boolean isExplicitTaxiRequest(String text) {
-        return text != null && text.matches(".*(帮我打车|帮我叫车|叫个车|打车去|叫车去|叫网约车).*");
+        return text != null && text.matches(".*(帮我打车|帮我叫车|叫个车|打车去|叫车去|叫网约车|叫滴滴|滴滴打车|网约车去).*");
     }
 
     /** 返回确定性业务路由；空字符串表示应继续走模型或最终聊天兜底。 */
     public static String explicitBusinessIntent(String text) {
+        if (isExplicitTodoQuery(text)) return "todo";
         if (isExplicitFoodOrderRequest(text)) return "food_order";
         if (isExplicitNewsSearch(text)) return "news_search";
         if (isExplicitWeatherQuery(text)) return "weather";

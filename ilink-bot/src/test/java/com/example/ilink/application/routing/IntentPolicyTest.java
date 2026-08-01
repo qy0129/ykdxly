@@ -69,6 +69,17 @@ class IntentPolicyTest {
     }
 
     @Test
+    void completionReportIsRecognizedAsTodoCompletionCandidate() {
+        String report = "我已经完成今晚的 Python 学习任务，帮我记录完成情况。";
+
+        assertTrue(IntentPolicy.isTodoCompletionReport(report));
+        assertEquals("complete", IntentPolicy.inferTodoAction(report));
+        assertFalse(IntentPolicy.isTodoCompletionReport("如何完成今晚的 Python 学习任务？"));
+        assertFalse(IntentPolicy.isTodoCompletionReport("我还没完成今晚的 Python 学习任务。"));
+        assertFalse(IntentPolicy.isTodoCompletionReport("查询今晚任务的完成情况。"));
+    }
+
+    @Test
     void wrongFileIntentIsCorrectedToDraw() throws Exception {
         IntentRecognizer recognizer = new IntentRecognizer(HttpClient.newHttpClient());
         JsonObject action = new JsonObject();
@@ -313,6 +324,19 @@ class IntentPolicyTest {
     }
 
     @Test
+    void taxiDestinationSurvivesModelFailure() {
+        IntentRecognizer recognizer = new IntentRecognizer(body -> {
+            throw new IllegalStateException("model unavailable");
+        });
+
+        IntentPlan plan = recognizer.recognize("user", "帮我打车去杭州东站",
+                new IntentContext(false, false, false, false, false));
+
+        assertEquals("taxi_trip", plan.actions().getFirst().route().intent());
+        assertEquals("杭州东站", plan.actions().getFirst().route().travelDestination());
+    }
+
+    @Test
     void businessActionWinsOverModelChatMode() {
         IntentRecognizer recognizer = new IntentRecognizer(body -> """
                 {"message_mode":"chat","requirements":[{"id":"r1","text":"帮我点外卖","depends_on":[]}],
@@ -339,5 +363,15 @@ class IntentPolicyTest {
 
         assertEquals("food_order", plan.actions().getFirst().route().intent());
         assertEquals("麦当劳", plan.actions().getFirst().route().foodOrderRestaurants());
+    }
+
+    @Test
+    void identifiesNaturalTodoQueriesWithoutTreatingThemAsCreation() {
+        String request = "查询我刚才创建的待办事项和提醒安排。";
+
+        assertTrue(IntentPolicy.isExplicitTodoQuery(request));
+        assertEquals("list", IntentPolicy.inferTodoAction(request));
+        assertFalse(IntentPolicy.isExplicitTodoCreation(request));
+        assertFalse(IntentPolicy.isExplicitTodoQuery("新建待办事项并设置提醒安排"));
     }
 }

@@ -72,6 +72,46 @@ public final class TodoService {
         return text.toString().trim();
     }
 
+    public String listWithReminders(String userId) {
+        return formatWithReminders(activeItems(userId), "你的待办和提醒安排：");
+    }
+
+    public String listRecentWithReminders(String userId, List<String> todoIds) {
+        if (todoIds == null || todoIds.isEmpty()) return "当前没有可查询的最近一批待办。";
+        List<TodoItem> all = items(userId);
+        List<TodoItem> recent = new ArrayList<>();
+        for (String todoId : todoIds) {
+            all.stream().filter(todo -> todo.id().equals(todoId)).findFirst().ifPresent(recent::add);
+        }
+        return formatWithReminders(recent, "你刚才创建的待办和提醒安排：");
+    }
+
+    private String formatWithReminders(List<TodoItem> todos, String heading) {
+        if (todos.isEmpty()) return "你目前没有待完成事项。";
+        StringBuilder text = new StringBuilder(heading);
+        for (int index = 0; index < todos.size(); index++) {
+            TodoItem todo = todos.get(index);
+            CalendarEvent event = todo.calendarEventId().isBlank()
+                    ? null : calendarService.findById(todo.calendarEventId());
+            text.append('\n').append(index + 1).append(". ").append(todo.title())
+                    .append("\n   截止时间：")
+                    .append(todo.dueAt() == null ? "未设置" : todo.dueAt().format(DISPLAY_TIME))
+                    .append("\n   提醒时间：")
+                    .append(event == null || event.nextReminderAt() == null
+                            ? "未设置" : event.nextReminderAt().format(DISPLAY_TIME))
+                    .append("\n   状态：").append(statusLabel(todo.status()));
+        }
+        return text.toString();
+    }
+
+    private static String statusLabel(String status) {
+        return switch (status) {
+            case "completed" -> "已完成";
+            case "cancelled" -> "已取消";
+            default -> "待完成";
+        };
+    }
+
     /** 返回用户全部待办记录，供日报页面计算完成进度。 */
     public List<TodoItem> items(String userId) {
         return store.list(userId);
@@ -98,6 +138,30 @@ public final class TodoService {
         return updated;
     }
 
+    public String reschedule(String userId, String request) {
+        LocalDateTime dueAt = DateTimeParser.applyPeriodDefault(request, DateTimeParser.parse(request));
+        if (dueAt == null) return "请告诉我新的待办时间。";
+        String keyword = rescheduleTitle(request);
+        TodoItem todo = store.list(userId).stream()
+                .filter(item -> "pending".equals(item.status()))
+                .filter(item -> keyword.isBlank()
+                        || TodoSelection.normalizeForMatch(item.title()).contains(keyword))
+                .findFirst().orElse(null);
+        if (todo == null) return "当前没有找到需要改期的待办。";
+        TodoItem updated = reschedule(userId, todo.id(), dueAt);
+        return updated == null ? "待办改期失败。"
+                : "已将待办“" + updated.title() + "”改期到 " + dueAt.format(DISPLAY_TIME) + "。";
+    }
+
+    private static String rescheduleTitle(String request) {
+        if (request == null) return "";
+        String value = request.trim()
+                .replaceFirst("^(?:(?:请|麻烦|帮我|帮忙|请你|把|将|改期|延期|推迟|调整|修改)\\s*)+", "");
+        value = value.split("(?:改到|改为|延期到|推迟到|调整到|修改到|到(?=(?:今天|明天|后天|今晚|明晚|周|星期|\\d)))", 2)[0];
+        value = value.replaceFirst("(?:待办事项|待办|事项|任务)$", "").trim();
+        return TodoSelection.normalizeForMatch(value);
+    }
+
     /** 按稳定 ID 完成待办，避免网页上存在同名事项时误操作。 */
     public boolean completeById(String userId, String todoId) {
         TodoItem todo = store.list(userId).stream()
@@ -114,11 +178,26 @@ public final class TodoService {
     }
 
     public String complete(String userId, String keyword) {
-        TodoItem todo = findActive(userId, keyword);
-        if (todo == null) return "当前没有可以完成的待办。";
+        CompletionResult result = tryComplete(userId, keyword);
+        return result.matched() ? result.reply() : "当前没有可以完成的待办。";
+    }
+
+    /** 按用户原话匹配并完成独立待办；未匹配时允许执行层继续尝试长期计划任务。 */
+    public CompletionResult tryComplete(String userId, String request) {
+        List<TodoItem> matches = findActiveMatches(userId, request);
+        if (matches.isEmpty()) return new CompletionResult(false, "");
+        if (matches.size() > 1) {
+            StringBuilder reply = new StringBuilder("找到多个符合条件的待办，请说明要完成哪一个：");
+            for (TodoItem todo : matches) {
+                reply.append("\n- ").append(todo.title());
+                if (todo.dueAt() != null) reply.append("（").append(todo.dueAt().format(DISPLAY_TIME)).append("）");
+            }
+            return new CompletionResult(true, reply.toString());
+        }
+        TodoItem todo = matches.getFirst();
         store.save(todo.withStatus("completed"));
         if (!todo.calendarEventId().isBlank()) calendarService.complete(todo.calendarEventId());
-        return "已完成待办：" + todo.title();
+        return new CompletionResult(true, "已记录完成：" + todo.title());
     }
 
     public String cancelLatest(String userId) {
@@ -135,11 +214,22 @@ public final class TodoService {
 
     private TodoItem findActive(String userId, String keyword) {
         if (keyword == null || keyword.isBlank()) return store.latestActive(userId);
-        TodoSelection selection = TodoSelection.from(keyword);
+        return findActiveMatches(userId, keyword).stream().findFirst().orElse(null);
+    }
+
+    private List<TodoItem> findActiveMatches(String userId, String request) {
+        if (request == null || request.isBlank()) {
+            TodoItem latest = store.latestActive(userId);
+            return latest == null ? List.of() : List.of(latest);
+        }
+        TodoSelection selection = TodoSelection.from(request);
         return store.list(userId).stream()
                 .filter(todo -> "pending".equals(todo.status()))
                 .filter(todo -> selection.matches(todo))
-                .findFirst().orElse(null);
+                .toList();
+    }
+
+    public record CompletionResult(boolean matched, String reply) {
     }
 
     /** 将自然语言中的操作词、时间限定和待办标题拆开，避免把整句话当成标题匹配。 */
@@ -159,17 +249,30 @@ public final class TodoService {
             }
             if (!timeWindow.matches(todo.dueAt())) return false;
             String title = normalizeForMatch(todo.title());
-            return titleKeyword.isBlank() || title.contains(titleKeyword) || titleKeyword.contains(title);
+            if (titleKeyword.isBlank() || title.contains(titleKeyword) || titleKeyword.contains(title)) return true;
+            String requestCore = semanticCore(titleKeyword);
+            String titleCore = semanticCore(title);
+            return !requestCore.isBlank() && !titleCore.isBlank()
+                    && (titleCore.contains(requestCore) || requestCore.contains(titleCore));
         }
 
         private static String normalizeTitle(String request) {
-            String value = request.replaceFirst("^(?:(?:请|麻烦|帮我|帮忙|请你|我要|我想|把|将|删除|取消|移除|作废|撤销)\\s*)+", "");
+            String value = request.replaceFirst(
+                    "^(?:(?:请|麻烦|帮我|帮忙|请你|我要|我想|我(?:已经|已|刚刚|刚才)?|已经|已|把|将|删除|取消|移除|作废|撤销|改期|延期|推迟|调整|修改|完成|做完|办完|搞定)\\s*)+",
+                    "");
+            value = value.replaceFirst("^(?:完成|做完|办完|搞定)(?:了)?\\s*", "");
+            value = value.replaceFirst("[，,；;]?\\s*(?:请)?(?:帮我|替我)?(?:记录|登记|更新|标记)(?:一下)?(?:这次|本次|它的|该任务的|我的)?(?:完成情况|完成状态|状态)(?:[。！？!?]\\s*)?$", "");
             value = DATE_QUALIFIER.matcher(value).replaceAll("");
             value = value.replaceAll("(?:凌晨|早上|上午|中午|下午|晚上|傍晚)", "");
             value = CLOCK_TIME.matcher(value).replaceAll("");
             value = value.replaceFirst("(?:待办事项|待办|事项|任务)(?:[。！？!?，,；;]\\s*)?$", "");
             value = value.replaceFirst("^(?:的|这条|那个|这个|该|一条)\\s*", "");
             return normalizeForMatch(value);
+        }
+
+        private static String semanticCore(String value) {
+            return value.replaceAll("(?:学习|课程|任务|待办|事项|计划|工作)", "")
+                    .replaceAll("(?:[零一二三四五六七八九十两\\d]+)(?:个)?(?:小时|分钟)", "");
         }
 
         private static String normalizeForMatch(String value) {

@@ -135,10 +135,10 @@ public final class RoutingGuideCatalog {
                 "仅要一份普通项目计划、问今天该学什么、反馈已完成任务或临时创建学习待办。",
                 "是否存在持续学习周期和每日学习闭环是关键；没有这些特征时优先 task_plan 或 todo。",
                 "“零基础学 Python，三个月，每天一小时并监督我”→study_plan；“今晚学习 Python 两小时”→todo。");
-        add(specs, "life_task_update", "planning", "用户反馈现有计划任务已完成、部分完成、延期、没做完、不会、卡住，并希望同步状态或重排。",
+        add(specs, "life_task_update", "planning", "用户反馈现有长期计划中的阶段任务、编号任务或今日课程已完成、部分完成、延期、没做完、不会、卡住，并希望同步状态或重排。",
                 "创建新计划、查询进度、单纯讨论困难或完成独立待办。",
-                "它更新的是已存在的长期计划任务；todo 的完成和删除仍由 todo 处理。",
-                "“今天的第三个学习任务完成了”→life_task_update；“完成买牛奶这个待办”→todo。");
+                "它只更新长期计划内部任务。句子带‘学习任务’并不代表长期计划：若包含明确日期、时段或具体事项，且是在汇报此前创建的独立待办，应选择 todo/complete。只有用户明确说‘计划里的’‘第几个任务’‘今日课程’，或上下文正在讨论某份长期计划时，才选择 life_task_update。",
+                "“今天的第三个学习任务完成了”→life_task_update；“我已经完成今晚的 Python 学习任务，帮我记录完成情况”→todo/complete；“完成买牛奶这个待办”→todo/complete。");
         add(specs, "life_plan_list", "planning", "用户要求查看全部长期计划、有哪些计划或当前正在使用哪份计划。",
                 "只查单个计划的完成比例，或希望切换到某一份计划。",
                 "列表回答范围是全部计划；plan_progress 关注执行进度；life_plan_select 会改变当前选中计划。",
@@ -177,8 +177,8 @@ public final class RoutingGuideCatalog {
                 "“明天九点提醒我开会”→calendar_event；“明天完成周报”→todo。");
         add(specs, "todo", "planning", "用户要创建、查看、完成、删除、改期独立待办，或一次输入多条待办及共用提醒设置。",
                 "要求创建明确日历事件、制定完整计划、更新长期计划任务或只讨论任务内容。",
-                "todo 可有截止时间和提醒，但核心是事项管理；calendar_event 的核心是日程提醒；批量待办只生成一个 todo action。",
-                "“新建三条待办，明天十点交周报”→todo；“明天十点开会提醒我”→calendar_event。");
+                "todo 可有截止时间和提醒，但核心是事项管理；必须用 todo_action 区分 create、list、complete、delete、reschedule；批量待办只生成一个 todo action。",
+                "“新建三条待办，明天十点交周报”→todo/create；“查询刚才创建的待办和提醒安排”→todo/list；“明天十点开会提醒我”→calendar_event。");
         add(specs, "planning_capabilities", "planning", "用户询问系统能做哪些规划、待办、学习计划、提醒或复盘能力。",
                 "用户已经提出具体计划、提醒或待办执行要求。",
                 "这是能力说明，不应替代实际业务能力；一旦有明确操作对象，应选对应 intent。",

@@ -181,6 +181,10 @@ public final class RoutePromptBuilder {
                 - 打车用taxi_trip；一般路线/导航用travel_plan；指定品牌点外卖用food_order；附近餐厅搜索用nearby_food。
                 - 创建提醒用calendar_event/create。费用预估、总价、算术和换算用calculator，并把完整表达保留在action_text。
                 - weather_day使用today|tomorrow|today_morning|today_afternoon|today_evening|tomorrow_morning|tomorrow_afternoon|tomorrow_evening。
+                - “查询天气，并判断是否适合去某地/出行/户外活动”是一个weather动作：action_text保留完整判断要求，
+                  不得额外拆出chat；天气能力的结果应同时给出天气事实和基于天气的出行建议。
+                - todo必须填写todo_action=create|list|complete|delete|reschedule。查询、查看、列出、有哪些、
+                  “刚才/刚刚/上次创建的待办和提醒安排”都使用todo/list，绝不能使用create。
                 - 回复方式reply_mode使用keep|text|voice|both；voice_style使用default|boy|girl|male|female|warm|lively。
                 - 用户没有明确生成图片时不能选择draw；格式转换属于document_edit，不属于generate_file。
                 - document_summary用于总结当前文件；document_question用于基于当前文件回答问题。
@@ -191,7 +195,7 @@ public final class RoutePromptBuilder {
                 - 只添加当前能力实际需要的参数；未使用字段必须省略，禁止输出大批空字符串、0、空数组或none占位。
                 - reply_mode、voice_style仅在用户明确要求改变回复方式时输出。
                 - 常用可选参数：图片=en_prompt,cn_description,image_size,image_action,image_prompt；
-                  文档=document_action,output_file_type；天气=weather_location,weather_day；
+                  文档=document_action,output_file_type；天气=weather_location,weather_day；待办=todo_action；
                   计划=plan_goal,plan_deadline,plan_available_time；
                   行程=travel_origin,travel_destination,travel_stops,origin_city,destination_city,travel_departure_time；
                   日历=calendar_action,calendar_title,calendar_time,calendar_recurrence,calendar_reminder_minutes,

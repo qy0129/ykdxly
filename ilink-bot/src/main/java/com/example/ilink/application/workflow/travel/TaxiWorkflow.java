@@ -11,7 +11,6 @@ import com.example.ilink.application.routing.IntentResult;
 import com.example.ilink.application.conversation.UserSessionStore;
 import com.example.ilink.platform.persistence.MySqlStore;
 import com.google.gson.Gson;
-import com.google.gson.JsonSyntaxException;
 
 import java.util.List;
 import java.util.Map;
@@ -80,6 +79,9 @@ public final class TaxiWorkflow {
         }
         boolean explicitOrigin = !trim(route.travelOrigin()).isBlank();
         AmapService.Place preciseOrigin = explicitOrigin ? null : currentPreciseLocation(userId);
+        OriginSource originSource = explicitOrigin ? OriginSource.EXPLICIT
+                : (preciseOrigin != null || !resolveOrigin(userId, route.travelOrigin()).isBlank()
+                ? OriginSource.CURRENT_LOCATION : OriginSource.UNKNOWN);
         String origin = preciseOrigin == null
                 ? resolveOrigin(userId, route.travelOrigin())
                 : trim(preciseOrigin.name());
@@ -95,7 +97,7 @@ public final class TaxiWorkflow {
             }
         }
         if (!origin.isBlank() && !destination.isBlank()) {
-            start(client, userId, origin, destination, originCity, destinationCity, preciseOrigin);
+            start(client, userId, origin, destination, originCity, destinationCity, preciseOrigin, originSource);
             return;
         }
         handleOrderCommand(client, userId, requestText);
@@ -125,18 +127,19 @@ public final class TaxiWorkflow {
     }
 
     public void handlePending(ReplyChannel client, String userId, String text) throws Exception {
-        PendingTaxi pending = pendingTaxi(userId);
-        if (pending == null) return;
-        String answer = trim(text);
-        if ("取消".equals(answer)) {
-            clear(userId);
-            replySender.sendReply(client, userId, "已取消本次滴滴叫车流程。");
-            return;
-        }
         try {
+            PendingTaxi pending = pendingTaxi(userId);
+            if (pending == null) return;
+            String answer = trim(text);
+            if ("取消".equals(answer)) {
+                clear(userId);
+                replySender.sendReply(client, userId, "已取消本次滴滴叫车流程。");
+                return;
+            }
             switch (pending.stage()) {
                 case CITY -> start(client, userId, pending.origin(), pending.destination(), answer, answer,
-                        currentPreciseLocation(userId));
+                        pending.originSource() == OriginSource.CURRENT_LOCATION
+                                ? currentPreciseLocation(userId) : null, pending.originSource());
                 case ORIGIN_SELECTION -> selectOrigin(client, userId, pending, answer);
                 case DESTINATION_SELECTION -> selectDestination(client, userId, pending, answer);
                 case CONFIRM_ORDER -> createOrder(client, userId, pending, answer);
@@ -145,8 +148,9 @@ public final class TaxiWorkflow {
             }
         } catch (Exception error) {
             System.err.println("[Taxi] Pending workflow failed: " + error.getMessage());
+            clear(userId);
             replySender.sendReply(client, userId,
-                    "叫车服务暂时无法识别这次补充。请重新发送完整的出发地和目的地，或回复“取消”。");
+                    "叫车服务暂时不可用，已结束本次流程。请稍后重新发送完整的出发地和目的地。");
         }
     }
 
@@ -160,15 +164,16 @@ public final class TaxiWorkflow {
 
     private void start(ReplyChannel client, String userId, String origin, String destination,
                        String originCity, String destinationCity) throws Exception {
-        start(client, userId, origin, destination, originCity, destinationCity, null);
+        start(client, userId, origin, destination, originCity, destinationCity, null, OriginSource.EXPLICIT);
     }
 
     private void start(ReplyChannel client, String userId, String origin, String destination,
-                       String originCity, String destinationCity, AmapService.Place preciseOrigin) throws Exception {
+                       String originCity, String destinationCity, AmapService.Place preciseOrigin,
+                       OriginSource originSource) throws Exception {
         String fromCity = city(originCity);
         String toCity = city(destinationCity);
         if (fromCity.isBlank() && toCity.isBlank()) {
-            save(userId, PendingTaxi.city(origin, destination));
+            save(userId, PendingTaxi.city(origin, destination, originSource));
             replySender.sendReply(client, userId, "请补充出发城市，例如“杭州市”。");
             return;
         }
@@ -180,7 +185,7 @@ public final class TaxiWorkflow {
                         preciseOrigin.name(), "", preciseOrigin.name(), fromCity,
                         preciseOrigin.longitude(), preciseOrigin.latitude()));
         if (originCandidates.isEmpty()) {
-            save(userId, PendingTaxi.city(origin, destination));
+            save(userId, PendingTaxi.city(origin, destination, originSource));
             replySender.sendReply(client, userId, "没有找到出发地“" + origin + "”，请补充更完整的地点或城市。");
             return;
         }
@@ -331,27 +336,43 @@ public final class TaxiWorkflow {
         if (userId == null || userId.isBlank()) return null;
         if (loadedUsers.add(userId)) {
             String value = database.loadUserState(userId, PENDING_KEY);
-            if (!value.isBlank()) try {
+            if (value != null && !value.isBlank()) try {
                 TaxiState state = gson.fromJson(value, TaxiState.class);
-                if (state != null && state.expiresAtMillis() > System.currentTimeMillis()) pendingTaxis.put(userId, state.pending());
+                if (isUsable(state)) pendingTaxis.put(userId, state.pending());
                 else database.deleteUserState(userId, PENDING_KEY);
-            } catch (JsonSyntaxException error) { database.deleteUserState(userId, PENDING_KEY); }
+            } catch (RuntimeException error) { database.deleteUserState(userId, PENDING_KEY); }
         }
         return pendingTaxis.get(userId);
+    }
+    private boolean isUsable(TaxiState state) {
+        if (state == null || state.pending() == null || state.pending().stage() == null
+                || state.expiresAtMillis() <= System.currentTimeMillis()) return false;
+        PendingTaxi pending = state.pending();
+        return switch (pending.stage()) {
+            case CITY -> !trim(pending.destination()).isBlank();
+            case ORIGIN_SELECTION -> pending.candidates() != null && !pending.candidates().isEmpty();
+            case DESTINATION_SELECTION -> pending.from() != null && pending.candidates() != null && !pending.candidates().isEmpty();
+            case CONFIRM_ORDER -> pending.from() != null && pending.to() != null && !trim(pending.traceId()).isBlank()
+                    && pending.items() != null && !pending.items().isEmpty();
+            case CONFIRM_CANCEL, ACTIVE_ORDER -> pending.from() != null && pending.to() != null;
+        };
     }
     private void clear(String userId) { loadedUsers.add(userId); pendingTaxis.remove(userId); database.deleteUserState(userId, PENDING_KEY); }
 
     private enum Stage { CITY, ORIGIN_SELECTION, DESTINATION_SELECTION, CONFIRM_ORDER, CONFIRM_CANCEL, ACTIVE_ORDER }
+    private enum OriginSource { EXPLICIT, CURRENT_LOCATION, UNKNOWN }
     private record PendingTaxi(Stage stage, String origin, String destination, String originCity, String destinationCity,
                                List<DidiMcpClient.Place> candidates, DidiMcpClient.Place from, DidiMcpClient.Place to,
-                               String traceId, List<DidiMcpClient.EstimateItem> items, String orderId) {
-        static PendingTaxi city(String origin, String destination) { return new PendingTaxi(Stage.CITY, origin, destination, "", "", List.of(), null, null, "", List.of(), ""); }
-        static PendingTaxi originChoices(String origin, String destination, String originCity, String destinationCity, List<DidiMcpClient.Place> values) { return new PendingTaxi(Stage.ORIGIN_SELECTION, origin, destination, originCity, destinationCity, List.copyOf(values), null, null, "", List.of(), ""); }
-        static PendingTaxi destinationChoices(String origin, String destination, String originCity, String destinationCity, DidiMcpClient.Place from, List<DidiMcpClient.Place> values) { return new PendingTaxi(Stage.DESTINATION_SELECTION, origin, destination, originCity, destinationCity, List.copyOf(values), from, null, "", List.of(), ""); }
-        static PendingTaxi confirm(DidiMcpClient.Place from, DidiMcpClient.Place to, String traceId, List<DidiMcpClient.EstimateItem> items) { return new PendingTaxi(Stage.CONFIRM_ORDER, "", "", "", "", List.of(), from, to, traceId, List.copyOf(items), ""); }
-        static PendingTaxi active(String orderId, DidiMcpClient.Place from, DidiMcpClient.Place to) { return new PendingTaxi(Stage.ACTIVE_ORDER, "", "", "", "", List.of(), from, to, "", List.of(), orderId); }
-        PendingTaxi withStage(Stage next) { return new PendingTaxi(next, origin, destination, originCity, destinationCity, candidates, from, to, traceId, items, orderId); }
-        PendingTaxi withOrderId(String value) { return new PendingTaxi(stage, origin, destination, originCity, destinationCity, candidates, from, to, traceId, items, value); }
+                               String traceId, List<DidiMcpClient.EstimateItem> items, String orderId,
+                               OriginSource originSource) {
+        private PendingTaxi { originSource = originSource == null ? OriginSource.EXPLICIT : originSource; }
+        static PendingTaxi city(String origin, String destination, OriginSource originSource) { return new PendingTaxi(Stage.CITY, origin, destination, "", "", List.of(), null, null, "", List.of(), "", originSource); }
+        static PendingTaxi originChoices(String origin, String destination, String originCity, String destinationCity, List<DidiMcpClient.Place> values) { return new PendingTaxi(Stage.ORIGIN_SELECTION, origin, destination, originCity, destinationCity, List.copyOf(values), null, null, "", List.of(), "", OriginSource.EXPLICIT); }
+        static PendingTaxi destinationChoices(String origin, String destination, String originCity, String destinationCity, DidiMcpClient.Place from, List<DidiMcpClient.Place> values) { return new PendingTaxi(Stage.DESTINATION_SELECTION, origin, destination, originCity, destinationCity, List.copyOf(values), from, null, "", List.of(), "", OriginSource.EXPLICIT); }
+        static PendingTaxi confirm(DidiMcpClient.Place from, DidiMcpClient.Place to, String traceId, List<DidiMcpClient.EstimateItem> items) { return new PendingTaxi(Stage.CONFIRM_ORDER, "", "", "", "", List.of(), from, to, traceId, List.copyOf(items), "", OriginSource.EXPLICIT); }
+        static PendingTaxi active(String orderId, DidiMcpClient.Place from, DidiMcpClient.Place to) { return new PendingTaxi(Stage.ACTIVE_ORDER, "", "", "", "", List.of(), from, to, "", List.of(), orderId, OriginSource.EXPLICIT); }
+        PendingTaxi withStage(Stage next) { return new PendingTaxi(next, origin, destination, originCity, destinationCity, candidates, from, to, traceId, items, orderId, originSource); }
+        PendingTaxi withOrderId(String value) { return new PendingTaxi(stage, origin, destination, originCity, destinationCity, candidates, from, to, traceId, items, value, originSource); }
     }
     private record TaxiState(PendingTaxi pending, long expiresAtMillis) { }
 }
