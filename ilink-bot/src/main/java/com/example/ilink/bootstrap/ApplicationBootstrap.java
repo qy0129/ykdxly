@@ -260,7 +260,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         WebSearchService webSearchService = new WebSearchService(httpClient);
         BilibiliSearchService bilibiliSearchService = new BilibiliSearchService(
                 webSearchService, new ShortLinkService());
-        NewsSearchService newsSearchService = new NewsSearchService(httpClient);
+        NewsSearchService newsSearchService = new NewsSearchService(webSearchService);
         MediaKnowledgeService mediaKnowledgeService = new MediaKnowledgeService(
                 new BangumiService(httpClient), new MusicBrainzService(httpClient),
                 new LrcLibService(httpClient), webSearchService);
@@ -419,7 +419,7 @@ public final class ApplicationBootstrap implements AutoCloseable {
         NearbyFoodWorkflow nearbyFoodWorkflow = new NearbyFoodWorkflow(sessions, toolManager, replySender);
         FoodOrderWorkflow foodOrderWorkflow = new FoodOrderWorkflow(
                 sessions, amapService, foodOrderService, replySender, locationService);
-        TravelWorkflow travelWorkflow = new TravelWorkflow(amapService, calendarService, replySender);
+        TravelWorkflow travelWorkflow = new TravelWorkflow(amapService, calendarService, replySender, locationService);
         TaxiWorkflow taxiWorkflow = new TaxiWorkflow(new DidiMcpClient(), replySender, sessions, locationService);
         PlanWorkflow planWorkflow = new PlanWorkflow(
                 toolManager, planSessions, chatHistory, replySender, documentService, calendarService);

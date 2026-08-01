@@ -74,4 +74,26 @@ class TodoBatchParserTest {
         assertEquals(1, drafts.size());
         assertEquals("学习 Python", drafts.getFirst().title());
     }
+
+    @Test
+    void preservesPunctuationInsideNumberedDocumentTodos() {
+        var drafts = parser.parse("待办事项如下：\n"
+                + "1. 完成剩余 40% 的一般性 Bug 修复，确保系统稳定性。\n"
+                + "2. 针对移动端适配问题进行专项测试与代码调整。\n"
+                + "3. 优化用户反馈模块的交互流程，提升用户体验。创建这些待办");
+
+        assertEquals(3, drafts.size());
+        assertEquals("完成剩余 40% 的一般性 Bug 修复，确保系统稳定性。", drafts.get(0).title());
+        assertEquals("优化用户反馈模块的交互流程，提升用户体验", drafts.get(2).title());
+    }
+
+    @Test
+    void extractsOnlyNumberedCandidatesFromDocumentAnswer() {
+        var titles = parser.extractCandidateTitles("根据文件提取如下：\n"
+                + "1．完成一般性 Bug 修复。\n"
+                + "2．准备部署环境。\n"
+                + "[来源：项目计划.docx]");
+
+        assertEquals(java.util.List.of("完成一般性 Bug 修复", "准备部署环境"), titles);
+    }
 }

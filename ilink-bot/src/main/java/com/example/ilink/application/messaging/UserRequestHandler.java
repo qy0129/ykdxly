@@ -37,6 +37,7 @@ import com.example.ilink.capabilities.planning.TodoConflictResolver;
 import com.example.ilink.capabilities.planning.TodoConflictState;
 import com.example.ilink.capabilities.planning.TodoPlan;
 import com.example.ilink.capabilities.planning.TodoPlanningService;
+import com.example.ilink.capabilities.planning.TodoBatchParser;
 import com.example.ilink.capabilities.weather.WeatherLocation;
 import com.example.ilink.capabilities.weather.WeatherService;
 import com.example.ilink.capabilities.documents.DocumentService;
@@ -91,6 +92,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 用户文本请求处理器。
@@ -142,8 +144,10 @@ public final class UserRequestHandler {
     private final CapabilityContractValidator capabilityValidator = new CapabilityContractValidator();
     private final TodoPlanningService todoPlanningService;
     private final TodoConflictResolver todoConflictResolver;
+    private final TodoBatchParser todoBatchParser = new TodoBatchParser();
     private final SuggestedActionStore suggestedActions = new SuggestedActionStore();
     private final ThreadLocal<Boolean> executingSuggestedAction = ThreadLocal.withInitial(() -> false);
+    private final Map<String, WeatherDecision> latestWeatherDecisions = new ConcurrentHashMap<>();
 
     /** 注入所有业务服务，保持本类只负责请求编排。 */
     public UserRequestHandler(ChatHistoryStore chatHistory, UserSessionStore sessions,
@@ -290,6 +294,7 @@ public final class UserRequestHandler {
         }
 
         if (handleRepeatCommand(client, userId, text)) return;
+        if (handlePendingTodoCandidateCreation(client, userId, text)) return;
         if (IntentPolicy.isCasualGreeting(text)) {
             nearbyFoodWorkflow.clearPending(userId);
             replySender.sendReply(client, userId, "你好，我在。有什么想让我帮你处理的？");
@@ -435,6 +440,7 @@ public final class UserRequestHandler {
             replySender.sendReply(client, userId, "我识别到 " + plan.actions().size()
                     + " 项要求：" + actionNames + "。现在依次处理。");
         }
+        latestWeatherDecisions.remove(userId);
         actionPlanExecutor.start(userId, plan,
                 action -> executeAction(agentContext, action, text),
                 () -> hasBlockingPending(userId),
@@ -579,7 +585,11 @@ public final class UserRequestHandler {
         }
 
         String action = IntentPolicy.isExplicitTodoQuery(originalText)
-                ? "list" : resolveTodoAction(route.todoAction(), normalized);
+                ? "list" : resolveTodoAction(route.todoAction(), normalized, originalText);
+        if ("extract".equals(action)) {
+            extractDocumentTodos(client, userId, originalText, false);
+            return;
+        }
         if ("list".equals(action)) {
             String reply = asksForRecentTodos(originalText)
                     ? todoService.listRecentWithReminders(userId, sessions.getLastCreatedTodoIds(userId))
@@ -602,6 +612,15 @@ public final class UserRequestHandler {
             return;
         }
         if ("create".equals(action)) {
+            if (IntentPolicy.isDocumentTodoExtractionRequest(originalText)) {
+                extractDocumentTodos(client, userId, originalText, true);
+                return;
+            }
+            if (IntentPolicy.isPendingTodoCreationReply(normalized)) {
+                if (createPendingTodoCandidates(client, userId)) return;
+                replySender.sendReply(client, userId, "当前没有刚才提取出的待办，请先发送文件并让我提取待办。");
+                return;
+            }
             createTodo(client, userId, normalized, originalText);
             return;
         }
@@ -609,11 +628,81 @@ public final class UserRequestHandler {
     }
 
     static String resolveTodoAction(String routedAction, String text) {
+        return resolveTodoAction(routedAction, text, text);
+    }
+
+    static String resolveTodoAction(String routedAction, String text, String originalText) {
         String local = IntentPolicy.inferTodoAction(text);
+        if ("unknown".equals(local)) local = IntentPolicy.inferTodoAction(originalText);
         if (!"unknown".equals(local)) return local;
         String route = routedAction == null ? "" : routedAction.trim().toLowerCase(Locale.ROOT);
-        return Set.of("create", "list", "complete", "delete", "reschedule").contains(route)
+        return Set.of("create", "list", "complete", "delete", "reschedule", "extract").contains(route)
                 ? route : "unknown";
+    }
+
+    private boolean handlePendingTodoCandidateCreation(ReplyChannel client, String userId,
+                                                       String text) throws Exception {
+        if (!IntentPolicy.isPendingTodoCreationReply(text)) return false;
+        if (createPendingTodoCandidates(client, userId)) return true;
+        return false;
+    }
+
+    private boolean createPendingTodoCandidates(ReplyChannel client, String userId) throws Exception {
+        List<String> candidates = sessions.getPendingTodoCandidates(userId);
+        if (candidates.isEmpty()) {
+            String previousReply = chatHistory.lastAssistantMessage(userId);
+            candidates = previousReply.matches("(?s).*(?:待办事项|待办|任务清单).*")
+                    ? todoBatchParser.extractCandidateTitles(previousReply) : List.of();
+            if (!candidates.isEmpty()) sessions.setPendingTodoCandidates(userId, candidates);
+        }
+        if (candidates.isEmpty()) return false;
+        String numbered = numberedTodoText(candidates);
+        TodoPlan plan = todoPlanningService.plan(numbered, numbered);
+        if (plan.drafts().isEmpty()) {
+            replySender.sendReply(client, userId, "刚才提取的内容无法转换成待办，请重新提取后再试。");
+            return true;
+        }
+        sessions.clearPendingTodoCandidates(userId);
+        handleTodoResolution(client, userId, todoConflictResolver.begin(userId, plan));
+        return true;
+    }
+
+    private void extractDocumentTodos(ReplyChannel client, String userId,
+                                      String request, boolean createAfterExtraction) throws Exception {
+        DocumentRecord document = documentSessions.resolve(userId, request);
+        if (document == null) {
+            replySender.sendReply(client, userId, "请先发送需要提取待办的文档。");
+            return;
+        }
+        JsonObject arguments = new JsonObject();
+        arguments.addProperty("request", "从文件中提取所有明确的待办、任务或后续行动。"
+                + "只输出编号列表，每行一个可执行事项，不要标题、解释、引用和建议。用户要求：" + request);
+        arguments.addProperty("action", "question");
+        ToolResult result = toolManager.execute(
+                DocumentQATool.NAME, new ToolContext(userId), arguments);
+        List<String> candidates = result.success()
+                ? todoBatchParser.extractCandidateTitles(result.output()) : List.of();
+        if (candidates.isEmpty()) {
+            replySender.sendReply(client, userId, result.success()
+                    ? "这份文件中没有提取到明确的待办事项。" : result.output());
+            return;
+        }
+        sessions.setPendingTodoCandidates(userId, candidates);
+        if (createAfterExtraction) {
+            createPendingTodoCandidates(client, userId);
+            return;
+        }
+        replySender.sendReply(client, userId, "已从《" + document.fileName() + "》提取待办：\n"
+                + numberedTodoText(candidates) + "\n回复“创建这些待办”即可批量创建。");
+    }
+
+    private static String numberedTodoText(List<String> titles) {
+        StringBuilder result = new StringBuilder();
+        for (int index = 0; index < titles.size(); index++) {
+            if (index > 0) result.append('\n');
+            result.append(index + 1).append(". ").append(titles.get(index));
+        }
+        return result.toString();
     }
 
     private static boolean asksForRecentTodos(String text) {
@@ -751,6 +840,7 @@ public final class UserRequestHandler {
             replySender.sendReply(client, userId, "请告诉我待办的具体内容。");
             return;
         }
+        sessions.clearPendingTodoCandidates(userId);
         handleTodoResolution(client, userId, todoConflictResolver.begin(userId, plan));
     }
 
@@ -829,11 +919,13 @@ public final class UserRequestHandler {
         String query = text.replaceFirst("^(请)?(帮我)?(查|查询|搜索|看看|获取)?(一下)?", "")
                 .replaceAll("(今天|今日|最新|实时)?的?(新闻|资讯|热搜)", "").trim();
         if (query.isBlank()) query = "最新新闻";
-        if (text.matches(".*(今天|今日|最新|实时).*")) query += " when:1d";
+        if (text.matches(".*(今天|今日|最新|实时).*") && !query.matches(".*(今天|今日).*")) query += " 今日";
         try {
             List<SearchResult> results = newsSearchService.search(query, Config.WEB_SEARCH_RESULT_LIMIT);
             String reply = formatSearchResults("实时新闻", results);
-            visualCardWorkflow.sendSearchResults(client, userId, "实时新闻", results, reply);
+            visualCardWorkflow.rememberNews(userId, results);
+            chatHistory.add(userId, text, reply);
+            replySender.sendReply(client, userId, reply);
         } catch (Exception e) {
             System.err.println("[实时新闻] 查询失败: " + e.getMessage());
             replySender.sendReply(client, userId, "这次实时新闻查询没有成功，我目前无法确认最新内容，请稍后再试。");
@@ -879,20 +971,22 @@ public final class UserRequestHandler {
         if (text == null || text.isBlank()) return "";
         java.util.regex.Matcher currentLocation = WEATHER_CURRENT_LOCATION.matcher(text);
         if (currentLocation.find()) {
-            return currentLocation.group(1)
+            return IntentPolicy.cleanWeatherLocation(currentLocation.group(1)
                     .replaceFirst("(?:今天|明天|后天|天气|气温|温度|会不会下雨).*", "")
-                    .trim();
+                    .trim());
         }
         java.util.regex.Matcher weatherMarker = WEATHER_MARKER.matcher(text);
         String locationText = weatherMarker.find() ? text.substring(0, weatherMarker.start()) : text;
-        return locationText.replaceFirst("^(请)?(帮我)?(查询|查|看一下|看看)?", "")
+        return IntentPolicy.cleanWeatherLocation(locationText
+                .replaceFirst("^(?:如果|若是?|假如|倘若|要是)\\s*", "")
+                .replaceFirst("^(请)?(帮我)?(查询|查|看一下|看看)?", "")
                 .replaceFirst("^(我(?:现在|目前|当前)?在|当前位置是|我的位置是)\\s*", "")
                 .replaceAll("(今天|今日|明天|明日|后天|未来七天|未来7天)", "")
                 .replaceAll("(?:(?:\\d{4})年)?\\d{1,2}月\\d{1,2}(?:日|号)?", "")
                 .replaceAll("(上午|中午|下午|傍晚|晚上|今晚)", "")
                 .replaceAll("[？?，,。；;、 ]+", "")
                 .replaceFirst("的$", "")
-                .trim();
+                .trim());
     }
 
     /** 调用一个动作对应的原有业务处理器，动作之间由统一执行器负责排序。 */
@@ -906,6 +1000,11 @@ public final class UserRequestHandler {
         String userId = context.principalId();
         IntentResult route = action.route();
         String actionText = action.requestText();
+        String weatherCondition = inferWeatherCondition(action, originalText);
+        if (!weatherCondition.isBlank()
+                && !executeWhenWeatherMatches(client, userId, route.intent(), weatherCondition)) {
+            return;
+        }
         CapabilityContractValidator.Validation validation = capabilityValidator.validate(
                 actionText, route, new CapabilityContractValidator.Context(
                         sessions.getPendingDraw(userId) != null,
@@ -940,13 +1039,14 @@ public final class UserRequestHandler {
             case "persona_switch" -> handlePersonaSwitch(client, userId, actionText, route);
             case "audio_transcribe" -> handleAudioTranscribe(client, userId, route);
             case "image_action" -> handleImageAction(client, userId, actionText, route);
-            case "weather" -> handleWeather(client, userId, actionText, route);
+            case "weather" -> handleWeather(client, userId, actionText, originalText, route);
             case "task_plan" -> planWorkflow.createPlan(client, userId, actionText, route);
             case "study_plan" -> lifeWorkflow.startStudyPlan(client, userId, actionText, route);
-            case "travel_plan" -> travelWorkflow.handle(client, userId, route);
+            case "travel_plan" -> travelWorkflow.handle(client, userId, route, actionText);
             case "taxi_trip" -> taxiWorkflow.handle(client, userId, route, actionText);
             case "diet_plan" -> healthDietWorkflow.handle(client, userId, route);
-            case "nearby_food" -> nearbyFoodWorkflow.handle(client, userId, route);
+            case "nearby_food" -> nearbyFoodWorkflow.handle(client, userId,
+                    actionText + "。" + originalText, route);
             case "calendar_event" -> calendarWorkflow.handle(client, userId, actionText, route);
             case "bilibili_search" -> searchBilibili(client, userId, route);
             case "media_lookup" -> lookupMedia(client, userId, actionText, route);
@@ -1316,7 +1416,8 @@ public final class UserRequestHandler {
     private static boolean isWeatherAdviceRequest(String text) {
         if (text == null || text.isBlank()) return false;
         return text.matches(".*(是否适合|适不适合|适合不适合|能不能).*(去|出行|户外|游玩|旅游|前往).*")
-                || text.matches(".*(判断|分析).*(适合).*(去|出行|户外|游玩|旅游|前往).*");
+                || text.matches(".*(判断|分析).*(适合).*(去|出行|户外|游玩|旅游|前往).*")
+                || text.matches("(?s).*(?:如果|若是?|假如|倘若|要是).*(?:适合出行|天气适合|适宜出行).*");
     }
 
     private static boolean isTodoCreateAction(IntentAction action) {
@@ -1534,9 +1635,9 @@ public final class UserRequestHandler {
 
     /** 查询天气；同名地点时保存候选项并等待用户选择。 */
     private void handleWeather(ReplyChannel client, String userId, String userText,
-                               IntentResult route) throws Exception {
-        String locationName = extractWeatherLocation(route.weatherLocation());
-        if (locationName.isBlank()) locationName = extractWeatherLocation(userText);
+                               String originalText, IntentResult route) throws Exception {
+        String locationName = extractWeatherLocation(userText);
+        if (locationName.isBlank()) locationName = extractWeatherLocation(route.weatherLocation());
         if (locationName == null || locationName.isBlank()) {
             replySender.sendReply(client, userId, "请告诉我要查询哪个城市、区县或乡镇的天气。",
                     route.replyMode(), route.voiceStyle());
@@ -1561,8 +1662,10 @@ public final class UserRequestHandler {
             return;
         }
         String reply = result.output();
-        if (isWeatherAdviceRequest(userText)) {
-            reply += "\n\n出行建议：" + weatherSuitabilityAdvice(reply, userText);
+        latestWeatherDecisions.put(userId, weatherDecision(reply));
+        String adviceRequest = isWeatherAdviceRequest(originalText) ? originalText : userText;
+        if (isWeatherAdviceRequest(adviceRequest)) {
+            reply += "\n\n出行建议：" + weatherSuitabilityAdvice(reply, adviceRequest);
         }
         chatHistory.add(userId, userText, reply);
         replySender.applyReplyMode(userId, route.replyMode());
@@ -1631,9 +1734,61 @@ public final class UserRequestHandler {
                                   WeatherLocation location, String weatherDay,
                                   String replyMode, String voiceStyle) throws Exception {
         String reply = weatherService.queryWeather(location, WeatherService.date(weatherDay), WeatherService.period(weatherDay));
+        latestWeatherDecisions.put(userId, weatherDecision(reply));
         chatHistory.add(userId, userText, reply);
         replySender.applyReplyMode(userId, replyMode);
         replySender.sendReply(client, userId, reply, replyMode, voiceStyle);
+    }
+
+    static WeatherDecision weatherDecision(String weatherText) {
+        String value = weatherText == null ? "" : weatherText;
+        boolean noRain = value.matches("(?s).*(?:无雨|无降雨|不会下雨|降雨概率[：:]?\\s*0%).*");
+        boolean rain = !noRain && value.matches("(?s).*(?:小雨|中雨|大雨|暴雨|阵雨|雷雨|雷阵雨|雨夹雪|降雨|有雨).*");
+        boolean severe = value.matches("(?s).*(?:暴雨|大雨|雷暴|雷雨|台风|冰雹|暴雪|沙尘暴).*");
+        return new WeatherDecision(!severe, rain);
+    }
+
+    static String inferWeatherCondition(IntentAction action, String originalText) {
+        String actionText = action == null ? "" : action.requestText();
+        String intent = action == null || action.route() == null ? "" : action.route().intent();
+        if (!"taxi_trip".equals(intent) && !"calendar_event".equals(intent)) return "";
+        if (actionText.matches("(?s).*(?:如果|若是?|假如|倘若|要是).*(?:下雨|降雨|有雨).*")) {
+            return "weather_rain";
+        }
+        if (actionText.matches("(?s).*(?:如果|若是?|假如|倘若|要是).*(?:适合出行|天气适合|适宜出行).*")) {
+            return "weather_suitable";
+        }
+        String original = originalText == null ? "" : originalText;
+        if ("taxi_trip".equals(intent) && original.matches(
+                "(?s).*(?:如果|若是?|假如|倘若|要是)[^；;。！？]*(?:适合出行|天气适合|适宜出行)[^；;。！？]*(?:打车|叫车).*") ) {
+            return "weather_suitable";
+        }
+        if ("calendar_event".equals(intent) && original.matches(
+                "(?s).*(?:如果|若是?|假如|倘若|要是)[^；;。！？]*(?:下雨|降雨|有雨)[^；;。！？]*(?:提醒|记得|带伞).*") ) {
+            return "weather_rain";
+        }
+        return "";
+    }
+
+    private boolean executeWhenWeatherMatches(ReplyChannel client, String userId,
+                                              String intent, String condition) throws Exception {
+        WeatherDecision decision = latestWeatherDecisions.get(userId);
+        if (decision == null) {
+            replySender.sendReply(client, userId, "天气查询没有得到可判断的结果，相关条件操作未执行。");
+            return false;
+        }
+        if ("weather_suitable".equals(condition) && !decision.suitable()) {
+            replySender.sendReply(client, userId, "天气风险较高，不适合出行，本次未发起打车。");
+            return false;
+        }
+        if ("weather_rain".equals(condition) && !decision.rain()) {
+            replySender.sendReply(client, userId, "天气预报没有降雨，本次未创建带伞提醒。");
+            return false;
+        }
+        return true;
+    }
+
+    record WeatherDecision(boolean suitable, boolean rain) {
     }
 
     /** 生成同名地点的可选列表。 */
@@ -1687,6 +1842,10 @@ public final class UserRequestHandler {
                     "document_summary".equals(route.intent()) ? "summary" : "question");
             ToolResult result = toolManager.execute(
                     DocumentQATool.NAME, new ToolContext(userId), arguments);
+            if (result.success() && IntentPolicy.isDocumentTodoExtractionRequest(userText)) {
+                List<String> candidates = todoBatchParser.extractCandidateTitles(result.output());
+                if (!candidates.isEmpty()) sessions.setPendingTodoCandidates(userId, candidates);
+            }
             replySender.applyReplyMode(userId, route.replyMode());
             replySender.sendReply(client, userId, result.output(), route.replyMode(), route.voiceStyle());
             return;

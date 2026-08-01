@@ -4,6 +4,7 @@ import com.google.gson.JsonObject;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalTime;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -99,6 +100,27 @@ class TodoPlanningServiceTest {
         assertEquals(LocalTime.of(21, 30), plan.supervisionTime());
         assertEquals(30, plan.reminderMinutes());
         assertEquals(3, plan.drafts().size());
+    }
+
+    @Test
+    void repairsEmptyModelItemsOnceBeforeUsingLocalFallback() {
+        AtomicInteger calls = new AtomicInteger();
+        TodoPlanningService service = new TodoPlanningService(body -> {
+            if (calls.getAndIncrement() == 0) return "{\"items\":[]}";
+            assertEquals("json_object", body.getAsJsonObject("response_format").get("type").getAsString());
+            return """
+                    {"reminder_minutes":30,"supervision_enabled":false,"items":[
+                      {"title":"提交周报","time_text":"明天上午十点"}
+                    ]}
+                    """;
+        });
+
+        TodoPlan plan = service.plan("明天上午十点提交周报", "明天上午十点提交周报");
+
+        assertEquals(2, calls.get());
+        assertTrue(plan.modelGenerated());
+        assertEquals(1, plan.drafts().size());
+        assertEquals("提交周报", plan.drafts().getFirst().title());
     }
 
     @Test

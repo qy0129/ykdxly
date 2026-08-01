@@ -14,11 +14,16 @@ public final class HolidayService {
             Map.entry(MonthDay.of(3, 8), "妇女节"),
             Map.entry(MonthDay.of(5, 1), "劳动节"),
             Map.entry(MonthDay.of(6, 1), "儿童节"),
+            Map.entry(MonthDay.of(8, 1), "八一建军节"),
             Map.entry(MonthDay.of(10, 1), "国庆节"),
             Map.entry(MonthDay.of(12, 25), "圣诞节"));
 
     public String describe(LocalDate date) {
         String holiday = FIXED_HOLIDAYS.get(MonthDay.from(date));
+        if ("八一建军节".equals(holiday)) {
+            return "今天是八一建军节。这个节日纪念1927年8月1日南昌起义，"
+                    + "是中国人民解放军建军纪念日。";
+        }
         if (holiday != null) return "今天是" + holiday + "。";
         if (date.getDayOfWeek() == DayOfWeek.SATURDAY || date.getDayOfWeek() == DayOfWeek.SUNDAY) {
             return "今天是周末，节奏可以稍微放松一点。";

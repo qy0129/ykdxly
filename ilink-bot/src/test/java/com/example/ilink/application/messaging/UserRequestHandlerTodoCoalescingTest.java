@@ -81,6 +81,31 @@ class UserRequestHandlerTodoCoalescingTest {
         assertEquals("unknown", UserRequestHandler.resolveTodoAction("", "待办"));
     }
 
+    @Test
+    void originalCreateCommandOverridesStrippedTodoListAction() {
+        assertEquals("create", UserRequestHandler.resolveTodoAction("", "1. 修复 Bug\n2. 准备部署",
+                "创建以下待办事项：\n1. 修复 Bug\n2. 准备部署"));
+        assertEquals("extract", UserRequestHandler.resolveTodoAction("", "提取上个文件的待办",
+                "提取上个文件的待办"));
+        assertEquals("create", UserRequestHandler.resolveTodoAction("", "提取文件中的待办并创建",
+                "提取文件中的待办并创建"));
+    }
+
+    @Test
+    void restoresWeatherConditionsFromOriginalCompoundRequest() {
+        IntentResult taxi = new Gson().fromJson("{\"intent\":\"taxi_trip\"}", IntentResult.class);
+        IntentResult calendar = new Gson().fromJson("{\"intent\":\"calendar_event\"}", IntentResult.class);
+        String original = "查询明天杭州天气;如果适合出行，帮我打车去杭州东站;如果下雨，提醒我带伞。";
+
+        assertEquals("weather_suitable", UserRequestHandler.inferWeatherCondition(
+                new IntentAction("r2", "帮我打车去杭州东站", List.of("r1"), taxi), original));
+        assertEquals("weather_rain", UserRequestHandler.inferWeatherCondition(
+                new IntentAction("r3", "提醒我带伞", List.of("r1"), calendar), original));
+        IntentResult weather = new Gson().fromJson("{\"intent\":\"weather\"}", IntentResult.class);
+        assertEquals("", UserRequestHandler.inferWeatherCondition(
+                new IntentAction("r1", original, List.of(), weather), original));
+    }
+
     private IntentAction todo(String id, String text) {
         return new IntentAction(id, text, List.of(), TODO);
     }

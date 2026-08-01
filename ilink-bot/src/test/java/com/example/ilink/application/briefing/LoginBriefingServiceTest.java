@@ -30,10 +30,10 @@ class LoginBriefingServiceTest {
     }
 
     @Test
-    void fallsBackToGoogleNewsWhenPublicSearchFails() {
+    void fallsBackToNewsServiceWhenPublicSearchFails() {
         AtomicBoolean fallbackCalled = new AtomicBoolean();
         SearchResult fallbackResult = result(
-                "回退热点", "Google News", "10:00", "https://example.com/fallback");
+                "回退热点", "备用新闻源", "10:00", "https://example.com/fallback");
 
         List<SearchResult> results = LoginBriefingService.searchNews(
                 (query, limit) -> { throw new IllegalStateException("primary unavailable"); },
@@ -47,7 +47,7 @@ class LoginBriefingServiceTest {
     }
 
     @Test
-    void fallsBackToGoogleNewsWhenPublicSearchReturnsNoNews() {
+    void fallsBackToNewsServiceWhenPublicSearchReturnsNoNews() {
         AtomicBoolean fallbackCalled = new AtomicBoolean();
 
         List<SearchResult> results = LoginBriefingService.searchNews(

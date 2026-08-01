@@ -36,6 +36,8 @@ import java.time.YearMonth;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /** 处理显式视觉卡片、计划导出和轻量互动命令。 */
 public final class VisualCardWorkflow {
@@ -53,6 +55,7 @@ public final class VisualCardWorkflow {
     private final MediaKnowledgeService mediaService;
     private final BilibiliSearchService bilibiliService;
     private final AmapService amapService;
+    private final Map<String, List<SearchResult>> recentNews = new ConcurrentHashMap<>();
     private final PlanSpreadsheetService spreadsheetService = new PlanSpreadsheetService();
     private final FunInteractionService fun = new FunInteractionService();
 
@@ -86,6 +89,11 @@ public final class VisualCardWorkflow {
 
     public void clearPending(String userId) {
         fun.clearPending(userId);
+    }
+
+    public void rememberNews(String userId, List<SearchResult> results) {
+        if (userId == null || results == null || results.isEmpty()) return;
+        recentNews.put(userId, List.copyOf(results));
     }
 
     public boolean handle(AgentContext context, String rawText) throws Exception {
@@ -362,23 +370,18 @@ public final class VisualCardWorkflow {
     }
 
     private void sendNews(ReplyChannel client, String userId, String text) throws Exception {
+        boolean reusePrevious = text.matches(".*(?:根据|基于|结合).*(?:新闻|资讯|调研结果).*");
         String query = text.replaceAll("(新闻|资讯)卡片", "").replaceAll("^[：:，, ]+", "").trim();
         if (query.isBlank()) query = "今日最新新闻";
-        List<SearchResult> results = newsService.search(query + " when:1d", 3);
+        List<SearchResult> results = reusePrevious ? recentNews.getOrDefault(userId, List.of())
+                : newsService.search(query, 3);
         if (results.isEmpty()) {
-            sendTextDeck(client, userId, "实时新闻", query, "暂时没有找到可靠的实时结果。 ");
+            sender.sendText(client, userId, reusePrevious
+                    ? "当前没有可复用的新闻结果，请先查询具体主题的新闻。"
+                    : "实时新闻暂时没有找到可靠结果。");
             return;
         }
-        if (results.size() == 1) {
-            sender.sendText(client, userId, newsText(results));
-            return;
-        }
-        List<VisualCard> deck = new ArrayList<>();
-        for (SearchResult result : results) {
-            String body = result.summary().isBlank() ? "扫码查看完整报道。" : result.summary();
-            deck.add(cards.linkCard(result.title(), result.source(), body, result.url(), new Color(48, 103, 166)));
-        }
-        sender.send(client, userId, deck, newsText(results));
+        sender.sendText(client, userId, newsText(results));
     }
 
     private void sendMedia(ReplyChannel client, String userId, String text) throws Exception {
@@ -458,7 +461,12 @@ public final class VisualCardWorkflow {
 
     private String newsText(List<SearchResult> results) {
         StringBuilder text = new StringBuilder("实时新闻：\n");
-        for (SearchResult result : results) text.append("- ").append(result.title()).append('\n').append(result.url()).append('\n');
+        for (SearchResult result : results) {
+            text.append("- ").append(result.title()).append('\n');
+            if (!result.summary().isBlank()) text.append(result.summary()).append('\n');
+            if (!result.source().isBlank()) text.append("来源：").append(result.source()).append('\n');
+            text.append(result.url()).append('\n');
+        }
         return text.toString().trim();
     }
 }

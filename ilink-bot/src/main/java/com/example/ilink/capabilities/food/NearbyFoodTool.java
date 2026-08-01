@@ -35,6 +35,7 @@ public final class NearbyFoodTool implements Tool {
         properties.add("longitude", ToolDefinition.stringProperty("用户确认地点的经度；首次搜索时传空字符串"));
         properties.add("latitude", ToolDefinition.stringProperty("用户确认地点的纬度；首次搜索时传空字符串"));
         properties.add("keyword", ToolDefinition.stringProperty("用户想吃的餐厅、品牌或餐品，例如麦当劳、面馆、咖啡"));
+        properties.add("result_limit", ToolDefinition.integerProperty("最多返回几家餐厅，默认5，最大10", 1, 10));
         definition = new ToolDefinition(NAME, "附近美食", "搜索用户当前位置附近的餐饮店铺，并生成手机端高德店铺链接。",
                 ToolDefinition.objectParameters(properties, "location"), true);
     }
@@ -49,11 +50,13 @@ public final class NearbyFoodTool implements Tool {
         String longitude = ToolArguments.string(arguments, "longitude", "");
         String latitude = ToolArguments.string(arguments, "latitude", "");
         String requestedKeyword = ToolArguments.string(arguments, "keyword", "").trim();
+        int resultLimit = Math.max(1, Math.min(10, ToolArguments.integer(arguments, "result_limit", 5)));
         if (requestedKeyword.isBlank()) requestedKeyword = "美食";
         List<String> searchKeywords = preferenceMapper.mapKeywords(requestedKeyword);
         AmapService.Place center;
         if (longitude.isBlank() || latitude.isBlank()) {
-            List<AmapService.Place> candidates = amapService.searchPlaceCandidates(location);
+            List<AmapService.Place> candidates = relevantCandidates(
+                    location, amapService.searchPlaceCandidates(location));
             if (candidates.isEmpty()) return ToolResult.failure("没有找到地点“" + location + "”，请补充城市或更完整的名称。");
             if (candidates.size() > 1) {
                 return ToolResult.success(formatLocationChoices(candidates),
@@ -70,12 +73,13 @@ public final class NearbyFoodTool implements Tool {
         searchLoop:
         for (String searchKeyword : searchKeywords) {
             try {
-                List<AmapService.Restaurant> matches = amapService.nearbyRestaurants(center, searchKeyword);
+                List<AmapService.Restaurant> matches = amapService.nearbyRestaurants(
+                        center, searchKeyword, resultLimit);
                 successfulSearches++;
                 for (AmapService.Restaurant restaurant : matches) {
                     restaurantMatches.putIfAbsent(
                             restaurant.name() + '|' + restaurant.location(), restaurant);
-                    if (restaurantMatches.size() >= 8) break searchLoop;
+                    if (restaurantMatches.size() >= resultLimit) break searchLoop;
                 }
             } catch (Exception error) {
                 lastError = error;
@@ -83,7 +87,8 @@ public final class NearbyFoodTool implements Tool {
             }
         }
         if (successfulSearches == 0 && lastError != null) throw lastError;
-        List<AmapService.Restaurant> restaurants = List.copyOf(restaurantMatches.values());
+        List<AmapService.Restaurant> restaurants = restaurantMatches.values().stream()
+                .limit(resultLimit).toList();
         if (restaurants.isEmpty()) {
             return ToolResult.failure("“" + location + "”附近暂时没有找到与“" + requestedKeyword
                     + "”匹配的店铺。已尝试：" + String.join("、", searchKeywords)
@@ -100,6 +105,22 @@ public final class NearbyFoodTool implements Tool {
             return requestedKeyword;
         }
         return requestedKeyword + "（已按：" + String.join("、", searchKeywords) + "）";
+    }
+
+    static List<AmapService.Place> relevantCandidates(String location,
+                                                       List<AmapService.Place> candidates) {
+        String key = location == null ? "" : location.replaceAll("[\\s，,。]", "")
+                .replaceFirst("(?:附近|周边)$", "")
+                .replaceFirst("^(?:[^省]+省)?[^市]+市(?:[^区县]+[区县])?", "");
+        if (key.length() < 2) return candidates;
+        List<AmapService.Place> filtered = candidates.stream()
+                .filter(candidate -> candidate.name().replaceAll("\\s", "").contains(key))
+                .toList();
+        if (filtered.size() != candidates.size()) {
+            System.out.println("[附近美食] 地点候选过滤：查询=" + location
+                    + "，原数量=" + candidates.size() + "，保留数量=" + filtered.size());
+        }
+        return filtered;
     }
 
     private List<byte[]> candidateMapImages(List<AmapService.Place> candidates) throws Exception {

@@ -11,6 +11,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -78,7 +79,9 @@ public final class IntentRecognizer {
 
     public IntentPlan recognize(String userId, String userMessage, RoutingContext context) {
         if (userMessage == null || userMessage.isBlank()) return fallbackChatPlan("");
-        return recognizeUnified(userMessage, context);
+        IntentPlan plan = recognizeUnified(userMessage, context);
+        List<IntentAction> actions = ensureConditionalWeatherActions(userMessage, plan.actions());
+        return actions.equals(plan.actions()) ? plan : new IntentPlan(actions, plan.messageMode());
     }
 
     /** 生产快路径：一次模型调用同时完成需求拆分、能力分配和参数提取。 */
@@ -136,6 +139,12 @@ public final class IntentRecognizer {
             if (actions.size() == 1 && IntentPolicy.isExplicitImageEdit(userMessage)
                     && !IntentPolicy.isDocumentImageInsertion(userMessage)) {
                 return imageEditPlan(userMessage);
+            }
+            String explicitIntent = IntentPolicy.explicitBusinessIntent(userMessage);
+            if (!explicitIntent.isBlank()
+                    && actions.stream().allMatch(action -> "chat".equals(action.route().intent()))) {
+                System.out.println("[意图识别] 模型全部返回聊天，整句明确命中能力=" + explicitIntent);
+                return deterministicBusinessPlan(userMessage, explicitIntent);
             }
             return new IntentPlan(actions, resolveMessageMode(messageMode, actions));
         } catch (Exception error) {
@@ -256,12 +265,36 @@ public final class IntentRecognizer {
     }
 
     private JsonObject requestJson(String systemPrompt, String userContent) throws Exception {
-        String content = requestRoute(buildRequestBody(systemPrompt, userContent, false));
+        String content;
+        try {
+            content = requestRoute(buildRequestBody(systemPrompt, userContent, false));
+        } catch (Exception firstError) {
+            if (!isRetryableTransportFailure(firstError)) throw firstError;
+            System.err.println("[意图识别] 路由网络异常，短暂重试一次：" + firstError.getMessage());
+            sleepBeforeRetry();
+            content = requestRoute(buildRequestBody(systemPrompt, userContent, true));
+        }
         try {
             return parseJsonObject(content);
         } catch (IllegalArgumentException firstError) {
             System.err.println("[意图识别] JSON格式异常，自动重试：" + summarizeModelOutput(content));
             return parseJsonObject(requestRoute(buildRequestBody(systemPrompt, userContent, true)));
+        }
+    }
+
+    private boolean isRetryableTransportFailure(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            if (current instanceof IOException) return true;
+        }
+        String message = error.getMessage();
+        return message != null && message.matches("(?i).*connection reset|connection closed|broken pipe|timed out.*");
+    }
+
+    private void sleepBeforeRetry() {
+        try {
+            Thread.sleep(350L);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -407,9 +440,14 @@ public final class IntentRecognizer {
             action.addProperty("food_order_restaurants", inferFoodOrderRestaurant(userMessage));
         }
         if ("taxi_trip".equals(intent)) applyTaxiFallbackFields(action, userMessage);
+        if ("weather".equals(intent)) {
+            action.addProperty("weather_day", inferWeatherDay(userMessage));
+        }
         if ("nearby_food".equals(intent)) {
             action.addProperty("nearby_action", "search");
-            action.addProperty("meal_keyword", "");
+            String keyword = inferNearbyFoodKeyword(userMessage);
+            if (keyword.isBlank() && userMessage.matches(".*(?:午餐|午饭|中饭).*") ) keyword = "午餐";
+            action.addProperty("meal_keyword", keyword);
         }
         return new IntentPlan(
                 List.of(new IntentAction("r1", userMessage, List.of(), toIntentResult(action))),
@@ -425,6 +463,98 @@ public final class IntentRecognizer {
         }
         Matcher destination = TAXI_DESTINATION.matcher(userMessage);
         if (destination.find()) action.addProperty("travel_destination", destination.group(1).trim());
+    }
+
+    private static String inferWeatherDay(String text) {
+        if (text == null) return "today";
+        if (text.contains("明天") || text.contains("明日")) return "tomorrow";
+        return "today";
+    }
+
+    private static String inferWeatherLocation(String text) {
+        if (text == null) return "";
+        Matcher matcher = Pattern.compile("(?:查询|查|看看|查看)?(?:明天|明日|今天|今日|后天)?\\s*"
+                + "([^，,。！？?；;]+?)(?:的)?天气").matcher(text);
+        return matcher.find() ? IntentPolicy.cleanWeatherLocation(matcher.group(1)) : "";
+    }
+
+    /** 路由模型漏掉明确的天气条件分支时，本地补齐打车和带伞提醒。 */
+    private List<IntentAction> ensureConditionalWeatherActions(String userMessage,
+                                                               List<IntentAction> source) {
+        IntentAction weather = source.stream()
+                .filter(action -> "weather".equals(action.route().intent()))
+                .findFirst().orElse(null);
+        List<IntentAction> result = new ArrayList<>(source);
+        Set<String> ids = source.stream().map(IntentAction::requirementId)
+                .collect(java.util.stream.Collectors.toSet());
+        if (weather == null && IntentPolicy.isExplicitWeatherQuery(userMessage)) {
+            JsonObject route = new JsonObject();
+            route.addProperty("intent", "weather");
+            route.addProperty("weather_location", inferWeatherLocation(userMessage));
+            route.addProperty("weather_day", inferWeatherDay(userMessage));
+            String weatherId = nextActionId(ids);
+            weather = new IntentAction(weatherId, userMessage, List.of(), toIntentResult(route));
+            result.add(weather);
+        }
+        if (weather == null) return result;
+        boolean hasTaxi = source.stream().anyMatch(action -> "taxi_trip".equals(action.route().intent()));
+        boolean hasCalendar = source.stream().anyMatch(action -> "calendar_event".equals(action.route().intent()));
+
+        Matcher taxiClause = Pattern.compile(
+                "(?:如果|若是?|假如|倘若|要是)[^；;。！？]*(?:适合出行|天气适合|适宜出行)[^；;。！？]*(?:打车|叫车)[^；;。！？]*")
+                .matcher(userMessage);
+        if (!hasTaxi && taxiClause.find()) {
+            String clause = taxiClause.group().trim();
+            JsonObject route = new JsonObject();
+            route.addProperty("intent", "taxi_trip");
+            applyTaxiFallbackFields(route, clause);
+            result.add(new IntentAction(nextActionId(ids), clause, List.of(weather.requirementId()),
+                    toIntentResult(route)));
+        }
+
+        Matcher rainClause = Pattern.compile(
+                "(?:如果|若是?|假如|倘若|要是)[^；;。！？]*(?:下雨|降雨|有雨)[^；;。！？]*(?:提醒|记得|带伞)[^；;。！？]*")
+                .matcher(userMessage);
+        if (!hasCalendar && rainClause.find()) {
+            String clause = rainClause.group().trim();
+            JsonObject route = new JsonObject();
+            route.addProperty("intent", "calendar_event");
+            route.addProperty("calendar_action", "create");
+            route.addProperty("calendar_title", "带伞");
+            result.add(new IntentAction(nextActionId(ids), clause, List.of(weather.requirementId()),
+                    toIntentResult(route)));
+        }
+        IntentAction weatherAction = weather;
+        return result.stream()
+                .map(action -> ensureWeatherDependency(userMessage, action, weatherAction))
+                .toList();
+    }
+
+    /** 即使模型漏写 depends_on，也保证条件打车和条件提醒在天气查询之后执行。 */
+    private static IntentAction ensureWeatherDependency(String userMessage, IntentAction action,
+                                                        IntentAction weather) {
+        if (action == weather || action.dependsOn().contains(weather.requirementId())) return action;
+        String intent = action.route().intent();
+        String actionText = action.requestText() == null ? "" : action.requestText();
+        String original = userMessage == null ? "" : userMessage;
+        boolean conditionalTaxi = "taxi_trip".equals(intent)
+                && (actionText.matches("(?s).*(?:如果|若是?|假如|倘若|要是).*(?:适合出行|天气适合|适宜出行).*")
+                || original.matches("(?s).*(?:如果|若是?|假如|倘若|要是)[^；;。！？]*"
+                + "(?:适合出行|天气适合|适宜出行)[^；;。！？]*(?:打车|叫车).*"));
+        boolean conditionalReminder = "calendar_event".equals(intent)
+                && (actionText.matches("(?s).*(?:如果|若是?|假如|倘若|要是).*(?:下雨|降雨|有雨).*")
+                || original.matches("(?s).*(?:如果|若是?|假如|倘若|要是)[^；;。！？]*"
+                + "(?:下雨|降雨|有雨)[^；;。！？]*(?:提醒|记得|带伞).*"));
+        if (!conditionalTaxi && !conditionalReminder) return action;
+        List<String> dependencies = new ArrayList<>(action.dependsOn());
+        dependencies.add(weather.requirementId());
+        return new IntentAction(action.requirementId(), action.requestText(), dependencies, action.route());
+    }
+
+    private static String nextActionId(Set<String> ids) {
+        int sequence = 1;
+        while (!ids.add("r_local_" + sequence)) sequence++;
+        return "r_local_" + sequence;
     }
 
     private MessageMode resolveMessageMode(MessageMode modelMode, List<IntentAction> actions) {
@@ -511,11 +641,18 @@ public final class IntentRecognizer {
         boolean documentImageInsertion = IntentPolicy.isDocumentImageInsertion(userMessage);
         boolean imageEdit = IntentPolicy.isExplicitImageEdit(userMessage) && !documentImageInsertion;
         boolean fileRequest = IntentPolicy.hasExplicitFileRequest(userMessage);
-        String explicitBusinessIntent = IntentPolicy.explicitBusinessIntent(userMessage);
+        // 多动作请求必须按当前原子需求纠偏，不能让前一个新闻、天气等关键词覆盖后续动作。
+        String explicitBusinessIntent = IntentPolicy.explicitBusinessIntent(actionText);
         if (!explicitBusinessIntent.isBlank() && !explicitBusinessIntent.equals(intent)) {
             action.addProperty("intent", explicitBusinessIntent);
             action.addProperty("output_file_type", "none");
             intent = explicitBusinessIntent;
+        }
+        if ("news_search".equals(intent) && IntentPolicy.isNewsResultTransformation(actionText)) {
+            intent = actionText.matches(".*(?:卡片|视觉|结构化展示).*") ? "visual_card" : "chat";
+            action.addProperty("intent", intent);
+            clearOutputFields(action);
+            return;
         }
         if (IntentPolicy.isExplicitTodoCreation(userMessage) && !"todo".equals(intent)) {
             action.addProperty("intent", "todo");
@@ -588,6 +725,10 @@ public final class IntentRecognizer {
         if ("image_action".equals(intent)) {
             action.addProperty("image_action", normalizeImageAction(string(action, "image_action")));
             if (string(action, "image_prompt").isBlank()) action.addProperty("image_prompt", actionText);
+        }
+        if ("weather".equals(intent)) {
+            action.addProperty("weather_location",
+                    IntentPolicy.cleanWeatherLocation(string(action, "weather_location")));
         }
         if ("todo".equals(string(action, "intent"))) {
             String localAction = IntentPolicy.inferTodoAction(userMessage);
