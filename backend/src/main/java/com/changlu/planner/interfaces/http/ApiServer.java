@@ -1,10 +1,13 @@
 package com.changlu.planner.interfaces.http;
 
 import com.changlu.planner.features.briefing.BriefingSubAgent;
+import com.changlu.planner.features.command.AiCommandService;
 import com.changlu.planner.features.export.StatsPdfGenerator;
+import com.changlu.planner.features.plan.PlanExecutionService;
 import com.changlu.planner.features.review.AiReviewService;
 import com.changlu.planner.shared.database.Database;
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.sun.net.httpserver.Headers;
@@ -39,28 +42,41 @@ public final class ApiServer {
   private final int port;
   private final Gson gson = new Gson();
   private final AiReviewService aiReview;
+  private final AiCommandService aiCommands;
+  private final PlanExecutionService planExecution;
   private final BriefingSubAgent briefingAgent;
   private final StaticFileHandler staticFiles = new StaticFileHandler();
   private HttpServer server;
 
-  public ApiServer(Database database, int port) { this.database = database; this.port = port; this.aiReview = new AiReviewService(database); this.briefingAgent = new BriefingSubAgent(database); }
+  public ApiServer(Database database, int port) { this.database = database; this.port = port; this.aiReview = new AiReviewService(database); this.aiCommands = new AiCommandService(database); this.planExecution = new PlanExecutionService(database); this.briefingAgent = new BriefingSubAgent(database); }
   public int port() { return port; }
 
   public void start() throws IOException {
     server = HttpServer.create(new InetSocketAddress("0.0.0.0", port), 0);
     // 路由按外部能力分组；静态文件由独立 handler 托管，避免和 API 逻辑混在一起。
-    server.createContext("/api/health", this::health);
-    server.createContext("/api/plans", exchange -> crud(exchange, "plans"));
+     server.createContext("/api/health", this::health);
+     server.createContext("/api/profile", this::profile);
+     server.createContext("/api/plans", exchange -> crud(exchange, "plans"));
     server.createContext("/api/plans/", this::planSubresource);
     server.createContext("/api/schedules", exchange -> crud(exchange, "schedule_items"));
     server.createContext("/api/todos", exchange -> crud(exchange, "todos"));
+    server.createContext("/api/tasks", this::tasks);
+    server.createContext("/api/planning/preferences", this::planningPreferences);
+    server.createContext("/api/trash", this::trash);
     server.createContext("/api/notes", this::notes);
     server.createContext("/api/ai/review/chat", this::aiReviewChat);
+    server.createContext("/api/ai/commands", this::aiCommand);
+    server.createContext("/api/ai/drafts/", this::aiDraft);
+    server.createContext("/api/ai/session", this::aiSession);
+    server.createContext("/api/ai/change-sets/", this::aiChangeSet);
+    server.createContext("/api/review/facts", this::reviewFacts);
     server.createContext("/api/stats", this::stats);
     server.createContext("/api/export/xlsx", this::excelExport);
     server.createContext("/api/export/pdf", this::pdfExport);
     server.createContext("/api/integrations/wechat/capture", this::wechatCapture);
     server.createContext("/api/integrations/wechat/command", this::wechatCommand);
+    server.createContext("/api/integrations/wechat/ai", this::wechatAiCommand);
+    server.createContext("/api/integrations/wechat/ai/", this::wechatAiDraft);
     server.createContext("/api/integrations/wechat/briefing", this::wechatBriefing);
     server.createContext("/", staticFiles);
     server.setExecutor(null);
@@ -70,14 +86,123 @@ public final class ApiServer {
 
   private void health(HttpExchange e) throws IOException { json(e, 200, Map.of("ok", true, "service", "changlu-planner")); }
 
+  private void profile(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if ("GET".equals(e.getRequestMethod())) {
+        try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
+            "SELECT display_name, avatar_url FROM users WHERE id = ?")) {
+          p.setBytes(1, Database.uuidBytes(user(e)));
+          try (ResultSet rs = p.executeQuery()) {
+            if (!rs.next()) { json(e, 404, Map.of("error", "user_not_found")); return; }
+            json(e, 200, Map.of("displayName", rs.getString("display_name"), "avatarUrl", rs.getString("avatar_url")));
+          }
+        }
+        return;
+      }
+      if ("PUT".equals(e.getRequestMethod()) || "POST".equals(e.getRequestMethod())) {
+        JsonObject body = body(e);
+        String displayName = string(body, "displayName", "").trim();
+        if (displayName.isBlank()) { json(e, 400, Map.of("error", "display_name_required")); return; }
+        String avatarUrl = string(body, "avatarUrl", "").trim();
+        if (avatarUrl.length() > 1000) { json(e, 400, Map.of("error", "avatar_url_too_long")); return; }
+        try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
+            "UPDATE users SET display_name = ?, avatar_url = ? WHERE id = ?")) {
+          p.setString(1, displayName); p.setString(2, avatarUrl); p.setBytes(3, Database.uuidBytes(user(e)));
+          if (p.executeUpdate() == 0) { json(e, 404, Map.of("error", "user_not_found")); return; }
+        }
+        json(e, 200, Map.of("displayName", displayName, "avatarUrl", avatarUrl));
+        return;
+      }
+      error(e, 405, "method_not_allowed", "璇锋眰鏂规硶涓嶆敮鎸?", false);
+    } catch (SQLException ex) { ex.printStackTrace(); error(e, 500, "database_error", ex.getMessage(), true); }
+  }
+
   private void aiReviewChat(HttpExchange e) throws IOException {
     try {
       if (options(e)) return;
       if (!"POST".equals(e.getRequestMethod())) { json(e, 405, Map.of("error", "method_not_allowed")); return; }
-      json(e, 200, aiReview.chat(body(e), workspace(e), user(e)));
+      json(e, 200, aiCommands.command(body(e), context(e), "web"));
     } catch (IllegalArgumentException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
       catch (IllegalStateException ex) { json(e, 503, Map.of("error", "ai_unavailable", "message", ex.getMessage())); }
       catch (Exception ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "ai_error", "message", ex.getMessage())); }
+  }
+
+  private void aiCommand(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if (!"POST".equals(e.getRequestMethod())) { json(e, 405, Map.of("error", "method_not_allowed")); return; }
+      json(e, 200, aiCommands.command(body(e), context(e), "web"));
+    } catch (IllegalArgumentException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
+      catch (IllegalStateException ex) { json(e, 503, Map.of("error", "ai_unavailable", "message", ex.getMessage())); }
+      catch (Exception ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "ai_command_error", "message", ex.getMessage())); }
+  }
+
+  private void aiDraft(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      String[] parts = e.getRequestURI().getPath().split("/");
+      if (parts.length < 5 || parts[4].isBlank()) { json(e, 400, Map.of("error", "draft_id_required")); return; }
+      String reference = parts[4]; String action = parts.length > 5 ? parts[5] : "";
+      Database.Context context = new Database.Context(user(e), workspace(e));
+      if ("GET".equals(e.getRequestMethod()) && action.isBlank()) { json(e, 200, aiCommands.draft(reference, context)); return; }
+      if ("POST".equals(e.getRequestMethod()) && "confirm".equals(action)) { json(e, 200, aiCommands.confirm(reference, context)); return; }
+      if ("POST".equals(e.getRequestMethod()) && "cancel".equals(action)) { json(e, 200, aiCommands.cancel(reference, context)); return; }
+      json(e, 405, Map.of("error", "method_not_allowed"));
+    } catch (IllegalArgumentException | IllegalStateException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
+      catch (Exception ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "draft_error", "message", ex.getMessage())); }
+  }
+
+  private void aiSession(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if (!"GET".equals(e.getRequestMethod())) { error(e, 405, "method_not_allowed", "请求方法不支持", false); return; }
+      json(e, 200, aiCommands.session(context(e), "web"));
+    } catch (Exception ex) { ex.printStackTrace(); error(e, 500, "session_error", ex.getMessage(), true); }
+  }
+
+  private void aiChangeSet(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      String[] parts = e.getRequestURI().getPath().split("/");
+      if (parts.length < 6 || parts[4].isBlank() || !"undo".equals(parts[5])) { error(e, 400, "change_set_required", "缺少要撤销的变更集", false); return; }
+      if (!"POST".equals(e.getRequestMethod())) { error(e, 405, "method_not_allowed", "请求方法不支持", false); return; }
+      json(e, 200, aiCommands.undo(parts[4], context(e)));
+    } catch (IllegalArgumentException | IllegalStateException ex) { error(e, 409, "undo_rejected", ex.getMessage(), false); }
+      catch (Exception ex) { ex.printStackTrace(); error(e, 500, "undo_error", ex.getMessage(), true); }
+  }
+
+  private void reviewFacts(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if (!"GET".equals(e.getRequestMethod())) { json(e, 405, Map.of("error", "method_not_allowed")); return; }
+      json(e, 200, aiCommands.reviewFacts(new Database.Context(user(e), workspace(e))));
+    } catch (SQLException ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "database_error", "message", ex.getMessage())); }
+  }
+
+  private void wechatAiCommand(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if (!"POST".equals(e.getRequestMethod())) { json(e, 405, Map.of("error", "method_not_allowed")); return; }
+      Database.Context context = database.contextForExternalUser(e.getRequestHeaders().getFirst("X-Wechat-User-Id"));
+      json(e, 200, aiCommands.command(body(e), context, "wechat"));
+    } catch (IllegalArgumentException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
+      catch (IllegalStateException ex) { json(e, 503, Map.of("error", "ai_unavailable", "message", ex.getMessage())); }
+      catch (Exception ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "ai_command_error", "message", ex.getMessage())); }
+  }
+
+  private void wechatAiDraft(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      String[] parts = e.getRequestURI().getPath().split("/");
+      if (parts.length < 7 || parts[5].isBlank()) { json(e, 400, Map.of("error", "draft_id_required")); return; }
+      Database.Context context = database.contextForExternalUser(e.getRequestHeaders().getFirst("X-Wechat-User-Id"));
+      String reference = parts[5]; String action = parts[6];
+      if ("POST".equals(e.getRequestMethod()) && "confirm".equals(action)) { json(e, 200, aiCommands.confirm(reference, context)); return; }
+      if ("POST".equals(e.getRequestMethod()) && "cancel".equals(action)) { json(e, 200, aiCommands.cancel(reference, context)); return; }
+      json(e, 405, Map.of("error", "method_not_allowed"));
+    } catch (IllegalArgumentException | IllegalStateException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
+      catch (Exception ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "draft_error", "message", ex.getMessage())); }
   }
 
   private void wechatCapture(HttpExchange e) throws IOException {
@@ -94,14 +219,18 @@ public final class ApiServer {
       if (type == null) { json(e, 200, Map.of("handled", false)); return; }
       if (title.isBlank()) { json(e, 400, Map.of("error", "title_required")); return; }
       Database.Context context = database.contextForExternalUser(externalId);
+      if (!type.equals("笔记")) {
+        JsonObject input = new JsonObject(); input.addProperty("message", text);
+        JsonObject result = aiCommands.command(input, context, "wechat");
+        result.addProperty("handled", true); result.addProperty("message", result.get("reply").getAsString());
+        json(e, 200, result); return;
+      }
       UUID id = UUID.randomUUID();
-      if (type.equals("计划")) insertPlan(context, id, title);
-      else if (type.equals("待办")) insertTodo(context, id, title);
-      else if (type.equals("日程")) insertSchedule(context, id, title);
-      else insertNote(context, id, title);
+      insertNote(context, id, title);
       json(e, 201, Map.of("handled", true, "type", type, "id", id.toString(), "title", title, "message", "已记录到长路计划"));
     } catch (IllegalArgumentException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
       catch (SQLException ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "database_error", "message", ex.getMessage())); }
+      catch (Exception ex) { ex.printStackTrace(); error(e, 500, "ai_command_error", ex.getMessage(), true); }
   }
 
   private void wechatCommand(HttpExchange e) throws IOException {
@@ -117,13 +246,6 @@ public final class ApiServer {
         result.addProperty("message", todayOpenItems(context));
       } else if (normalized.equals("计划完成得怎么样")) {
         result.addProperty("message", progressSummary(context));
-      } else if (normalized.startsWith("完成:" ) || normalized.startsWith("完成：")) {
-        result.addProperty("message", completeByTitle(context, text.substring(3).trim()));
-      } else if (normalized.startsWith("删除:" ) || normalized.startsWith("删除：")) {
-        String title = text.substring(3).trim();
-        result.addProperty("message", "删除会移除这条记录。请回复“确认删除：" + title + "”确认。");
-      } else if (normalized.startsWith("确认删除:" ) || normalized.startsWith("确认删除：")) {
-        result.addProperty("message", deleteByTitle(context, text.substring(5).trim()));
       } else {
         result.addProperty("handled", false);
       }
@@ -223,12 +345,80 @@ public final class ApiServer {
     } catch (SQLException ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "database_error", "message", ex.getMessage())); }
   }
 
+  private void tasks(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      String[] parts = e.getRequestURI().getPath().split("/");
+      String id = parts.length > 3 && !parts[3].isBlank() ? parts[3] : null;
+      String action = parts.length > 4 ? parts[4] : "";
+      Database.Context context = context(e);
+      if ("POST".equals(e.getRequestMethod()) && id == null) {
+        JsonObject b = body(e); UUID planId = UUID.fromString(string(b, "planId", ""));
+        json(e, 201, planExecution.createTask(context, planId, b, "web")); return;
+      }
+      requireId(id);
+      if (("PUT".equals(e.getRequestMethod()) || "PATCH".equals(e.getRequestMethod())) && action.isBlank()) {
+        json(e, 200, planExecution.updateTask(context, UUID.fromString(id), body(e), "web")); return;
+      }
+      if ("DELETE".equals(e.getRequestMethod()) && action.isBlank()) {
+        JsonObject b = body(e); planExecution.softDeleteTask(context, UUID.fromString(id), (int) number(b, "expectedVersion", 0), "web");
+        json(e, 204, Map.of("deleted", true)); return;
+      }
+      if ("POST".equals(e.getRequestMethod()) && "restore".equals(action)) {
+        json(e, 200, planExecution.restoreTask(context, UUID.fromString(id), "web")); return;
+      }
+      if ("POST".equals(e.getRequestMethod()) && List.of("complete", "delay", "block", "skip", "cancel", "reopen").contains(action)) {
+        JsonObject b = body(e); String status = switch (action) { case "complete" -> "done"; case "delay", "reopen" -> "pending"; case "block" -> "blocked"; case "skip" -> "skipped"; default -> "cancelled"; };
+        b.addProperty("status", status); b.addProperty("actionType", action + "_task");
+        json(e, 200, planExecution.updateTask(context, UUID.fromString(id), b, "web")); return;
+      }
+      error(e, 405, "method_not_allowed", "请求方法不支持", false);
+    } catch (IllegalArgumentException ex) { error(e, 400, "invalid_task", ex.getMessage(), false); }
+      catch (IllegalStateException ex) { error(e, 409, "version_conflict", ex.getMessage(), false); }
+      catch (SQLException ex) { ex.printStackTrace(); error(e, 500, "database_error", ex.getMessage(), true); }
+  }
+
+  private void planningPreferences(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if ("GET".equals(e.getRequestMethod())) { json(e, 200, planExecution.preference(context(e))); return; }
+      if ("PUT".equals(e.getRequestMethod()) || "POST".equals(e.getRequestMethod())) { json(e, 200, planExecution.savePreference(context(e), body(e))); return; }
+      error(e, 405, "method_not_allowed", "请求方法不支持", false);
+    } catch (IllegalArgumentException ex) { error(e, 400, "invalid_preference", ex.getMessage(), false); }
+      catch (SQLException ex) { ex.printStackTrace(); error(e, 500, "database_error", ex.getMessage(), true); }
+  }
+
+  private void trash(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      String[] parts = e.getRequestURI().getPath().split("/");
+      if ("GET".equals(e.getRequestMethod()) && parts.length == 3) { json(e, 200, planExecution.listTrash(context(e))); return; }
+      if ("POST".equals(e.getRequestMethod()) && parts.length >= 6 && "restore".equals(parts[5])) {
+        String type = parts[3]; UUID id = UUID.fromString(parts[4]);
+        if ("task".equals(type)) { json(e, 200, planExecution.restoreTask(context(e), id, "web")); return; }
+        String table = switch (type) { case "plan" -> "plans"; case "todo" -> "todos"; case "schedule" -> "schedule_items"; default -> throw new IllegalArgumentException("不支持的回收站类型"); };
+        try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("UPDATE " + table + " SET deleted_at=NULL,purge_after=NULL,version=version+1 WHERE id=? AND workspace_id=? AND deleted_at IS NOT NULL")) {
+          p.setBytes(1, Database.uuidBytes(id)); p.setBytes(2, Database.uuidBytes(workspace(e)));
+          if (p.executeUpdate() == 0) throw new IllegalArgumentException("记录不在回收站");
+        }
+        json(e, 200, Map.of("id", id.toString(), "restored", true)); return;
+      }
+      error(e, 405, "method_not_allowed", "请求方法不支持", false);
+    } catch (IllegalArgumentException ex) { error(e, 400, "invalid_trash_operation", ex.getMessage(), false); }
+      catch (SQLException ex) { ex.printStackTrace(); error(e, 500, "database_error", ex.getMessage(), true); }
+  }
+
   private void planSubresource(HttpExchange e) throws IOException {
     String[] parts = e.getRequestURI().getPath().split("/");
-    if (parts.length < 5 || !"stages".equals(parts[4])) { crud(e, "plans"); return; }
+    if (parts.length < 5) { crud(e, "plans"); return; }
     try {
       if (options(e)) return;
       String planId = parts[3]; requireId(planId);
+      if ("tasks".equals(parts[4])) {
+        if (!"GET".equals(e.getRequestMethod())) { error(e, 405, "method_not_allowed", "请求方法不支持", false); return; }
+        json(e, 200, planExecution.listTasks(UUID.fromString(planId), context(e))); return;
+      }
+      if (!"stages".equals(parts[4])) { error(e, 404, "not_found", "接口不存在", false); return; }
       String stageId = parts.length > 5 && !parts[5].isBlank() ? parts[5] : null;
       switch (e.getRequestMethod()) {
         case "GET" -> listPlanStages(e, planId);
@@ -242,7 +432,7 @@ public final class ApiServer {
   }
 
   private void listPlanStages(HttpExchange e, String planId) throws SQLException, IOException {
-    String sql = "SELECT s.* FROM plan_stages s JOIN plans p ON p.id = s.plan_id WHERE s.plan_id = ? AND p.workspace_id = ? ORDER BY s.sort_order, s.created_at";
+    String sql = "SELECT s.* FROM plan_stages s JOIN plans p ON p.id = s.plan_id WHERE s.plan_id = ? AND p.workspace_id = ? AND s.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY s.sort_order, s.created_at";
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
       p.setBytes(1, Database.uuidBytes(UUID.fromString(planId))); p.setBytes(2, Database.uuidBytes(workspace(e)));
       try (ResultSet rs = p.executeQuery()) { List<JsonObject> rows = new ArrayList<>(); while (rs.next()) rows.add(stageRow(rs)); json(e, 200, rows); }
@@ -250,45 +440,22 @@ public final class ApiServer {
   }
 
   private void createPlanStage(HttpExchange e, String planId) throws SQLException, IOException {
-    JsonObject b = body(e); UUID id = UUID.randomUUID(); UUID plan = UUID.fromString(planId);
-    String sql = "INSERT INTO plan_stages (id, plan_id, title, progress, status, due_date, sort_order) SELECT ?, id, ?, ?, ?, ?, ? FROM plans WHERE id = ? AND workspace_id = ?";
-    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
-      double progress = number(b, "progress", 0);
-      p.setBytes(1, Database.uuidBytes(id)); p.setString(2, string(b, "title", "未命名阶段")); p.setDouble(3, progress);
-      p.setString(4, progress >= 100 ? "done" : "pending"); p.setObject(5, safeDate(string(b, "dueLabel", null)));
-      p.setInt(6, (int) number(b, "sortOrder", 0)); p.setBytes(7, Database.uuidBytes(plan)); p.setBytes(8, Database.uuidBytes(workspace(e)));
-      if (p.executeUpdate() == 0) { json(e, 404, Map.of("error", "plan_not_found")); return; }
-      updatePlanProgress(c, plan);
-    }
-    getPlanStage(e, planId, id.toString());
+    JsonObject b = body(e); if (!b.has("dueDate") && b.has("dueLabel")) b.add("dueDate", b.get("dueLabel"));
+    json(e, 201, planExecution.createStage(context(e), UUID.fromString(planId), b, "web"));
   }
 
   private void updatePlanStage(HttpExchange e, String planId, String stageId) throws SQLException, IOException {
-    JsonObject b = body(e); UUID plan = UUID.fromString(planId); UUID stage = UUID.fromString(stageId);
-    String sql = "UPDATE plan_stages s JOIN plans p ON p.id = s.plan_id SET s.title = ?, s.progress = ?, s.status = ?, s.due_date = ? WHERE s.id = ? AND s.plan_id = ? AND p.workspace_id = ?";
-    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
-      double progress = number(b, "progress", 0);
-      p.setString(1, string(b, "title", "未命名阶段")); p.setDouble(2, progress); p.setString(3, progress >= 100 ? "done" : "pending");
-      p.setObject(4, safeDate(string(b, "dueLabel", null))); p.setBytes(5, Database.uuidBytes(stage)); p.setBytes(6, Database.uuidBytes(plan)); p.setBytes(7, Database.uuidBytes(workspace(e)));
-      if (p.executeUpdate() == 0) { json(e, 404, Map.of("error", "stage_not_found")); return; }
-      updatePlanProgress(c, plan);
-    }
-    getPlanStage(e, planId, stageId);
+    JsonObject b = body(e); if (!b.has("dueDate") && b.has("dueLabel")) b.add("dueDate", b.get("dueLabel"));
+    json(e, 200, planExecution.updateStage(context(e), UUID.fromString(stageId), b, "web"));
   }
 
   private void deletePlanStage(HttpExchange e, String planId, String stageId) throws SQLException, IOException {
-    UUID plan = UUID.fromString(planId);
-    String sql = "DELETE s FROM plan_stages s JOIN plans p ON p.id = s.plan_id WHERE s.id = ? AND s.plan_id = ? AND p.workspace_id = ?";
-    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
-      p.setBytes(1, Database.uuidBytes(UUID.fromString(stageId))); p.setBytes(2, Database.uuidBytes(plan)); p.setBytes(3, Database.uuidBytes(workspace(e)));
-      if (p.executeUpdate() == 0) { json(e, 404, Map.of("error", "stage_not_found")); return; }
-      updatePlanProgress(c, plan);
-    }
-    json(e, 204, Map.of("deleted", true));
+    JsonObject b = body(e); int expectedVersion = (int) number(b, "expectedVersion", 0);
+    planExecution.softDeleteStage(context(e), UUID.fromString(stageId), expectedVersion, "web"); json(e, 204, Map.of("deleted", true));
   }
 
   private void getPlanStage(HttpExchange e, String planId, String stageId) throws SQLException, IOException {
-    String sql = "SELECT s.* FROM plan_stages s JOIN plans p ON p.id = s.plan_id WHERE s.id = ? AND s.plan_id = ? AND p.workspace_id = ?";
+    String sql = "SELECT s.* FROM plan_stages s JOIN plans p ON p.id = s.plan_id WHERE s.id = ? AND s.plan_id = ? AND p.workspace_id = ? AND s.deleted_at IS NULL AND p.deleted_at IS NULL";
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
       p.setBytes(1, Database.uuidBytes(UUID.fromString(stageId))); p.setBytes(2, Database.uuidBytes(UUID.fromString(planId))); p.setBytes(3, Database.uuidBytes(workspace(e)));
       try (ResultSet rs = p.executeQuery()) { if (!rs.next()) { json(e, 404, Map.of("error", "stage_not_found")); return; } json(e, 200, stageRow(rs)); }
@@ -298,6 +465,7 @@ public final class ApiServer {
   private JsonObject stageRow(ResultSet rs) throws SQLException {
     JsonObject o = new JsonObject(); o.addProperty("id", Database.id(rs, "id")); o.addProperty("title", rs.getString("title"));
     o.addProperty("progress", rs.getDouble("progress")); o.addProperty("status", rs.getString("status"));
+    o.addProperty("taskProgress", rs.getDouble("task_progress")); o.addProperty("effortProgress", rs.getDouble("effort_progress")); o.addProperty("version", rs.getInt("version"));
     o.addProperty("dueLabel", rs.getDate("due_date") == null ? "待安排" : rs.getDate("due_date").toString());
     return o;
   }
@@ -434,7 +602,8 @@ public final class ApiServer {
 
   private void list(HttpExchange e, String table) throws SQLException, IOException {
     String scope = table.equals("plans") ? "workspace_id = ?" : "workspace_id = ?";
-    String sql = "SELECT * FROM " + table + " WHERE " + scope + " ORDER BY updated_at DESC";
+    String softDelete = List.of("plans", "todos", "schedule_items").contains(table) ? " AND deleted_at IS NULL" : "";
+    String sql = "SELECT * FROM " + table + " WHERE " + scope + softDelete + " ORDER BY updated_at DESC";
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
       p.setBytes(1, Database.uuidBytes(workspace(e)));
       try (ResultSet rs = p.executeQuery()) { List<JsonObject> rows = new ArrayList<>(); while (rs.next()) rows.add(row(rs, table)); json(e, 200, rows); }
@@ -442,7 +611,8 @@ public final class ApiServer {
   }
 
   private void get(HttpExchange e, String table, String id) throws SQLException, IOException {
-    String sql = "SELECT * FROM " + table + " WHERE id = ? AND workspace_id = ?";
+    String softDelete = List.of("plans", "todos", "schedule_items").contains(table) ? " AND deleted_at IS NULL" : "";
+    String sql = "SELECT * FROM " + table + " WHERE id = ? AND workspace_id = ?" + softDelete;
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
       p.setBytes(1, Database.uuidBytes(UUID.fromString(id))); p.setBytes(2, Database.uuidBytes(workspace(e)));
       try (ResultSet rs = p.executeQuery()) { if (!rs.next()) { json(e, 404, Map.of("error", "not_found")); return; } json(e, 200, row(rs, table)); }
@@ -451,6 +621,7 @@ public final class ApiServer {
 
   private void create(HttpExchange e, String table) throws SQLException, IOException {
     JsonObject body = body(e); String id = UUID.randomUUID().toString(); UUID workspace = workspace(e), user = user(e);
+    if (table.equals("schedule_items")) { json(e, 201, planExecution.createSchedule(context(e), body, "web")); return; }
     String sql;
     if (table.equals("plans")) sql = "INSERT INTO plans (id, workspace_id, owner_id, title, description, color, status, progress, due_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
     else if (table.equals("schedule_items")) sql = "INSERT INTO schedule_items (id, workspace_id, plan_id, created_by, title, description, start_at, duration_minutes, status, progress) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
@@ -469,22 +640,47 @@ public final class ApiServer {
 
   private void update(HttpExchange e, String table, String id) throws SQLException, IOException {
     JsonObject b = body(e); List<String> columns = new ArrayList<>(); List<Object> values = new ArrayList<>();
+    if (table.equals("schedule_items")) { json(e, 200, planExecution.updateSchedule(context(e), UUID.fromString(id), b, "web")); return; }
     if (table.equals("notes") && b.has("category")) { byte[] category = noteCategoryId(workspace(e), b); if (category != null) b.addProperty("categoryId", Database.bytesUuid(category).toString()); }
-    Map<String, String> allowed = table.equals("plans") ? Map.of("title", "title", "description", "description", "color", "color", "status", "status", "progress", "progress", "dueDate", "due_date") : table.equals("schedule_items") ? Map.of("title", "title", "description", "description", "startAt", "start_at", "durationMinutes", "duration_minutes", "status", "status", "progress", "progress", "planId", "plan_id") : table.equals("todos") ? Map.of("title", "title", "description", "description", "dueAt", "due_at", "status", "status", "priority", "priority", "reminderMinutes", "reminder_minutes") : Map.of("title", "title", "excerpt", "excerpt", "content", "content", "status", "status", "categoryId", "category_id");
+    Map<String, String> allowed = table.equals("plans") ? Map.of("title", "title", "description", "description", "color", "color", "status", "status", "dueDate", "due_date") : table.equals("todos") ? Map.of("title", "title", "description", "description", "dueAt", "due_at", "status", "status", "priority", "priority", "reminderMinutes", "reminder_minutes") : Map.of("title", "title", "excerpt", "excerpt", "content", "content", "status", "status", "categoryId", "category_id");
     for (Map.Entry<String, String> entry : allowed.entrySet()) if (b.has(entry.getKey())) { columns.add(entry.getValue() + " = ?"); values.add(value(b, entry.getKey())); }
+    String requestedStatus = string(b, "status", null);
+    if (table.equals("todos") && "done".equals(requestedStatus)) columns.add("completed_at = COALESCE(completed_at, NOW())");
+    if (table.equals("todos") && requestedStatus != null && !"done".equals(requestedStatus)) columns.add("completed_at = NULL");
     if (columns.isEmpty()) { json(e, 400, Map.of("error", "no_fields")); return; }
-    String sql = "UPDATE " + table + " SET " + String.join(", ", columns) + " WHERE id = ? AND workspace_id = ?";
-    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) { int i = 1; for (Object value : values) p.setObject(i++, value); p.setBytes(i++, Database.uuidBytes(UUID.fromString(id))); p.setBytes(i, Database.uuidBytes(workspace(e))); if (p.executeUpdate() == 0) { json(e, 404, Map.of("error", "not_found")); return; } }
+    boolean versioned = table.equals("plans") || table.equals("todos");
+    if (versioned) columns.add("version = version + 1");
+    Integer expectedVersion = versioned ? integerOrNull(b, "expectedVersion") : null;
+    String previousStatus = null;
+    if (table.equals("todos")) try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("SELECT status FROM todos WHERE id=? AND workspace_id=? AND deleted_at IS NULL")) { p.setBytes(1, Database.uuidBytes(UUID.fromString(id))); p.setBytes(2, Database.uuidBytes(workspace(e))); try (ResultSet rs = p.executeQuery()) { if (rs.next()) previousStatus = rs.getString(1); } }
+    String sql = "UPDATE " + table + " SET " + String.join(", ", columns) + " WHERE id = ? AND workspace_id = ?" + (versioned ? " AND deleted_at IS NULL" : "") + (expectedVersion == null ? "" : " AND version = ?");
+    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) { int i = 1; for (Object value : values) p.setObject(i++, value); p.setBytes(i++, Database.uuidBytes(UUID.fromString(id))); p.setBytes(i++, Database.uuidBytes(workspace(e))); if (expectedVersion != null) p.setInt(i, expectedVersion); if (p.executeUpdate() == 0) { error(e, expectedVersion == null ? 404 : 409, expectedVersion == null ? "not_found" : "version_conflict", expectedVersion == null ? "记录不存在" : "记录已被其他操作修改，请刷新后重试", false); return; }
+      if (table.equals("todos") && !"done".equals(previousStatus) && "done".equals(requestedStatus)) recordManualExecution(c, workspace(e), user(e), table, UUID.fromString(id), "complete_todo", string(b, "note", "手动完成待办"));
+      if (table.equals("todos") && "delayed".equals(requestedStatus)) recordManualExecution(c, workspace(e), user(e), table, UUID.fromString(id), "delay_todo", string(b, "note", "手动延期待办")); }
     get(e, table, id);
   }
 
-  private void delete(HttpExchange e, String table, String id) throws SQLException, IOException { try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("DELETE FROM " + table + " WHERE id = ? AND workspace_id = ?")) { p.setBytes(1, Database.uuidBytes(UUID.fromString(id))); p.setBytes(2, Database.uuidBytes(workspace(e))); json(e, p.executeUpdate() == 0 ? 404 : 204, Map.of("deleted", true)); } }
+  private void delete(HttpExchange e, String table, String id) throws SQLException, IOException {
+    if (List.of("plans", "todos", "schedule_items").contains(table)) {
+      try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("UPDATE " + table + " SET deleted_at=NOW(),purge_after=DATE_ADD(NOW(),INTERVAL 30 DAY),version=version+1 WHERE id=? AND workspace_id=? AND deleted_at IS NULL")) {
+        p.setBytes(1, Database.uuidBytes(UUID.fromString(id))); p.setBytes(2, Database.uuidBytes(workspace(e))); json(e, p.executeUpdate() == 0 ? 404 : 204, Map.of("deleted", true));
+      }
+      return;
+    }
+    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("DELETE FROM " + table + " WHERE id = ? AND workspace_id = ?")) { p.setBytes(1, Database.uuidBytes(UUID.fromString(id))); p.setBytes(2, Database.uuidBytes(workspace(e))); json(e, p.executeUpdate() == 0 ? 404 : 204, Map.of("deleted", true)); }
+  }
+
+  private void recordManualExecution(Connection c, UUID workspace, UUID user, String table, UUID entityId, String action, String note) throws SQLException {
+    try (PreparedStatement p = c.prepareStatement("INSERT INTO execution_records (id, workspace_id, user_id, entity_type, entity_id, action_type, note, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?, NOW())")) {
+      p.setBytes(1, Database.uuidBytes(UUID.randomUUID())); p.setBytes(2, Database.uuidBytes(workspace)); p.setBytes(3, Database.uuidBytes(user)); p.setString(4, table); p.setBytes(5, Database.uuidBytes(entityId)); p.setString(6, action); p.setString(7, note); p.executeUpdate();
+    }
+  }
 
   private void listRelations(HttpExchange e, String noteId) throws SQLException, IOException { String sql = "SELECT n.id, n.title, r.relation_type FROM note_relations r JOIN notes n ON n.id = r.to_note_id WHERE r.from_note_id = ? UNION SELECT n.id, n.title, r.relation_type FROM note_relations r JOIN notes n ON n.id = r.from_note_id WHERE r.to_note_id = ?"; try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) { p.setBytes(1, Database.uuidBytes(UUID.fromString(noteId))); p.setBytes(2, Database.uuidBytes(UUID.fromString(noteId))); try (ResultSet rs = p.executeQuery()) { List<JsonObject> rows = new ArrayList<>(); while (rs.next()) { JsonObject row = new JsonObject(); row.addProperty("id", Database.id(rs, "id")); row.addProperty("title", rs.getString("title")); row.addProperty("relationType", rs.getString("relation_type")); rows.add(row); } json(e, 200, rows); } } }
   private void createRelation(HttpExchange e, String fromId) throws SQLException, IOException { JsonObject b = body(e); String toId = string(b, "toNoteId", null); requireId(toId); try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("INSERT INTO note_relations (from_note_id, to_note_id, relation_type) VALUES (?, ?, ?)")) { p.setBytes(1, Database.uuidBytes(UUID.fromString(fromId))); p.setBytes(2, Database.uuidBytes(UUID.fromString(toId))); p.setString(3, string(b, "relationType", "related")); p.executeUpdate(); } json(e, 201, Map.of("fromNoteId", fromId, "toNoteId", toId, "relationType", string(b, "relationType", "related"))); }
   private void deleteRelation(HttpExchange e, String fromId) throws SQLException, IOException { JsonObject b = body(e); requireId(string(b, "toNoteId", null)); try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("DELETE FROM note_relations WHERE from_note_id = ? AND to_note_id = ?")) { p.setBytes(1, Database.uuidBytes(UUID.fromString(fromId))); p.setBytes(2, Database.uuidBytes(UUID.fromString(string(b, "toNoteId", null)))); json(e, p.executeUpdate() == 0 ? 404 : 204, Map.of("deleted", true)); } }
 
-  private JsonObject row(ResultSet rs, String table) throws SQLException { JsonObject o = new JsonObject(); o.addProperty("id", Database.id(rs, "id")); o.addProperty("title", rs.getString("title")); if (table.equals("plans")) { o.addProperty("description", rs.getString("description")); o.addProperty("color", rs.getString("color")); o.addProperty("status", rs.getString("status")); o.addProperty("progress", rs.getDouble("progress")); java.sql.Date dueDate = rs.getDate("due_date"); o.addProperty("dueDate", dueDate == null ? null : dueDate.toString()); } else if (table.equals("schedule_items")) { o.addProperty("description", rs.getString("description")); o.addProperty("startAt", String.valueOf(rs.getTimestamp("start_at"))); o.addProperty("durationMinutes", rs.getInt("duration_minutes")); o.addProperty("status", rs.getString("status")); o.addProperty("progress", rs.getDouble("progress")); o.addProperty("planId", rs.getBytes("plan_id") == null ? null : Database.id(rs, "plan_id")); } else if (table.equals("todos")) { o.addProperty("description", rs.getString("description")); Timestamp dueAt = rs.getTimestamp("due_at"); o.addProperty("dueAt", dueAt == null ? null : dueAt.toString()); o.addProperty("status", rs.getString("status")); o.addProperty("priority", rs.getString("priority")); o.addProperty("reminderMinutes", (Integer) rs.getObject("reminder_minutes")); } else { o.addProperty("excerpt", rs.getString("excerpt")); o.addProperty("content", rs.getString("content")); o.addProperty("sourceType", rs.getString("source_type")); o.addProperty("status", rs.getString("status")); byte[] category = rs.getBytes("category_id"); o.addProperty("categoryId", category == null ? null : Database.bytesUuid(category).toString()); o.addProperty("category", category == null ? "未分类" : categoryName(category)); } return o; }
+  private JsonObject row(ResultSet rs, String table) throws SQLException { JsonObject o = new JsonObject(); o.addProperty("id", Database.id(rs, "id")); o.addProperty("title", rs.getString("title")); if (table.equals("plans")) { o.addProperty("description", rs.getString("description")); o.addProperty("color", rs.getString("color")); o.addProperty("status", rs.getString("status")); o.addProperty("progress", rs.getDouble("progress")); o.addProperty("taskProgress", rs.getDouble("task_progress")); o.addProperty("effortProgress", rs.getDouble("effort_progress")); o.addProperty("version", rs.getInt("version")); java.sql.Date dueDate = rs.getDate("due_date"); o.addProperty("dueDate", dueDate == null ? null : dueDate.toString()); } else if (table.equals("schedule_items")) { o.addProperty("description", rs.getString("description")); o.addProperty("startAt", String.valueOf(rs.getTimestamp("start_at"))); o.addProperty("durationMinutes", rs.getInt("duration_minutes")); o.addProperty("status", rs.getString("status")); o.addProperty("progress", rs.getDouble("progress")); o.addProperty("planId", rs.getBytes("plan_id") == null ? null : Database.id(rs, "plan_id")); o.addProperty("stageId", rs.getBytes("stage_id") == null ? null : Database.id(rs, "stage_id")); o.addProperty("taskId", rs.getBytes("task_id") == null ? null : Database.id(rs, "task_id")); o.addProperty("version", rs.getInt("version")); } else if (table.equals("todos")) { o.addProperty("description", rs.getString("description")); Timestamp dueAt = rs.getTimestamp("due_at"); o.addProperty("dueAt", dueAt == null ? null : dueAt.toString()); o.addProperty("status", rs.getString("status")); o.addProperty("priority", rs.getString("priority")); o.addProperty("reminderMinutes", (Integer) rs.getObject("reminder_minutes")); o.addProperty("version", rs.getInt("version")); } else { o.addProperty("excerpt", rs.getString("excerpt")); o.addProperty("content", rs.getString("content")); o.addProperty("sourceType", rs.getString("source_type")); o.addProperty("status", rs.getString("status")); byte[] category = rs.getBytes("category_id"); o.addProperty("categoryId", category == null ? null : Database.bytesUuid(category).toString()); o.addProperty("category", category == null ? "未分类" : categoryName(category)); } return o; }
 
   private byte[] noteCategoryId(UUID workspace, JsonObject body) throws SQLException {
     String category = string(body, "category", null); if (category == null || category.isBlank()) return bytesOrNull(body, "categoryId");
@@ -501,6 +697,7 @@ public final class ApiServer {
   private JsonObject body(HttpExchange e) throws IOException { try (InputStream in = e.getRequestBody()) { String raw = new String(in.readAllBytes(), StandardCharsets.UTF_8); return raw.isBlank() ? new JsonObject() : gson.fromJson(raw, JsonObject.class); } }
   private UUID workspace(HttpExchange e) { return uuidHeader(e, "X-Workspace-Id", Database.DEFAULT_WORKSPACE_ID); }
   private UUID user(HttpExchange e) { return uuidHeader(e, "X-User-Id", Database.DEFAULT_USER_ID); }
+  private Database.Context context(HttpExchange e) { return new Database.Context(user(e), workspace(e)); }
   private UUID uuidHeader(HttpExchange e, String name, UUID fallback) { String value = e.getRequestHeaders().getFirst(name); return value == null || value.isBlank() ? fallback : UUID.fromString(value); }
   private String pathId(HttpExchange e) { String[] p = e.getRequestURI().getPath().split("/"); return p.length > 3 && !p[3].isBlank() ? p[3] : null; }
   private void requireId(String id) { if (id == null || id.isBlank()) throw new IllegalArgumentException("id_required"); UUID.fromString(id); }
@@ -513,4 +710,8 @@ public final class ApiServer {
   private java.sql.Date date(JsonObject o, String key) { String v = string(o, key, null); return v == null ? null : java.sql.Date.valueOf(LocalDate.parse(v)); }
   private Timestamp timestamp(JsonObject o, String key) { String v = string(o, key, null); if (v == null) throw new IllegalArgumentException(key + "_required"); return Timestamp.valueOf(LocalDateTime.parse(v.replace("Z", ""))); }
   private Timestamp nullableTimestamp(JsonObject o, String key) { String v = string(o, key, null); return v == null ? null : timestamp(o, key); }
+  private void error(HttpExchange e, int status, String code, String message, boolean retryable) throws IOException {
+    JsonObject result = new JsonObject(); result.addProperty("error", code); result.addProperty("message", message == null || message.isBlank() ? code : message);
+    result.add("details", new JsonObject()); result.addProperty("retryable", retryable); json(e, status, result);
+  }
 }

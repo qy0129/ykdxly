@@ -131,8 +131,8 @@ public final class WechatBotAgent implements AutoCloseable {
     schedulePendingGreeting(current, userId);
     try {
       String reply;
-      if (isCapture(text)) reply = planner.capture(userId, text);
-      else if (isCommand(text)) reply = planner.command(userId, text);
+      if (isNoteCapture(text)) reply = planner.capture(userId, text);
+      else if (isReadOnlyCommand(text)) reply = planner.command(userId, text);
       else if (text.contains("计划网页") || text.contains("工作台") || text.equals("打开计划")) reply = webLinkMessage();
       else reply = planner.aiChat(userId, text);
       current.sendText(userId, reply);
@@ -187,8 +187,8 @@ public final class WechatBotAgent implements AutoCloseable {
     return message.getItem_list().stream().filter(item -> item != null && item.getText_item() != null).map(item -> item.getText_item().getText()).filter(value -> value != null && !value.isBlank()).findFirst().orElse("").trim();
   }
 
-  private boolean isCapture(String text) { return text.startsWith("计划:") || text.startsWith("计划：") || text.startsWith("待办:") || text.startsWith("待办：") || text.startsWith("日程:") || text.startsWith("日程：") || text.startsWith("笔记:") || text.startsWith("笔记："); }
-  private boolean isCommand(String text) { String value = text.replaceAll("[\\s，。！？、,.!?]", ""); return value.equals("今天还有什么") || value.equals("今天还有哪些") || value.equals("计划完成得怎么样") || value.startsWith("完成:") || value.startsWith("完成：") || value.startsWith("删除:") || value.startsWith("删除：") || value.startsWith("确认删除:") || value.startsWith("确认删除："); }
+  private boolean isNoteCapture(String text) { return text.startsWith("笔记:") || text.startsWith("笔记："); }
+  private boolean isReadOnlyCommand(String text) { String value = text.replaceAll("[\\s，。！？、,.!?]", ""); return value.equals("今天还有什么") || value.equals("今天还有哪些") || value.equals("计划完成得怎么样"); }
   private String configuredWebUrl() {
     String configured = EnvironmentConfig.value("PLANNER_WEB_URL", "web.url", "");
     if (configured.isBlank()) return "http://" + lanAddress() + ":8081/";

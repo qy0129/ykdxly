@@ -1,8 +1,15 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ArrowRight, Bell, CalendarDays, CheckSquare2, ChevronDown, Menu, MoreHorizontal, Plus, Search, Target, X } from 'lucide-react'
 import type { Plan } from '../../types/planner'
+import { plannerApi, type UserProfile } from '../../services/plannerApi'
 import { ProgressRing } from '../ui/ProgressRing'
 import { navItems, type GlobalSearchItem, type GlobalTargetType, type NotificationEntry, type View } from '../../app/navigation'
+
+const defaultProfile: UserProfile = { displayName: '长路用户', avatarUrl: '' }
+
+function profileInitial(displayName: string) {
+  return displayName.trim().slice(0, 1) || '长'
+}
 
 /** 应用侧栏和顶部栏只处理导航交互，不持有业务数据。 */
 export function Sidebar({
@@ -23,6 +30,17 @@ export function Sidebar({
   onMobileClose: () => void
 }) {
   const [expandedPlans, setExpandedPlans] = useState<string[]>(['product', 'travel'])
+  const [profile, setProfile] = useState<UserProfile>(defaultProfile)
+  const [profileDraft, setProfileDraft] = useState<UserProfile>(defaultProfile)
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [profileSaving, setProfileSaving] = useState(false)
+
+  useEffect(() => {
+    void plannerApi.loadProfile().then((value) => {
+      setProfile(value)
+      setProfileDraft(value)
+    }).catch(() => undefined)
+  }, [])
 
   const togglePlan = (planId: string) => {
     setExpandedPlans((current) =>
@@ -250,4 +268,3 @@ export function AppHeader({
     </header>
   )
 }
-

@@ -21,7 +21,10 @@ final class DatabaseMigrator {
   private static final List<String> MIGRATIONS = List.of(
       "001_core.sql",
       "002_ai_review.sql",
-      "003_wechat_login.sql"
+      "003_wechat_login.sql",
+      "004_ai_command_drafts.sql",
+      "005_plan_execution_loop.sql",
+      "006_user_profile.sql"
   );
 
   private DatabaseMigrator() {}

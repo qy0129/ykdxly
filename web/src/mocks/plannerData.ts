@@ -1,6 +1,6 @@
 import type { CalendarItem, Note, Plan, SourceMaterial, TodoItem } from '../types/planner'
 
-// 这些数据只用于后端不可用时的本地预览，真实业务数据由 plannerApi 加载。
+// 这些数据只用于组件开发示例，不会在生产页面回退展示。
 
 export const plans: Plan[] = [
   {
@@ -8,15 +8,16 @@ export const plans: Plan[] = [
     title: '独立开发产品稳定迭代',
     subtitle: '本月重点 · 还有 114 天',
     progress: 68,
+    taskProgress: 68, effortProgress: 68, version: 0,
     color: '#d39a24',
     status: 'active',
     completedTasks: 27,
     totalTasks: 40,
     dueDate: '2026-11-24',
     items: [
-      { id: 'p1', title: '产品核心功能', progress: 82, dueLabel: '8 月 16 日' },
-      { id: 'p2', title: '设计系统整理', progress: 64, dueLabel: '8 月 23 日' },
-      { id: 'p3', title: '邀请首批用户', progress: 36, dueLabel: '9 月 5 日' },
+      { id: 'p1', title: '产品核心功能', progress: 82, taskProgress: 82, effortProgress: 82, version: 0, tasks: [], dueLabel: '8 月 16 日' },
+      { id: 'p2', title: '设计系统整理', progress: 64, taskProgress: 64, effortProgress: 64, version: 0, tasks: [], dueLabel: '8 月 23 日' },
+      { id: 'p3', title: '邀请首批用户', progress: 36, taskProgress: 36, effortProgress: 36, version: 0, tasks: [], dueLabel: '9 月 5 日' },
     ],
   },
   {
@@ -24,14 +25,15 @@ export const plans: Plan[] = [
     title: '体验旅居生活',
     subtitle: '长期计划 · 云南篇',
     progress: 42,
+    taskProgress: 42, effortProgress: 42, version: 0,
     color: '#72806a',
     status: 'active',
     completedTasks: 8,
     totalTasks: 19,
     dueDate: '2026-10-18',
     items: [
-      { id: 't1', title: 'DN 余村数字游民生活', progress: 58, dueLabel: '9 月 12 日' },
-      { id: 't2', title: '旅居内容记录', progress: 26, dueLabel: '持续进行' },
+      { id: 't1', title: 'DN 余村数字游民生活', progress: 58, taskProgress: 58, effortProgress: 58, version: 0, tasks: [], dueLabel: '9 月 12 日' },
+      { id: 't2', title: '旅居内容记录', progress: 26, taskProgress: 26, effortProgress: 26, version: 0, tasks: [], dueLabel: '持续进行' },
     ],
   },
   {
@@ -39,14 +41,15 @@ export const plans: Plan[] = [
     title: '个人品牌长期建设',
     subtitle: '内容与影响力',
     progress: 56,
+    taskProgress: 56, effortProgress: 56, version: 0,
     color: '#b85f42',
     status: 'active',
     completedTasks: 14,
     totalTasks: 25,
     dueDate: '2026-12-31',
     items: [
-      { id: 'b1', title: '稳定更新每周内容', progress: 72, dueLabel: '每周五' },
-      { id: 'b2', title: '完成 3 篇深度文章', progress: 33, dueLabel: '8 月 30 日' },
+      { id: 'b1', title: '稳定更新每周内容', progress: 72, taskProgress: 72, effortProgress: 72, version: 0, tasks: [], dueLabel: '每周五' },
+      { id: 'b2', title: '完成 3 篇深度文章', progress: 33, taskProgress: 33, effortProgress: 33, version: 0, tasks: [], dueLabel: '8 月 30 日' },
     ],
   },
   {
@@ -54,14 +57,15 @@ export const plans: Plan[] = [
     title: '持续学习与输入',
     subtitle: 'AI 与产品设计',
     progress: 31,
+    taskProgress: 31, effortProgress: 31, version: 0,
     color: '#7c647d',
     status: 'active',
     completedTasks: 9,
     totalTasks: 29,
     dueDate: '2026-12-15',
     items: [
-      { id: 'l1', title: '完成 Agent 架构课程', progress: 46, dueLabel: '8 月 27 日' },
-      { id: 'l2', title: '每周阅读与复盘', progress: 22, dueLabel: '持续进行' },
+      { id: 'l1', title: '完成 Agent 架构课程', progress: 46, taskProgress: 46, effortProgress: 46, version: 0, tasks: [], dueLabel: '8 月 27 日' },
+      { id: 'l2', title: '每周阅读与复盘', progress: 22, taskProgress: 22, effortProgress: 22, version: 0, tasks: [], dueLabel: '持续进行' },
     ],
   },
 ]

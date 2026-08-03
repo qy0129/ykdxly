@@ -1,7 +1,31 @@
 import { useState } from 'react'
 import { BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, NotebookPen, PenLine, Play, Plus, RefreshCw, Save, Sparkles, X } from 'lucide-react'
-import { eventMaterials, sourceMaterials } from '../../mocks/plannerData'
-import type { CalendarItem, Note, Plan } from '../../types/planner'
+import type { CalendarItem, Note, Plan, SourceMaterial } from '../../types/planner'
+
+function buildSearchMaterials(item: CalendarItem, plan?: Plan): SourceMaterial[] {
+  const query = [plan?.title, item.title].filter(Boolean).join(' ').trim()
+  const encodedQuery = encodeURIComponent(query || item.title)
+  return [
+    {
+      id: `bilibili-search-${item.id}`,
+      source: '哔哩哔哩',
+      title: `搜索：${query || item.title}`,
+      summary: '打开哔哩哔哩，查看与当前计划和日程相关的视频。',
+      meta: '哔哩哔哩搜索',
+      url: `https://search.bilibili.com/all?keyword=${encodedQuery}`,
+      color: '#b85f42',
+    },
+    {
+      id: `xiaohongshu-search-${item.id}`,
+      source: '小红书',
+      title: `搜索：${query || item.title}`,
+      summary: '打开小红书，查看与当前计划和日程相关的笔记。',
+      meta: '小红书搜索',
+      url: `https://www.xiaohongshu.com/search_result?keyword=${encodedQuery}`,
+      color: '#d77d55',
+    },
+  ]
+}
 
 /** 日程详情聚合资料与关联笔记，但不直接访问后端。 */
 export function ScheduleDetailPage({
@@ -28,12 +52,11 @@ export function ScheduleDetailPage({
   const [savedSources, setSavedSources] = useState<string[]>([])
   const [personalNoteId, setPersonalNoteId] = useState<string | null>(null)
   const plan = plansData.find((value) => value.id === item.planId)
-  const materialIds = eventMaterials[item.id] ?? sourceMaterials.slice(0, 2).map((material) => material.id)
-  const materials = sourceMaterials.filter((material) => materialIds.includes(material.id))
+  const materials = buildSearchMaterials(item, plan)
 
   const saveSource = (materialId: string) => {
     if (savedSources.includes(materialId)) return
-    const material = sourceMaterials.find((value) => value.id === materialId)
+    const material = materials.find((value) => value.id === materialId)
     if (!material) return
     const next: Note = {
       id: 'source-note-' + Date.now(),
@@ -173,4 +196,3 @@ export function ScheduleDetailPage({
     </div>
   )
 }
-
