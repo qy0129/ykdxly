@@ -103,6 +103,57 @@ export interface AiReviewResponse {
   changes: AiPlanChange[]
 }
 
+export interface AiDraftAction {
+  type: string
+  summary: string
+  targetId?: string
+  fields: Record<string, unknown>
+  changes?: Array<{ field: string; before: unknown; after: unknown }>
+}
+
+export interface AiDraft {
+  id: string
+  code: string
+  reply: string
+  status: 'pending' | 'confirmed' | 'cancelled' | 'expired'
+  expiresAt: string
+  actions: AiDraftAction[]
+}
+
+export interface AiCommandResponse {
+  conversationId: string
+  reply: string
+  questions: string[]
+  actions: AiDraftAction[]
+  draft?: AiDraft
+}
+
+export interface AiSession {
+  conversationId?: string
+  messages: Array<{ role: 'user' | 'assistant'; content: string; createdAt: string }>
+  draft?: AiDraft
+}
+
+export interface PlanningPreference {
+  configured: boolean
+  timezone: string
+  availability?: Record<string, Array<{ start: string; end: string }>>
+  maxSessionMinutes?: number
+  bufferMinutes?: number
+}
+
+export interface ReviewFacts {
+  date: string
+  completed: number
+  completedTasks: number
+  scheduleCompleted: number
+  delayed: number
+  focusMinutes: number
+  blocked: number
+  estimationError7d: number
+  logs: Array<{ entityType: string; action: string; note: string; actualMinutes?: number; occurredAt: string }>
+}
+
 export interface UserProfile {
   displayName: string
   avatarUrl: string
@@ -122,6 +173,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
+}
+
+function requireArray<T>(value: unknown, path: string): T[] {
+  if (!Array.isArray(value)) throw new Error(`${path} 返回格式错误：预期数组`)
+  return value as T[]
 }
 
 function splitDateTime(value?: string | null) {
@@ -144,16 +200,20 @@ function todoDueAt(item: TodoItem) {
 
 export const plannerApi = {
   async load() {
-    const [rawPlans, rawSchedules, rawTodos, rawNotes, stats] = await Promise.all([
-      request<ApiPlan[]>('/plans'),
-      request<ApiSchedule[]>('/schedules'),
-      request<ApiTodo[]>('/todos'),
-      request<ApiNote[]>('/notes'),
+    const [plansValue, schedulesValue, todosValue, notesValue, stats] = await Promise.all([
+      request<unknown>('/plans'),
+      request<unknown>('/schedules'),
+      request<unknown>('/todos'),
+      request<unknown>('/notes'),
       request<PlannerStats>('/stats'),
     ])
+    const rawPlans = requireArray<ApiPlan>(plansValue, '/plans')
+    const rawSchedules = requireArray<ApiSchedule>(schedulesValue, '/schedules')
+    const rawTodos = requireArray<ApiTodo>(todosValue, '/todos')
+    const rawNotes = requireArray<ApiNote>(notesValue, '/notes')
     const [stages, tasks] = await Promise.all([
-      Promise.all(rawPlans.map((item) => request<ApiStage[]>(`/plans/${item.id}/stages`))),
-      Promise.all(rawPlans.map((item) => request<ApiTask[]>(`/plans/${item.id}/tasks`))),
+      Promise.all(rawPlans.map(async (item) => requireArray<ApiStage>(await request<unknown>(`/plans/${item.id}/stages`), `/plans/${item.id}/stages`))),
+      Promise.all(rawPlans.map(async (item) => requireArray<ApiTask>(await request<unknown>(`/plans/${item.id}/tasks`), `/plans/${item.id}/tasks`))),
     ])
     const relations = await Promise.all(rawNotes.map((item) => request<Array<{ id: string }>>(`/notes/${item.id}/relations`)))
     const plans: Plan[] = rawPlans.map((item, index) => ({
@@ -213,8 +273,6 @@ export const plannerApi = {
   deleteNote: (id: string) => request<void>(`/notes/${id}`, { method: 'DELETE' }),
   createNoteRelation: (fromNoteId: string, toNoteId: string) => request<void>(`/notes/${fromNoteId}/relations`, { method: 'POST', body: JSON.stringify({ toNoteId }) }),
   deleteNoteRelation: (fromNoteId: string, toNoteId: string) => request<void>(`/notes/${fromNoteId}/relations`, { method: 'DELETE', body: JSON.stringify({ toNoteId }) }),
-  loadProfile: () => request<UserProfile>('/profile'),
-  saveProfile: (value: UserProfile) => request<UserProfile>('/profile', { method: 'PUT', body: JSON.stringify(value) }),
   downloadExcel: async () => {
     const response = await fetch(API_BASE + '/export/xlsx')
     if (!response.ok) throw new Error(`API ${response.status}: /export/xlsx`)
