@@ -7,7 +7,6 @@ backend/*.log
 backend/config.properties
 
 web/node_modules/
-web/dist/
 web/*.log
 
 data/sdk-resume-context.json

@@ -11,8 +11,8 @@ export function PlanDialog({ onClose, onSubmit }: { onClose: () => void; onSubmi
     if (!draft.title.trim()) return
     onSubmit({
       id: 'plan-' + Date.now(), title: draft.title.trim(), subtitle: draft.subtitle.trim() || '新的长期计划',
-      progress: 0, color: draft.color, status: 'active', completedTasks: 0, totalTasks: 0,
-      dueDate: draft.dueDate, items: [],
+      progress: 0, taskProgress: 0, effortProgress: 0, color: draft.color, status: 'active', completedTasks: 0, totalTasks: 0,
+      dueDate: draft.dueDate, items: [], version: 0,
     })
   }
 

@@ -1,15 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { format, parseISO } from 'date-fns'
-import {
-  calendarItems as initialCalendarItems,
-  dailyCompletion,
-  heatmapValues,
-  monthlyHistory,
-  notes as initialNotes,
-  plans,
-  initialTodos,
-} from '../mocks/plannerData'
-import type { CalendarItem, Note, Plan, PlanItem, TodoItem } from '../types/planner'
+import type { CalendarItem, Note, Plan, PlanItem, PlanTask, TodoItem } from '../types/planner'
 import '../styles/app.css'
 import { plannerApi, type PlannerStats } from '../services/plannerApi'
 import { PlanDialog, ScheduleDialog, TodoDialog } from '../components/dialogs/PlannerDialogs'
@@ -28,20 +19,20 @@ import { ScheduleDetailPage } from '../features/schedule/ScheduleDetailPage'
 import { StatsPage } from '../features/stats/StatsPage'
 import { ReviewPage } from '../features/review/ReviewPage'
 const initialStats: PlannerStats = {
-  daily: dailyCompletion,
-  heatmap: heatmapValues.map((cell) => ({ ...cell, id: String(cell.id) })),
-  monthly: monthlyHistory,
-  metrics: { completion: 81, completed: 82, planned: 101, focusHours: 46.5, streak: 12 },
+  daily: [],
+  heatmap: [],
+  monthly: [],
+  metrics: { completion: 0, completed: 0, planned: 0, focusHours: 0, streak: 0 },
 }
 
 function App() {
   // App 只保留跨页面状态和数据同步；表单和通用视觉组件已下沉到独立模块。
   const [activeView, setActiveView] = useState<View>('calendar')
   const [activePlanId, setActivePlanId] = useState('product')
-  const [plansData, setPlansData] = useState<Plan[]>(plans)
-  const [calendarItems, setCalendarItems] = useState<CalendarItem[]>(initialCalendarItems)
-  const [todoItems, setTodoItems] = useState<TodoItem[]>(initialTodos)
-  const [noteItems, setNoteItems] = useState<Note[]>(initialNotes)
+  const [plansData, setPlansData] = useState<Plan[]>([])
+  const [calendarItems, setCalendarItems] = useState<CalendarItem[]>([])
+  const [todoItems, setTodoItems] = useState<TodoItem[]>([])
+  const [noteItems, setNoteItems] = useState<Note[]>([])
   const [statsData, setStatsData] = useState<PlannerStats>(initialStats)
   const [openedSchedule, setOpenedSchedule] = useState<CalendarItem | null>(null)
   const [selectedNoteId, setSelectedNoteId] = useState<string | undefined>()
@@ -49,30 +40,33 @@ function App() {
   const [todoDialogOpen, setTodoDialogOpen] = useState(false)
   const [scheduleDialog, setScheduleDialog] = useState<{ date?: string; planId?: string; item?: CalendarItem } | null>(null)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
+  const [dataError, setDataError] = useState('')
+  const [dataRevision, setDataRevision] = useState(0)
+  const [reviewSeed, setReviewSeed] = useState('')
 
-  useEffect(() => {
-    // 后端是事实来源；初始化和定时刷新失败时，继续展示 mocks 中的可交互预览。
-    let active = true
-    const refreshData = () => plannerApi.load().then((data) => {
-      if (!active) return
+  const refreshData = useCallback(async () => {
+    try {
+      const data = await plannerApi.load()
       setPlansData(data.plans)
       setCalendarItems(data.schedules)
       setTodoItems(data.todos)
       setNoteItems(data.notes)
       setStatsData(data.stats)
+      setDataError('')
       setActivePlanId((current) => data.plans.some((plan) => plan.id === current) ? current : (data.plans[0]?.id ?? ''))
-    }).catch(() => {
-      // 数据库未启动时继续使用页面内的预览数据。
-    })
-    void refreshData()
-    const timer = window.setInterval(() => { void refreshData() }, 4000)
-    window.addEventListener('focus', refreshData)
-    return () => {
-      active = false
-      window.clearInterval(timer)
-      window.removeEventListener('focus', refreshData)
+    } catch (cause) {
+      setDataError(cause instanceof Error ? cause.message : '无法读取真实数据，请检查后端和数据库连接。')
     }
   }, [])
+
+  useEffect(() => {
+    // 后端是唯一事实来源；仅在进入页面、操作成功或窗口重新聚焦时刷新。
+    void refreshData()
+    window.addEventListener('focus', refreshData)
+    return () => {
+      window.removeEventListener('focus', refreshData)
+    }
+  }, [dataRevision, refreshData])
 
   // 待办安排到日期后映射成日历条目，但不复制成另一份可持久化数据。
   const calendarEntries = useMemo<CalendarItem[]>(() => [
@@ -140,113 +134,54 @@ function App() {
     if (view !== 'schedule') setOpenedSchedule(null)
   }
 
-  // 先更新界面再提交 API，保证网络延迟不会阻塞日历勾选；失败时下一次刷新会纠正状态。
+  const mutation = async (work: Promise<unknown>) => {
+    setDataError('')
+    try { await work; await refreshData() }
+    catch (cause) { setDataError(cause instanceof Error ? cause.message : '保存失败') }
+  }
+
   const toggleCalendarItem = (id: string) => {
-    if (todoItems.some((item) => item.id === id)) {
-      setTodoItems((current) => current.map((item) => {
-        if (item.id !== id) return item
-        const next = { ...item, done: !item.done }
-        void plannerApi.updateTodo(next).catch(() => undefined)
-        return next
-      }))
-      return
-    }
-    setCalendarItems((current) => current.map((item) => {
-      if (item.id !== id) return item
-      const next = { ...item, status: (item.status === 'done' ? 'pending' : 'done') as CalendarItem['status'] }
-      void plannerApi.updateSchedule(next).catch(() => undefined)
-      return next
-    }))
-    setOpenedSchedule((current) => current?.id === id
-      ? { ...current, status: current.status === 'done' ? 'pending' : 'done' }
-      : current)
+    const todo = todoItems.find((item) => item.id === id)
+    if (todo) { void mutation(plannerApi.updateTodo({ ...todo, done: !todo.done })); return }
+    const schedule = calendarItems.find((item) => item.id === id)
+    if (schedule) void mutation(plannerApi.updateSchedule({ ...schedule, status: schedule.status === 'done' ? 'pending' : 'done' }))
   }
 
-  const createPlan = (plan: Plan) => {
-    setPlansData((current) => [...current, plan])
-    void plannerApi.createPlan(plan).then((created) => {
-      setPlansData((current) => current.map((item) => item.id === plan.id ? { ...item, id: created.id } : item))
-      setActivePlanId(created.id)
-    }).catch(() => undefined)
-    setActivePlanId(plan.id)
-    setPlanDialogOpen(false)
-    setActiveView('plans')
+  const createPlan = async (plan: Plan) => {
+    setDataError('')
+    try { const created = await plannerApi.createPlan(plan); await refreshData(); setActivePlanId(created.id); setPlanDialogOpen(false); setActiveView('plans') }
+    catch (cause) { setDataError(cause instanceof Error ? cause.message : '计划创建失败') }
   }
 
-  const updatePlan = (next: Plan) => {
-    setPlansData((current) => current.map((plan) => plan.id === next.id ? next : plan))
-    void plannerApi.updatePlan(next).catch(() => undefined)
-  }
+  const updatePlan = (next: Plan) => { void mutation(plannerApi.updatePlan(next)) }
+  const deletePlan = (id: string) => { if (window.confirm('删除后将进入回收站 30 天，确认继续？')) void mutation(plannerApi.deletePlan(id)) }
+  const createStage = (planId: string, item: PlanItem) => { void mutation(plannerApi.createPlanStage(planId, item)) }
+  const updateStage = (planId: string, item: PlanItem) => { void mutation(plannerApi.updatePlanStage(planId, item)) }
+  const deleteStage = (planId: string, item: PlanItem) => { if (window.confirm('阶段及其任务将进入回收站，确认继续？')) void mutation(plannerApi.deletePlanStage(planId, item.id, item.version)) }
 
-  const deletePlan = (id: string) => {
-    void plannerApi.deletePlan(id).catch(() => undefined)
-    setPlansData((current) => current.filter((plan) => plan.id !== id))
-    setCalendarItems((current) => current.filter((item) => item.planId !== id))
-    const next = plansData.find((plan) => plan.id !== id)
-    if (next) setActivePlanId(next.id)
+  const createTask = (planId: string, stageId: string, fields: { title: string; estimatedMinutes?: number; dueAt?: string }) => {
+    void mutation(plannerApi.createTask({ planId, stageId, title: fields.title, estimatedMinutes: fields.estimatedMinutes, dueAt: fields.dueAt, priority: 'medium' }))
   }
+  const updateTask = (task: PlanTask) => { void mutation(plannerApi.updateTask(task)) }
+  const taskAction = async (task: PlanTask, action: 'complete' | 'delay' | 'block' | 'skip' | 'cancel' | 'reopen', fields: Record<string, unknown> = {}) => {
+    setDataError('')
+    try {
+      const result = await plannerApi.taskAction(task, action, fields)
+      await refreshData()
+      return { ...task, ...result } as PlanTask
+    } catch (cause) { setDataError(cause instanceof Error ? cause.message : '任务状态更新失败') }
+  }
+  const deleteTask = (task: PlanTask) => { if (window.confirm('任务将进入回收站 30 天，确认继续？')) void mutation(plannerApi.deleteTask(task)) }
 
-  const createStage = (planId: string, item: PlanItem) => {
-    setPlansData((current) => current.map((plan) => {
-      if (plan.id !== planId) return plan
-      const items = [...plan.items, item]
-      return { ...plan, items, totalTasks: items.length, progress: Math.round(items.reduce((sum, value) => sum + value.progress, 0) / items.length) }
-    }))
-    void plannerApi.createPlanStage(planId, item).then((created) => {
-      setPlansData((current) => current.map((plan) => plan.id === planId
-        ? { ...plan, items: plan.items.map((stage) => stage.id === item.id ? { ...stage, id: created.id } : stage) }
-        : plan))
-    }).catch(() => undefined)
+  const saveSchedule = async (item: CalendarItem) => {
+    setDataError('')
+    try { if (calendarItems.some((value) => value.id === item.id)) await plannerApi.updateSchedule(item); else await plannerApi.createSchedule(item); await refreshData(); setScheduleDialog(null); setActiveView('calendar') }
+    catch (cause) { setDataError(cause instanceof Error ? cause.message : '日程保存失败') }
   }
-
-  const updateStage = (planId: string, item: PlanItem) => {
-    setPlansData((current) => current.map((plan) => {
-      if (plan.id !== planId) return plan
-      const items = plan.items.map((value) => value.id === item.id ? item : value)
-      return { ...plan, items, progress: items.length ? Math.round(items.reduce((sum, value) => sum + value.progress, 0) / items.length) : 0, completedTasks: items.filter((value) => value.progress >= 100).length, totalTasks: items.length }
-    }))
-    void plannerApi.updatePlanStage(planId, item).catch(() => undefined)
-  }
-
-  const deleteStage = (planId: string, itemId: string) => {
-    setPlansData((current) => current.map((plan) => {
-      if (plan.id !== planId) return plan
-      const items = plan.items.filter((item) => item.id !== itemId)
-      return { ...plan, items, progress: items.length ? Math.round(items.reduce((sum, value) => sum + value.progress, 0) / items.length) : 0, completedTasks: items.filter((value) => value.progress >= 100).length, totalTasks: items.length }
-    }))
-    void plannerApi.deletePlanStage(planId, itemId).catch(() => undefined)
-  }
-
-  const saveSchedule = (item: CalendarItem) => {
-    const exists = calendarItems.some((value) => value.id === item.id)
-    setCalendarItems((current) => current.some((value) => value.id === item.id)
-      ? current.map((value) => value.id === item.id ? item : value)
-      : [...current, item])
-    if (exists) void plannerApi.updateSchedule(item).catch(() => undefined)
-    else void plannerApi.createSchedule(item).then((created) => setCalendarItems((current) => current.map((value) => value.id === item.id ? { ...value, id: created.id } : value))).catch(() => undefined)
-    setScheduleDialog(null)
-    setActiveView('calendar')
-  }
-
-  const deleteSchedule = (id: string) => {
-    void plannerApi.deleteSchedule(id).catch(() => undefined)
-    setCalendarItems((current) => current.filter((item) => item.id !== id))
-    setOpenedSchedule(null)
-    setActiveView('calendar')
-  }
-
-  const createTodo = (item: TodoItem) => {
-    setTodoItems((current) => [item, ...current])
-    void plannerApi.createTodo(item).then((created) => setTodoItems((current) => current.map((value) => value.id === item.id ? { ...value, id: created.id } : value))).catch(() => undefined)
-  }
-  const updateTodo = (item: TodoItem) => {
-    setTodoItems((current) => current.map((value) => value.id === item.id ? item : value))
-    void plannerApi.updateTodo(item).catch(() => undefined)
-  }
-  const deleteTodo = (id: string) => {
-    setTodoItems((current) => current.filter((item) => item.id !== id))
-    void plannerApi.deleteTodo(id).catch(() => undefined)
-  }
+  const deleteSchedule = (id: string) => { if (window.confirm('日程将进入回收站 30 天，确认继续？')) void mutation(plannerApi.deleteSchedule(id)).then(() => { setOpenedSchedule(null); setActiveView('calendar') }) }
+  const createTodo = (item: TodoItem) => { void mutation(plannerApi.createTodo(item)) }
+  const updateTodo = (item: TodoItem) => { void mutation(plannerApi.updateTodo(item)) }
+  const deleteTodo = (id: string) => { if (window.confirm('待办将进入回收站 30 天，确认继续？')) void mutation(plannerApi.deleteTodo(id)) }
 
   const createNote = (category: string) => {
     const next: Note = { id: 'note-' + Date.now(), title: '未命名笔记', category, excerpt: '', updatedAt: '刚刚', color: '#d39a24', relatedIds: [], source: '个人创建' }
@@ -254,13 +189,13 @@ function App() {
     void plannerApi.createNote(next).then((created) => {
       setNoteItems((current) => current.map((note) => note.id === next.id ? { ...note, id: created.id } : note))
       setSelectedNoteId(created.id)
-    }).catch(() => undefined)
+    }).catch((cause) => setDataError(cause instanceof Error ? cause.message : '笔记创建失败'))
     setSelectedNoteId(next.id)
     return next
   }
 
   const deleteNote = (id: string) => {
-    void plannerApi.deleteNote(id).catch(() => undefined)
+    void plannerApi.deleteNote(id).catch((cause) => setDataError(cause instanceof Error ? cause.message : '笔记删除失败'))
     setNoteItems((current) => {
       if (current.length <= 1) return current
       return current.filter((note) => note.id !== id).map((note) => ({ ...note, relatedIds: note.relatedIds.filter((relatedId) => relatedId !== id) }))
@@ -273,12 +208,12 @@ function App() {
     nextNotes.forEach((note) => {
       const old = previous.find((value) => value.id === note.id)
       if (!old) {
-        void plannerApi.createNote(note).then((created) => setNoteItems((current) => current.map((value) => value.id === note.id ? { ...value, id: created.id } : value))).catch(() => undefined)
+        void plannerApi.createNote(note).then((created) => setNoteItems((current) => current.map((value) => value.id === note.id ? { ...value, id: created.id } : value))).catch((cause) => setDataError(cause instanceof Error ? cause.message : '笔记创建失败'))
         return
       }
-      if (old !== note) void plannerApi.updateNote(note).catch(() => undefined)
-      note.relatedIds.filter((id) => !old.relatedIds.includes(id)).forEach((id) => void plannerApi.createNoteRelation(note.id, id).catch(() => undefined))
-      old.relatedIds.filter((id) => !note.relatedIds.includes(id)).forEach((id) => void plannerApi.deleteNoteRelation(note.id, id).catch(() => undefined))
+      if (old !== note) void plannerApi.updateNote(note).catch((cause) => setDataError(cause instanceof Error ? cause.message : '笔记保存失败'))
+      note.relatedIds.filter((id) => !old.relatedIds.includes(id)).forEach((id) => void plannerApi.createNoteRelation(note.id, id).catch((cause) => setDataError(cause instanceof Error ? cause.message : '关联创建失败')))
+      old.relatedIds.filter((id) => !note.relatedIds.includes(id)).forEach((id) => void plannerApi.deleteNoteRelation(note.id, id).catch((cause) => setDataError(cause instanceof Error ? cause.message : '关联删除失败')))
     })
   }
 
@@ -329,16 +264,14 @@ function App() {
           notifications={notifications}
           onOpenItem={openGlobalItem}
         />
+        {dataError && <p className="ai-chat-error">{dataError}</p>}
         <div className="page-content">
           {activeView === 'calendar' && <CalendarPage items={calendarEntries} plansData={plansData} onToggleItem={toggleCalendarItem} onOpenItem={openSchedule} onAdd={(date) => setScheduleDialog({ date: format(date, 'yyyy-MM-dd') })} />}
-          {activeView === 'plans' && <PlansPage activePlanId={activePlanId} plansData={plansData} calendarItems={calendarItems} onPlanChange={setActivePlanId} onUpdatePlan={updatePlan} onDeletePlan={deletePlan} onCreateStage={createStage} onUpdateStage={updateStage} onDeleteStage={deleteStage} onAddSchedule={(planId) => setScheduleDialog({ planId })} />}
+          {activeView === 'plans' && <PlansPage activePlanId={activePlanId} plansData={plansData} calendarItems={calendarItems} onPlanChange={setActivePlanId} onUpdatePlan={updatePlan} onDeletePlan={deletePlan} onCreateStage={createStage} onUpdateStage={updateStage} onDeleteStage={deleteStage} onCreateTask={createTask} onUpdateTask={updateTask} onTaskAction={taskAction} onDeleteTask={deleteTask} onAddSchedule={(planId) => setScheduleDialog({ planId })} onAiAdjust={(plan) => { setReviewSeed(`请调整计划“${plan.title}”（计划 ID：${plan.id}）`); setActiveView('review') }} />}
           {activeView === 'todos' && <TodosPage todoItems={todoItems} onCreate={createTodo} onUpdate={updateTodo} onDelete={deleteTodo} onToggle={toggleCalendarItem} />}
           {activeView === 'notes' && <NotesPage noteItems={noteItems} onChange={saveNotes} onCreate={createNote} onDelete={deleteNote} selectedNoteId={selectedNoteId} />}
           {activeView === 'stats' && <StatsPage stats={statsData} />}
-          {activeView === 'review' && <ReviewPage plansData={plansData} calendarItems={calendarItems} onUpdatePlan={updatePlan} onUpdateSchedule={(item) => {
-            setCalendarItems((current) => current.map((value) => value.id === item.id ? item : value))
-            void plannerApi.updateSchedule(item).catch(() => undefined)
-          }} />}
+          {activeView === 'review' && <ReviewPage seed={reviewSeed} onDataChanged={() => setDataRevision((value) => value + 1)} />}
           {activeView === 'schedule' && openedSchedule && (
             <ScheduleDetailPage item={openedSchedule} plansData={plansData} noteItems={noteItems} onNotesChange={saveNotes} onToggle={toggleCalendarItem} onEdit={(item) => setScheduleDialog({ item })} onDelete={deleteSchedule} onBack={() => changeView('calendar')} />
           )}

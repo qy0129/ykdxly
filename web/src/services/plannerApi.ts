@@ -1,7 +1,10 @@
-import type { CalendarItem, Note, Plan, PlanItem, TodoItem } from '../types/planner'
+import type { CalendarItem, Note, Plan, PlanItem, PlanTask, TodoItem } from '../types/planner'
 
+const DEV_PORTS = new Set(['4173', '5173'])
 const API_BASE = import.meta.env.VITE_API_BASE_URL
-  ?? `${window.location.protocol}//${window.location.hostname}:8081/api`
+  ?? (DEV_PORTS.has(window.location.port)
+    ? `${window.location.protocol}//${window.location.hostname}:8081/api`
+    : `${window.location.origin}/api`)
 
 interface ApiPlan {
   id: string
@@ -10,6 +13,9 @@ interface ApiPlan {
   color: string
   status: Plan['status']
   progress: number
+  taskProgress: number
+  effortProgress: number
+  version: number
   dueDate?: string | null
 }
 
@@ -21,13 +27,34 @@ interface ApiSchedule {
   status: CalendarItem['status']
   progress: number
   planId?: string | null
+  stageId?: string | null
+  taskId?: string | null
+  version: number
 }
 
 interface ApiStage {
   id: string
   title: string
   progress: number
+  taskProgress: number
+  effortProgress: number
   dueLabel: string
+  version: number
+}
+
+interface ApiTask {
+  id: string
+  planId: string
+  stageId: string
+  title: string
+  description?: string | null
+  status: PlanTask['status']
+  priority: PlanTask['priority']
+  estimatedMinutes?: number | null
+  actualMinutes?: number | null
+  dueAt?: string | null
+  reason?: string | null
+  version: number
 }
 
 interface ApiTodo {
@@ -37,6 +64,7 @@ interface ApiTodo {
   status: string
   priority: 'high' | 'medium' | 'low'
   reminderMinutes?: number | null
+  version: number
 }
 
 interface ApiNote {
@@ -86,7 +114,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
   })
-  if (!response.ok) throw new Error(`API ${response.status}: ${path}`)
+  if (!response.ok) {
+    let payload: { message?: string; error?: string } | undefined
+    try { payload = await response.json() as { message?: string; error?: string } }
+    catch { payload = undefined }
+    throw new Error(payload?.message || payload?.error || `请求失败（${response.status}）`)
+  }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
 }
@@ -118,47 +151,62 @@ export const plannerApi = {
       request<ApiNote[]>('/notes'),
       request<PlannerStats>('/stats'),
     ])
-    const stages = await Promise.all(rawPlans.map((item) => request<ApiStage[]>(`/plans/${item.id}/stages`)))
+    const [stages, tasks] = await Promise.all([
+      Promise.all(rawPlans.map((item) => request<ApiStage[]>(`/plans/${item.id}/stages`))),
+      Promise.all(rawPlans.map((item) => request<ApiTask[]>(`/plans/${item.id}/tasks`))),
+    ])
     const relations = await Promise.all(rawNotes.map((item) => request<Array<{ id: string }>>(`/notes/${item.id}/relations`)))
     const plans: Plan[] = rawPlans.map((item, index) => ({
       id: item.id,
       title: item.title,
       subtitle: item.description || '长期计划',
       progress: Math.round(item.progress),
+      taskProgress: Math.round(item.taskProgress),
+      effortProgress: Math.round(item.effortProgress),
       color: item.color,
       status: item.status,
-      completedTasks: stages[index].filter((stage) => stage.progress >= 100).length,
-      totalTasks: stages[index].length,
+      completedTasks: tasks[index].filter((task) => task.status === 'done').length,
+      totalTasks: tasks[index].filter((task) => task.status !== 'cancelled').length,
       dueDate: item.dueDate || '',
-      items: stages[index].map((stage) => ({ id: stage.id, title: stage.title, progress: Math.round(stage.progress), dueLabel: stage.dueLabel })),
+      version: item.version,
+      items: stages[index].map((stage) => ({
+        id: stage.id, title: stage.title, progress: Math.round(stage.progress), taskProgress: Math.round(stage.taskProgress),
+        effortProgress: Math.round(stage.effortProgress), dueLabel: stage.dueLabel, version: stage.version,
+        tasks: tasks[index].filter((task) => task.stageId === stage.id).map((task) => ({ ...task, description: task.description ?? undefined, estimatedMinutes: task.estimatedMinutes ?? undefined, actualMinutes: task.actualMinutes ?? undefined, dueAt: task.dueAt ?? undefined, reason: task.reason ?? undefined })),
+      })),
     }))
     const schedules: CalendarItem[] = rawSchedules.map((item) => {
       const when = splitDateTime(item.startAt)
-      return { id: item.id, title: item.title, date: when.date, time: when.time, planId: item.planId ?? undefined, color: '#d39a24', status: item.status, duration: item.durationMinutes, progress: Math.round(item.progress) }
+      return { id: item.id, title: item.title, date: when.date, time: when.time, planId: item.planId ?? undefined, stageId: item.stageId ?? undefined, taskId: item.taskId ?? undefined, color: '#d39a24', status: item.status, duration: item.durationMinutes, progress: Math.round(item.progress), version: item.version }
     })
     const todos: TodoItem[] = rawTodos.map((item) => {
       const when = splitDateTime(item.dueAt)
-      return { id: item.id, title: item.title, date: when.date, time: when.time, priority: priorityFromApi(item.priority), done: item.status === 'done', reminder: item.reminderMinutes == null ? '无提醒' : `提前 ${item.reminderMinutes} 分钟` }
+      return { id: item.id, title: item.title, date: when.date, time: when.time, priority: priorityFromApi(item.priority), done: item.status === 'done', reminder: item.reminderMinutes == null ? '无提醒' : `提前 ${item.reminderMinutes} 分钟`, version: item.version }
     })
     const notes: Note[] = rawNotes.map((item, index) => ({ id: item.id, title: item.title, category: item.category || '未分类', excerpt: item.excerpt, updatedAt: '刚刚', color: '#d39a24', relatedIds: relations[index].map((relation) => relation.id), source: item.sourceType === 'manual' ? '个人创建' : item.sourceType }))
     return { plans, schedules, todos, notes, stats }
   },
 
-  createPlan: (item: Plan) => request<ApiPlan>('/plans', { method: 'POST', body: JSON.stringify({ title: item.title, description: item.subtitle, color: item.color, status: item.status, progress: item.progress, dueDate: item.dueDate || null }) }),
-  updatePlan: (item: Plan) => request<ApiPlan>(`/plans/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, description: item.subtitle, color: item.color, status: item.status, progress: item.progress, dueDate: item.dueDate || null }) }),
+  createPlan: (item: Plan) => request<ApiPlan>('/plans', { method: 'POST', body: JSON.stringify({ title: item.title, description: item.subtitle, color: item.color, status: item.status, dueDate: item.dueDate || null }) }),
+  updatePlan: (item: Plan) => request<ApiPlan>(`/plans/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, description: item.subtitle, color: item.color, status: item.status, dueDate: item.dueDate || null, expectedVersion: item.version }) }),
   deletePlan: (id: string) => request<void>(`/plans/${id}`, { method: 'DELETE' }),
 
-  createSchedule: (item: CalendarItem) => request<ApiSchedule>('/schedules', { method: 'POST', body: JSON.stringify({ title: item.title, startAt: `${item.date}T${item.time}:00`, durationMinutes: item.duration, status: item.status, progress: item.progress ?? (item.status === 'done' ? 100 : 0), planId: item.planId ?? null }) }),
-  updateSchedule: (item: CalendarItem) => request<ApiSchedule>(`/schedules/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, startAt: `${item.date}T${item.time}:00`, durationMinutes: item.duration, status: item.status, progress: item.progress ?? (item.status === 'done' ? 100 : 0), planId: item.planId ?? null }) }),
+  createSchedule: (item: CalendarItem) => request<ApiSchedule>('/schedules', { method: 'POST', body: JSON.stringify({ title: item.title, startAt: `${item.date}T${item.time}:00`, durationMinutes: item.duration, status: item.status, planId: item.planId ?? null, stageId: item.stageId ?? null, taskId: item.taskId ?? null }) }),
+  updateSchedule: (item: CalendarItem) => request<ApiSchedule>(`/schedules/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, startAt: `${item.date}T${item.time}:00`, durationMinutes: item.duration, status: item.status, planId: item.planId ?? null, stageId: item.stageId ?? null, taskId: item.taskId ?? null, expectedVersion: item.version }) }),
   deleteSchedule: (id: string) => request<void>(`/schedules/${id}`, { method: 'DELETE' }),
 
   createTodo: (item: TodoItem) => request<ApiTodo>('/todos', { method: 'POST', body: JSON.stringify({ title: item.title, dueAt: todoDueAt(item), status: item.done ? 'done' : 'pending', priority: priorityToApi(item.priority) }) }),
-  updateTodo: (item: TodoItem) => request<ApiTodo>(`/todos/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, dueAt: todoDueAt(item), status: item.done ? 'done' : 'pending', priority: priorityToApi(item.priority) }) }),
+  updateTodo: (item: TodoItem) => request<ApiTodo>(`/todos/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, dueAt: todoDueAt(item), status: item.done ? 'done' : 'pending', priority: priorityToApi(item.priority), expectedVersion: item.version }) }),
   deleteTodo: (id: string) => request<void>(`/todos/${id}`, { method: 'DELETE' }),
 
-  createPlanStage: (planId: string, item: PlanItem) => request<ApiStage>(`/plans/${planId}/stages`, { method: 'POST', body: JSON.stringify({ title: item.title, dueLabel: item.dueLabel, progress: item.progress }) }),
-  updatePlanStage: (planId: string, item: PlanItem) => request<ApiStage>(`/plans/${planId}/stages/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, dueLabel: item.dueLabel, progress: item.progress }) }),
-  deletePlanStage: (planId: string, id: string) => request<void>(`/plans/${planId}/stages/${id}`, { method: 'DELETE' }),
+  createPlanStage: (planId: string, item: PlanItem) => request<ApiStage>(`/plans/${planId}/stages`, { method: 'POST', body: JSON.stringify({ title: item.title, dueLabel: item.dueLabel }) }),
+  updatePlanStage: (planId: string, item: PlanItem) => request<ApiStage>(`/plans/${planId}/stages/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, dueLabel: item.dueLabel, expectedVersion: item.version }) }),
+  deletePlanStage: (planId: string, id: string, expectedVersion: number) => request<void>(`/plans/${planId}/stages/${id}`, { method: 'DELETE', body: JSON.stringify({ expectedVersion }) }),
+
+  createTask: (item: Omit<PlanTask, 'id' | 'version' | 'status'>) => request<ApiTask>('/tasks', { method: 'POST', body: JSON.stringify(item) }),
+  updateTask: (item: PlanTask) => request<ApiTask>(`/tasks/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, description: item.description, priority: item.priority, estimatedMinutes: item.estimatedMinutes, actualMinutes: item.actualMinutes, dueAt: item.dueAt, reason: item.reason, expectedVersion: item.version }) }),
+  taskAction: (item: PlanTask, action: 'complete' | 'delay' | 'block' | 'skip' | 'cancel' | 'reopen', fields: Record<string, unknown> = {}) => request<ApiTask>(`/tasks/${item.id}/${action}`, { method: 'POST', body: JSON.stringify({ ...fields, expectedVersion: item.version }) }),
+  deleteTask: (item: PlanTask) => request<void>(`/tasks/${item.id}`, { method: 'DELETE', body: JSON.stringify({ expectedVersion: item.version }) }),
 
   createNote: (item: Note) => request<ApiNote>('/notes', { method: 'POST', body: JSON.stringify({ title: item.title, category: item.category, excerpt: item.excerpt, content: item.excerpt, sourceType: 'manual' }) }),
   updateNote: (item: Note) => request<ApiNote>(`/notes/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, category: item.category, excerpt: item.excerpt, content: item.excerpt }) }),
@@ -179,6 +227,19 @@ export const plannerApi = {
     const url = URL.createObjectURL(await response.blob())
     const link = document.createElement('a'); link.href = url; link.download = `changlu-plan-statistics-${new Date().toISOString().slice(0, 10)}.pdf`; link.click(); URL.revokeObjectURL(url)
   },
+  sendAiCommand: (message: string, conversationId?: string) => request<AiCommandResponse>('/ai/commands', {
+    method: 'POST',
+    body: JSON.stringify({ message, conversationId }),
+  }),
+  confirmAiDraft: (id: string) => request<{ id: string; changeSetId: string; status: string; executed: AiDraftAction[] }>(`/ai/drafts/${id}/confirm`, { method: 'POST' }),
+  cancelAiDraft: (id: string) => request<{ id: string; status: string }>(`/ai/drafts/${id}/cancel`, { method: 'POST' }),
+  loadAiSession: () => request<AiSession>('/ai/session'),
+  undoChangeSet: (id: string) => request<{ status: string; restored: number }>(`/ai/change-sets/${id}/undo`, { method: 'POST' }),
+  loadPreference: () => request<PlanningPreference>('/planning/preferences'),
+  savePreference: (value: PlanningPreference) => request<PlanningPreference>('/planning/preferences', { method: 'PUT', body: JSON.stringify(value) }),
+  loadProfile: () => request<UserProfile>('/profile'),
+  saveProfile: (value: UserProfile) => request<UserProfile>('/profile', { method: 'PUT', body: JSON.stringify(value) }),
+  reviewFacts: () => request<ReviewFacts>('/review/facts'),
   chatReview: (message: string, history: AiReviewMessage[], conversationId?: string) => request<AiReviewResponse>('/ai/review/chat', {
     method: 'POST',
     body: JSON.stringify({ message, history, conversationId }),

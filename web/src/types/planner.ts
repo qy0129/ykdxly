@@ -1,12 +1,32 @@
 /** 计划及阶段的状态只在领域类型中定义，页面和 API 层共享同一套约束。 */
 export type PlanStatus = 'active' | 'paused' | 'completed'
 export type ItemStatus = 'pending' | 'done' | 'delayed'
+export type PlanTaskStatus = 'pending' | 'in_progress' | 'done' | 'blocked' | 'skipped' | 'cancelled'
+
+export interface PlanTask {
+  id: string
+  planId: string
+  stageId: string
+  title: string
+  description?: string
+  status: PlanTaskStatus
+  priority: 'high' | 'medium' | 'low'
+  estimatedMinutes?: number
+  actualMinutes?: number
+  dueAt?: string
+  reason?: string
+  version: number
+}
 
 export interface PlanItem {
   id: string
   title: string
   progress: number
   dueLabel: string
+  taskProgress: number
+  effortProgress: number
+  version: number
+  tasks: PlanTask[]
 }
 
 export interface Plan {
@@ -14,12 +34,15 @@ export interface Plan {
   title: string
   subtitle: string
   progress: number
+  taskProgress: number
+  effortProgress: number
   color: string
   status: PlanStatus
   completedTasks: number
   totalTasks: number
   dueDate: string
   items: PlanItem[]
+  version: number
 }
 
 export interface CalendarItem {
@@ -28,6 +51,8 @@ export interface CalendarItem {
   title: string
   time: string
   planId?: string
+  stageId?: string
+  taskId?: string
   color: string
   status: ItemStatus
   duration: number
@@ -35,6 +60,7 @@ export interface CalendarItem {
   kind?: 'schedule' | 'todo'
   priority?: '高' | '中' | '低'
   reminder?: string
+  version?: number
 }
 
 export interface TodoItem {
@@ -45,6 +71,7 @@ export interface TodoItem {
   priority: '高' | '中' | '低'
   done: boolean
   reminder: string
+  version?: number
 }
 
 export interface Note {

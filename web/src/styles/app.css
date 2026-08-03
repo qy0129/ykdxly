@@ -1326,10 +1326,63 @@ button,
 .stage-row {
   min-height: 76px;
   display: grid;
-  grid-template-columns: 34px minmax(0, 1fr) 42px;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
   border-bottom: 1px solid var(--line);
+}
+
+.stage-task-group {
+  border-bottom: 1px solid var(--line);
+}
+
+.stage-task-group .stage-row {
+  border-bottom: 0;
+}
+
+.plan-task-list {
+  padding: 0 0 12px 44px;
+}
+
+.plan-task-row {
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 88px 30px 30px;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.plan-task-row > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.plan-task-row > div strong,
+.plan-task-row > div span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-task-row > div span,
+.task-status {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.plan-task-row.done > div strong {
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.task-status {
+  text-align: right;
+}
+
+.task-add-button {
+  min-height: 34px;
 }
 
 .stage-index {
