@@ -137,9 +137,39 @@ export function Sidebar({
         </div>
 
         <div className="sidebar-footer">
-          <div className="avatar">陈</div>
-          <div><strong>虫语折.</strong><span>本周完成率 81%</span></div>
-          <button className="icon-button" type="button" title="更多设置"><MoreHorizontal size={18} /></button>
+          <div className="avatar">
+            {profile.avatarUrl ? <img src={profile.avatarUrl} alt="" /> : profileInitial(profile.displayName)}
+          </div>
+          <div><strong>{profile.displayName}</strong><span>本周完成率 81%</span></div>
+          <button
+            className="icon-button"
+            type="button"
+            title="用户设置"
+            aria-expanded={profileOpen}
+            onClick={() => { setProfileDraft(profile); setProfileOpen((value) => !value) }}
+          >
+            <MoreHorizontal size={18} />
+          </button>
+          {profileOpen && (
+            <section className="profile-popover">
+              <div className="profile-popover-heading"><strong>用户资料</strong><span>设置用户名和头像</span></div>
+              <label>用户名<input value={profileDraft.displayName} maxLength={100} onChange={(event) => setProfileDraft((current) => ({ ...current, displayName: event.target.value }))} /></label>
+              <label>头像地址<input value={profileDraft.avatarUrl} type="url" placeholder="https://..." onChange={(event) => setProfileDraft((current) => ({ ...current, avatarUrl: event.target.value }))} /></label>
+              <div className="profile-preview">
+                <div className="avatar">{profileDraft.avatarUrl ? <img src={profileDraft.avatarUrl} alt="" /> : profileInitial(profileDraft.displayName)}</div>
+                <span>头像预览</span>
+              </div>
+              <div className="dialog-actions">
+                <button className="primary-button" type="button" disabled={profileSaving} onClick={() => {
+                  const next = { displayName: profileDraft.displayName.trim() || defaultProfile.displayName, avatarUrl: profileDraft.avatarUrl.trim() }
+                  setProfile(next)
+                  setProfileSaving(true)
+                  void plannerApi.saveProfile(next).then(setProfile).catch(() => undefined).finally(() => { setProfileSaving(false); setProfileOpen(false) })
+                }}>保存</button>
+                <button className="secondary-button" type="button" disabled={profileSaving} onClick={() => setProfileOpen(false)}>取消</button>
+              </div>
+            </section>
+          )}
         </div>
       </aside>
     </>
