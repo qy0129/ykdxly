@@ -54,9 +54,9 @@ public final class ApiServer {
   public void start() throws IOException {
     server = HttpServer.create(new InetSocketAddress("0.0.0.0", port), 0);
     // 路由按外部能力分组；静态文件由独立 handler 托管，避免和 API 逻辑混在一起。
-     server.createContext("/api/health", this::health);
-     server.createContext("/api/profile", this::profile);
-     server.createContext("/api/plans", exchange -> crud(exchange, "plans"));
+    server.createContext("/api/health", this::health);
+    server.createContext("/api/profile", this::profile);
+    server.createContext("/api/plans", exchange -> crud(exchange, "plans"));
     server.createContext("/api/plans/", this::planSubresource);
     server.createContext("/api/schedules", exchange -> crud(exchange, "schedule_items"));
     server.createContext("/api/todos", exchange -> crud(exchange, "todos"));
@@ -114,8 +114,8 @@ public final class ApiServer {
         json(e, 200, Map.of("displayName", displayName, "avatarUrl", avatarUrl));
         return;
       }
-      error(e, 405, "method_not_allowed", "璇锋眰鏂规硶涓嶆敮鎸?", false);
-    } catch (SQLException ex) { ex.printStackTrace(); error(e, 500, "database_error", ex.getMessage(), true); }
+      json(e, 405, Map.of("error", "method_not_allowed"));
+    } catch (SQLException ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "database_error", "message", ex.getMessage())); }
   }
 
   private void aiReviewChat(HttpExchange e) throws IOException {

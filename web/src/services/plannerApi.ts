@@ -103,60 +103,6 @@ export interface AiReviewResponse {
   changes: AiPlanChange[]
 }
 
-export interface AiDraftAction {
-  type: string
-  summary: string
-  targetId?: string
-  fields: Record<string, unknown>
-  expectedVersion?: number
-  before?: Record<string, unknown> | null
-  changes?: Array<{ field: string; before: unknown; after: unknown }>
-}
-
-export interface AiDraft {
-  id: string
-  code: string
-  reply: string
-  changeSetId: string
-  status: 'pending' | 'confirmed' | 'cancelled' | 'expired' | 'superseded'
-  expiresAt: string
-  actions: AiDraftAction[]
-}
-
-export interface AiCommandResponse {
-  conversationId: string
-  reply: string
-  questions: string[]
-  actions: AiDraftAction[]
-  draft?: AiDraft
-}
-
-export interface ReviewFacts {
-  date: string
-  completed: number
-  completedTasks: number
-  scheduleCompleted: number
-  delayed: number
-  focusMinutes: number
-  blocked: number
-  estimationError7d: number
-  logs: Array<{ entityType: string; action: string; note: string; actualMinutes?: number; occurredAt: string }>
-}
-
-export interface AiSession {
-  conversationId?: string
-  messages: Array<{ role: 'user' | 'assistant'; content: string; createdAt: string }>
-  draft?: AiDraft
-}
-
-export interface PlanningPreference {
-  configured: boolean
-  timezone: string
-  availability?: Record<string, Array<{ start: string; end: string }>>
-  maxSessionMinutes?: number
-  bufferMinutes?: number
-}
-
 export interface UserProfile {
   displayName: string
   avatarUrl: string
@@ -267,6 +213,8 @@ export const plannerApi = {
   deleteNote: (id: string) => request<void>(`/notes/${id}`, { method: 'DELETE' }),
   createNoteRelation: (fromNoteId: string, toNoteId: string) => request<void>(`/notes/${fromNoteId}/relations`, { method: 'POST', body: JSON.stringify({ toNoteId }) }),
   deleteNoteRelation: (fromNoteId: string, toNoteId: string) => request<void>(`/notes/${fromNoteId}/relations`, { method: 'DELETE', body: JSON.stringify({ toNoteId }) }),
+  loadProfile: () => request<UserProfile>('/profile'),
+  saveProfile: (value: UserProfile) => request<UserProfile>('/profile', { method: 'PUT', body: JSON.stringify(value) }),
   downloadExcel: async () => {
     const response = await fetch(API_BASE + '/export/xlsx')
     if (!response.ok) throw new Error(`API ${response.status}: /export/xlsx`)
