@@ -1,5 +1,3 @@
-USE changlu_planner;
-
 CREATE TABLE IF NOT EXISTS wechat_login_sessions (
   wechat_user_id VARCHAR(128) NOT NULL PRIMARY KEY,
   bot_token TEXT NOT NULL,

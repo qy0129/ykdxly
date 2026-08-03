@@ -1,0 +1,19 @@
+# 本地开发配置。复制为 config.properties 后填写真实值；不要提交 config.properties。
+database.url=jdbc:mysql://127.0.0.1:3306/changlu_planner?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+database.username=root
+database.password=
+
+# AI 复盘功能可选；留空时该功能不可用。
+api.key=
+api.url=https://api.siliconflow.cn/v1/chat/completions
+ai.model=Qwen/Qwen3.5-9B
+
+# 天气简报功能可选。
+amap.api.key=
+briefing.default.location=杭州
+briefing.news.enabled=true
+
+# 微信消息里的网页地址。局域网使用时填 http://电脑IP:8081/。
+web.url=
+# web.directory 可选；留空时自动寻找 web/dist 或 ../web/dist。
+web.directory=

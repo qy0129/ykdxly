@@ -1,5 +1,6 @@
 package com.changlu.planner.integrations.wechat;
 
+import com.changlu.planner.shared.config.EnvironmentConfig;
 import com.changlu.planner.shared.database.Database;
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.core.config.ILinkConfig;
@@ -152,7 +153,8 @@ public final class WechatBotAgent implements AutoCloseable {
   private void sendPendingGreeting(ILinkClient current, String userId) throws Exception {
     if (!userId.equals(pendingGreetingUserId)) return;
     String briefing = planner.briefing(userId);
-    String message = (briefing.isBlank() ? "今日简报暂时没有生成。" : briefing) + "\n\n" + webLinkMessage();
+    // 简报使用 Markdown 链接；普通命令仍保留完整 URL，便于不支持 Markdown 的客户端复制。
+    String message = (briefing.isBlank() ? "今日简报暂时没有生成。" : briefing) + "\n\n" + markdownWebLink();
     current.sendText(userId, message);
     pendingGreetingUserId = "";
     System.out.println("[微信 Bot] 已向微信发送登录简报和计划网页链接");
@@ -178,6 +180,8 @@ public final class WechatBotAgent implements AutoCloseable {
 
   private String webLinkMessage() { return "点击此链接：\n" + webUrl; }
 
+  private String markdownWebLink() { return "[点击此链接](" + webUrl + ")"; }
+
   private String textOf(WeixinMessage message) {
     if (message.getItem_list() == null) return "";
     return message.getItem_list().stream().filter(item -> item != null && item.getText_item() != null).map(item -> item.getText_item().getText()).filter(value -> value != null && !value.isBlank()).findFirst().orElse("").trim();
@@ -186,7 +190,7 @@ public final class WechatBotAgent implements AutoCloseable {
   private boolean isCapture(String text) { return text.startsWith("计划:") || text.startsWith("计划：") || text.startsWith("待办:") || text.startsWith("待办：") || text.startsWith("日程:") || text.startsWith("日程：") || text.startsWith("笔记:") || text.startsWith("笔记："); }
   private boolean isCommand(String text) { String value = text.replaceAll("[\\s，。！？、,.!?]", ""); return value.equals("今天还有什么") || value.equals("今天还有哪些") || value.equals("计划完成得怎么样") || value.startsWith("完成:") || value.startsWith("完成：") || value.startsWith("删除:") || value.startsWith("删除：") || value.startsWith("确认删除:") || value.startsWith("确认删除："); }
   private String configuredWebUrl() {
-    String configured = System.getenv().getOrDefault("PLANNER_WEB_URL", "").trim();
+    String configured = EnvironmentConfig.value("PLANNER_WEB_URL", "web.url", "");
     if (configured.isBlank()) return "http://" + lanAddress() + ":8081/";
     try {
       URI uri = URI.create(configured);

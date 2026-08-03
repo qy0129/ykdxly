@@ -1,5 +1,3 @@
-USE changlu_planner;
-
 CREATE TABLE IF NOT EXISTS ai_conversations (
   id BINARY(16) NOT NULL PRIMARY KEY,
   workspace_id BINARY(16) NOT NULL,

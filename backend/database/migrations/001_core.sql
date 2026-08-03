@@ -1,9 +1,3 @@
-CREATE DATABASE IF NOT EXISTS changlu_planner
-  CHARACTER SET utf8mb4
-  COLLATE utf8mb4_unicode_ci;
-
-USE changlu_planner;
-
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version VARCHAR(64) NOT NULL PRIMARY KEY,
   applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP

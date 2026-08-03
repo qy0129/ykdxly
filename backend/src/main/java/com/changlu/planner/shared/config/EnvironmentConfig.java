@@ -23,8 +23,12 @@ public final class EnvironmentConfig {
 
   private static Properties loadFile() {
     Properties properties = new Properties();
-    String configured = System.getenv().getOrDefault("PLANNER_CONFIG_FILE", "D:\\.CC\\backend\\config.properties");
+    String configured = System.getenv().getOrDefault("PLANNER_CONFIG_FILE", "config.properties");
     Path path = Path.of(configured);
+    // 支持从 backend 目录或项目根目录启动，环境变量始终可指定其他位置。
+    if (!Files.isRegularFile(path) && configured.equals("config.properties")) {
+      path = Path.of("backend", "config.properties");
+    }
     // 配置文件是可选的；没有文件时使用各调用方提供的默认值。
     try (InputStream input = Files.newInputStream(path);
          InputStreamReader reader = new InputStreamReader(input, StandardCharsets.UTF_8)) {

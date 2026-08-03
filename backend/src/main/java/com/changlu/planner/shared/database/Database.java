@@ -8,7 +8,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.UUID;
 
 /** 数据库基础设施边界：业务模块只通过连接和用户上下文访问数据库。 */
@@ -16,10 +15,16 @@ public final class Database {
   public record Context(UUID userId, UUID workspaceId) {}
   public static final UUID DEFAULT_USER_ID = UUID.fromString("00000000-0000-0000-0000-000000000001");
   public static final UUID DEFAULT_WORKSPACE_ID = UUID.fromString("00000000-0000-0000-0000-000000000002");
+  private final String jdbcUrl;
+  private final String user;
+  private final String password;
   private final HikariConfig config;
   private HikariDataSource dataSource;
 
   private Database(String url, String user, String password) {
+    this.jdbcUrl = url;
+    this.user = user;
+    this.password = password;
     config = new HikariConfig();
     config.setJdbcUrl(url);
     config.setUsername(user);
@@ -36,7 +41,11 @@ public final class Database {
     return new Database(url, user, password);
   }
 
-  public void start() { dataSource = new HikariDataSource(config); }
+  /** 先建库并执行缺失迁移，再创建供业务使用的连接池。 */
+  public void start() throws SQLException {
+    DatabaseMigrator.migrate(jdbcUrl, user, password);
+    dataSource = new HikariDataSource(config);
+  }
   public void stop() { if (dataSource != null) dataSource.close(); }
   public Connection connection() throws SQLException { return dataSource.getConnection(); }
 
@@ -50,25 +59,6 @@ public final class Database {
       try (PreparedStatement m = c.prepareStatement("INSERT IGNORE INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, 'owner')")) {
         m.setBytes(1, uuidBytes(DEFAULT_WORKSPACE_ID)); m.setBytes(2, uuidBytes(DEFAULT_USER_ID)); m.executeUpdate();
       }
-    }
-  }
-
-  public void ensureWechatLoginTable() throws SQLException {
-    String sql = """
-        CREATE TABLE IF NOT EXISTS wechat_login_sessions (
-          wechat_user_id VARCHAR(128) NOT NULL PRIMARY KEY,
-          bot_token TEXT NOT NULL,
-          bot_id VARCHAR(128) NOT NULL,
-          base_url VARCHAR(512) NOT NULL,
-          updates_cursor TEXT NULL,
-          conversations_json LONGTEXT NOT NULL,
-          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        """;
-    try (Connection connection = connection(); Statement statement = connection.createStatement()) {
-      statement.execute(sql);
-      statement.executeUpdate("INSERT IGNORE INTO schema_migrations (version) VALUES ('003_wechat_login')");
     }
   }
 

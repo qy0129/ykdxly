@@ -1,5 +1,6 @@
 package com.changlu.planner.interfaces.http;
 
+import com.changlu.planner.shared.config.EnvironmentConfig;
 import com.google.gson.Gson;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -10,7 +11,6 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.Map;
 
 /**
@@ -40,8 +40,7 @@ final class StaticFileHandler implements HttpHandler {
       return;
     }
 
-    Path root = Paths.get(System.getenv().getOrDefault("PLANNER_WEB_DIR", "D:\\.CC\\web\\dist"))
-        .toAbsolutePath().normalize();
+    Path root = webRoot();
     String decoded = URLDecoder.decode(requestPath, StandardCharsets.UTF_8);
     Path requested = root.resolve(decoded.substring(1)).normalize();
     if (!requested.startsWith(root)) {
@@ -68,6 +67,16 @@ final class StaticFileHandler implements HttpHandler {
     try (OutputStream out = exchange.getResponseBody()) {
       out.write(content);
     }
+  }
+
+  /** 优先读取配置；未配置时兼容从项目根目录或 backend 目录启动。 */
+  private Path webRoot() {
+    String configured = EnvironmentConfig.value("PLANNER_WEB_DIR", "web.directory", "");
+    if (!configured.isBlank()) return Path.of(configured).toAbsolutePath().normalize();
+
+    Path projectRoot = Path.of("web", "dist");
+    if (Files.isDirectory(projectRoot)) return projectRoot.toAbsolutePath().normalize();
+    return Path.of("..", "web", "dist").toAbsolutePath().normalize();
   }
 
   private void json(HttpExchange exchange, int status, Object value) throws IOException {

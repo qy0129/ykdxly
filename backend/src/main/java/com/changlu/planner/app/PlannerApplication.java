@@ -13,7 +13,6 @@ public final class PlannerApplication {
     Database database = Database.fromEnvironment();
     database.start();
     database.ensureDefaultContext();
-    database.ensureWechatLoginTable();
     ApiServer server = new ApiServer(database, Integer.parseInt(System.getenv().getOrDefault("PLANNER_PORT", "8081")));
     server.start();
     WechatBotAgent wechatBot = new WechatBotAgent(database);
