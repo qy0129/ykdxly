@@ -75,6 +75,11 @@ export interface AiReviewResponse {
   changes: AiPlanChange[]
 }
 
+export interface UserProfile {
+  displayName: string
+  avatarUrl: string
+}
+
 /** 所有 JSON 请求统一经过这里，避免各功能页面重复处理状态码和请求头。 */
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(API_BASE + path, {
@@ -160,6 +165,8 @@ export const plannerApi = {
   deleteNote: (id: string) => request<void>(`/notes/${id}`, { method: 'DELETE' }),
   createNoteRelation: (fromNoteId: string, toNoteId: string) => request<void>(`/notes/${fromNoteId}/relations`, { method: 'POST', body: JSON.stringify({ toNoteId }) }),
   deleteNoteRelation: (fromNoteId: string, toNoteId: string) => request<void>(`/notes/${fromNoteId}/relations`, { method: 'DELETE', body: JSON.stringify({ toNoteId }) }),
+  loadProfile: () => request<UserProfile>('/profile'),
+  saveProfile: (value: UserProfile) => request<UserProfile>('/profile', { method: 'PUT', body: JSON.stringify(value) }),
   downloadExcel: async () => {
     const response = await fetch(API_BASE + '/export/xlsx')
     if (!response.ok) throw new Error(`API ${response.status}: /export/xlsx`)

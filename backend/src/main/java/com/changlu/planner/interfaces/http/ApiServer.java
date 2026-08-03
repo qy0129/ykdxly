@@ -50,6 +50,7 @@ public final class ApiServer {
     server = HttpServer.create(new InetSocketAddress("0.0.0.0", port), 0);
     // 路由按外部能力分组；静态文件由独立 handler 托管，避免和 API 逻辑混在一起。
     server.createContext("/api/health", this::health);
+    server.createContext("/api/profile", this::profile);
     server.createContext("/api/plans", exchange -> crud(exchange, "plans"));
     server.createContext("/api/plans/", this::planSubresource);
     server.createContext("/api/schedules", exchange -> crud(exchange, "schedule_items"));
@@ -69,6 +70,38 @@ public final class ApiServer {
   public void stop() { if (server != null) server.stop(0); }
 
   private void health(HttpExchange e) throws IOException { json(e, 200, Map.of("ok", true, "service", "changlu-planner")); }
+
+  private void profile(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if ("GET".equals(e.getRequestMethod())) {
+        try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
+            "SELECT display_name, avatar_url FROM users WHERE id = ?")) {
+          p.setBytes(1, Database.uuidBytes(user(e)));
+          try (ResultSet rs = p.executeQuery()) {
+            if (!rs.next()) { json(e, 404, Map.of("error", "user_not_found")); return; }
+            json(e, 200, Map.of("displayName", rs.getString("display_name"), "avatarUrl", rs.getString("avatar_url")));
+          }
+        }
+        return;
+      }
+      if ("PUT".equals(e.getRequestMethod()) || "POST".equals(e.getRequestMethod())) {
+        JsonObject body = body(e);
+        String displayName = string(body, "displayName", "").trim();
+        if (displayName.isBlank()) { json(e, 400, Map.of("error", "display_name_required")); return; }
+        String avatarUrl = string(body, "avatarUrl", "").trim();
+        if (avatarUrl.length() > 1000) { json(e, 400, Map.of("error", "avatar_url_too_long")); return; }
+        try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
+            "UPDATE users SET display_name = ?, avatar_url = ? WHERE id = ?")) {
+          p.setString(1, displayName); p.setString(2, avatarUrl); p.setBytes(3, Database.uuidBytes(user(e)));
+          if (p.executeUpdate() == 0) { json(e, 404, Map.of("error", "user_not_found")); return; }
+        }
+        json(e, 200, Map.of("displayName", displayName, "avatarUrl", avatarUrl));
+        return;
+      }
+      json(e, 405, Map.of("error", "method_not_allowed"));
+    } catch (SQLException ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "database_error", "message", ex.getMessage())); }
+  }
 
   private void aiReviewChat(HttpExchange e) throws IOException {
     try {

@@ -372,6 +372,7 @@ button,
 }
 
 .sidebar-footer {
+  position: relative;
   min-height: 68px;
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr) 36px;
@@ -391,6 +392,85 @@ button,
   background: #d7c29c;
   font-size: 12px;
   font-weight: 750;
+}
+
+.avatar img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  border-radius: 50%;
+}
+
+.profile-popover {
+  position: absolute;
+  z-index: 70;
+  right: 12px;
+  bottom: calc(100% + 10px);
+  width: 250px;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  background: #fffaf1;
+  box-shadow: 0 14px 32px rgba(65, 47, 29, 0.2);
+}
+
+.profile-popover-heading {
+  display: grid;
+  gap: 3px;
+}
+
+.profile-popover-heading strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.profile-popover-heading span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.profile-popover label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.profile-popover input {
+  width: 100%;
+  min-height: 34px;
+  box-sizing: border-box;
+  padding: 0 9px;
+  border: 1px solid var(--line-strong);
+  outline: 0;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+}
+
+.profile-popover input:focus {
+  border-color: var(--gold-deep);
+}
+
+.profile-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.profile-preview .avatar {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+}
+
+.profile-popover .dialog-actions {
+  justify-content: flex-end;
 }
 
 .sidebar-footer > div:nth-child(2) {
