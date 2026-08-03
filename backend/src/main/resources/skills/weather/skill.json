@@ -1,0 +1,16 @@
+{
+  "name": "weather",
+  "description": "查询简报默认地点的实时天气",
+  "version": "1.0.0",
+  "enabled": true,
+  "requiresApproval": false,
+  "toolNames": ["get_weather"],
+  "capabilities": [
+    {
+      "name": "weather",
+      "description": "查询指定地点和时段的天气",
+      "parameterHint": "weather_location, weather_day",
+      "interactive": false
+    }
+  ]
+}

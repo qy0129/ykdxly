@@ -1,0 +1,16 @@
+.idea/
+.git-submit/
+
+backend/target/
+backend/dependency-reduced-pom.xml
+backend/*.log
+backend/config.properties
+
+web/node_modules/
+web/dist/
+web/*.log
+
+data/sdk-resume-context.json
+
+*.tmp
+*.log
