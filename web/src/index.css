@@ -1,0 +1,62 @@
+:root {
+  --canvas: #f3ecdf;
+  --surface: #fffdf8;
+  --warm-white: #faf5eb;
+  --hover: #f2eadc;
+  --ink: #2f2923;
+  --ink-soft: #5c5045;
+  --muted: #887969;
+  --brown: #684b34;
+  --gold: #dca52d;
+  --gold-deep: #b77b18;
+  --sage: #72806a;
+  --brick: #b85f42;
+  --plum: #7c647d;
+  --line: #e6dac7;
+  --line-strong: #d6c5ae;
+  --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-family: Inter, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', system-ui, sans-serif;
+  color: var(--ink);
+  background: var(--canvas);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--canvas);
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  overflow: hidden;
+}
+
+button,
+input,
+textarea,
+select {
+  letter-spacing: 0;
+}
+
+button:focus-visible,
+[role='button']:focus-visible {
+  outline: 2px solid var(--gold-deep);
+  outline-offset: 2px;
+}
+
+::selection {
+  color: #2b2118;
+  background: #efd18a;
+}
+
+#root {
+  min-height: 100vh;
+}

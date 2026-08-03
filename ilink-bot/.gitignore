@@ -1,8 +1,0 @@
-target/
-data/
-dependency-reduced-pom.xml
-.idea/
-models/
-*.silk
-qrcode.png
-../config.properties

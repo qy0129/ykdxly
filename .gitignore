@@ -1,12 +1,15 @@
-# Local configuration and secrets
-/config.properties
-/**/config.properties
-*.env
-*.secret
-*.key
+.idea/
+.git-submit/
 
-# Runtime data, login sessions, media and generated files
-/data/
-/**/data/
-**/target/
+backend/target/
+backend/*.log
+backend/config.properties
+
+web/node_modules/
+web/dist/
+web/*.log
+
+data/sdk-resume-context.json
+
+*.tmp
 *.log

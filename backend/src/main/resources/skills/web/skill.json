@@ -1,0 +1,22 @@
+{
+  "name": "web",
+  "description": "联网检索与计划相关新闻查询",
+  "version": "1.0.0",
+  "enabled": true,
+  "requiresApproval": false,
+  "toolNames": ["news_search", "web_search"],
+  "capabilities": [
+    {
+      "name": "news_search",
+      "description": "查询与长期计划相关的最新新闻",
+      "parameterHint": "plan_topics, result_limit",
+      "interactive": false
+    },
+    {
+      "name": "web_search",
+      "description": "联网搜索网页与实时信息",
+      "parameterHint": "query, result_limit",
+      "interactive": false
+    }
+  ]
+}
