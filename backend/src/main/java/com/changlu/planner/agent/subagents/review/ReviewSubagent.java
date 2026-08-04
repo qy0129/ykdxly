@@ -12,9 +12,12 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.time.LocalDateTime;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** 基于真实执行记录生成只读日报，不产生任何计划变更。 */
 public final class ReviewSubagent implements Subagent {
+  private static final Logger LOG = LoggerFactory.getLogger(ReviewSubagent.class);
   private final Database database;
   private final AiCommandService commands;
   private final ModelClient model;
@@ -54,6 +57,8 @@ public final class ReviewSubagent implements Subagent {
           "review-subagent", ReviewPrompt.messages(facts), 0.2, 1800, 25, 1);
       result = ReviewResult.fromGenerated(facts, generated, generatedAt);
     } catch (Exception error) {
+      LOG.warn("[复盘生成失败] 用户={} 工作区={} 原因={}", context.userId(), context.workspaceId(),
+          error.getMessage());
       result = ReviewResult.fallback(facts, generatedAt);
     }
     save(context, result);

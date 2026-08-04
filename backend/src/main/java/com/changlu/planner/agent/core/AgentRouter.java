@@ -13,7 +13,8 @@ public final class AgentRouter {
 
   public AgentRouter(ModelClient model) { this.model = model; }
 
-  public Decision route(String request, ToolRegistry tools, SubagentRegistry subagents) throws Exception {
+  public Decision route(String request, boolean hasDocuments, ToolRegistry tools, SubagentRegistry subagents)
+      throws Exception {
     JsonArray messages = new JsonArray();
     messages.add(ModelClient.message("system", """
         你是长路计划的主 Agent，只负责把用户请求分配给一个最合适的执行器。
@@ -22,10 +23,13 @@ public final class AgentRouter {
         briefing 负责生成包含今日计划、日程、待办、天气和相关新闻的简报。
         research 负责搜索公开网页并提供来源链接。
         scheduling 负责检查日程冲突、可用时段和安排时长，不负责修改日程。
+        document 负责分析上传文件、总结文件和基于文件内容问答；根据文件创建计划或任务仍交给 planning.assistant。
+        memory 负责回答“你记得我什么”、记住或忘记长期偏好；普通对话中的记忆提取由运行时自动完成。
+        当前请求是否附带文件：%s。
         只输出 JSON：{"executorType":"tool或subagent","executorName":"名称","reason":"简短原因"}。
         可用 Tools：%s
         可用 Subagents：%s
-        """.formatted(gson.toJson(tools.definitions()), gson.toJson(subagents.definitions()))));
+        """.formatted(hasDocuments, gson.toJson(tools.definitions()), gson.toJson(subagents.definitions()))));
     messages.add(ModelClient.message("user", request));
     try {
       JsonObject result = model.completeJson("agent-router", messages, 0, 300, 12, 1);
@@ -34,12 +38,18 @@ public final class AgentRouter {
       if ("subagent".equals(type)) subagents.require(name); else tools.require(name);
       return new Decision(type, name, string(result, "reason", ""));
     } catch (Exception error) {
-      return fallback(request, error);
+      return fallback(request, hasDocuments, error);
     }
   }
 
-  private Decision fallback(String request, Exception error) {
+  private Decision fallback(String request, boolean hasDocuments, Exception error) {
     String normalized = request.replaceAll("\\s", "");
+    if (hasDocuments && planningIntent(normalized)) {
+      return new Decision("tool", "planning.assistant", "请求基于附件创建或调整计划数据");
+    }
+    if (hasDocuments) {
+      return new Decision("subagent", "document", "请求附带文件，交给文件分析 Subagent");
+    }
     if (normalized.contains("复盘") || normalized.contains("总结今天")) {
       return new Decision("subagent", "review", "模型路由失败，按明确复盘意图回退");
     }
@@ -54,7 +64,21 @@ public final class AgentRouter {
         || normalized.contains("排期问题")) {
       return new Decision("subagent", "scheduling", "模型路由失败，按明确排期检查意图回退");
     }
+    if (normalized.contains("文件") || normalized.contains("文档")
+        || normalized.contains("附件") || normalized.contains("知识库")) {
+      return new Decision("subagent", "document", "模型路由失败，按明确文件分析意图回退");
+    }
+    if (normalized.contains("你记得我") || normalized.contains("长期记忆")
+        || normalized.contains("记住我的") || normalized.contains("忘记我的")) {
+      return new Decision("subagent", "memory", "模型路由失败，按明确记忆意图回退");
+    }
     return new Decision("tool", "planning.assistant", "模型路由失败，回退核心规划能力：" + error.getMessage());
+  }
+
+  private boolean planningIntent(String request) {
+    return request.contains("创建") || request.contains("安排") || request.contains("布置")
+        || request.contains("生成任务") || request.contains("制定计划") || request.contains("加入待办")
+        || request.contains("排进日程") || request.contains("调整计划");
   }
 
   private String string(JsonObject object, String name, String fallback) {

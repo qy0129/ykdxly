@@ -84,8 +84,9 @@ export function CalendarPage({
   onOpenItem: (item: CalendarItem) => void
   onAdd: (date: Date) => void
 }) {
-  const [month, setMonth] = useState(new Date(2026, 7, 1))
-  const [selectedDate, setSelectedDate] = useState<Date | null>(new Date(2026, 7, 2))
+  const today = new Date()
+  const [month, setMonth] = useState(() => new Date())
+  const [selectedDate, setSelectedDate] = useState<Date | null>(() => new Date())
 
   const days = useMemo(() => {
     const start = startOfWeek(startOfMonth(month), { weekStartsOn: 1 })
@@ -108,7 +109,7 @@ export function CalendarPage({
           <button className="icon-button" type="button" onClick={() => setMonth(addMonths(month, 1))} title="下个月">
             <ChevronRight size={19} />
           </button>
-          <button className="text-button" type="button" onClick={() => setMonth(new Date(2026, 7, 1))}>今天</button>
+          <button className="text-button" type="button" onClick={() => { const current = new Date(); setMonth(current); setSelectedDate(current) }}>今天</button>
         </div>
         <div className="calendar-legend" aria-label="计划颜色">
           {plansData.slice(0, 4).map((plan) => (
@@ -132,7 +133,7 @@ export function CalendarPage({
                   'day-cell',
                   !isSameMonth(day, month) ? 'outside-month' : '',
                   selected ? 'selected' : '',
-                  isSameDay(day, new Date(2026, 7, 2)) ? 'today' : '',
+                  isSameDay(day, today) ? 'today' : '',
                 ].filter(Boolean).join(' ')}
                 key={day.toISOString()}
                 onClick={() => setSelectedDate(day)}
@@ -170,4 +171,3 @@ export function CalendarPage({
     </div>
   )
 }
-

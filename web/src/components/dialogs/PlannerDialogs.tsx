@@ -1,10 +1,18 @@
 import { useState } from 'react'
-import { format } from 'date-fns'
+import { addMonths, format } from 'date-fns'
 import { CheckSquare2, Plus, Save, Trash2, X } from 'lucide-react'
-import type { CalendarItem, Plan, PlanItem, PlanTask, TodoItem } from '../../types/planner'
+import type { CalendarItem, Plan, PlanItem, PlanTask, TaskRecurrenceType, TodoItem } from '../../types/planner'
 
 export type StageDraftFields = { title: string; dueLabel: string }
-export type TaskDraftFields = { title: string; estimatedMinutes: number; dueAt?: string }
+export type TaskDraftFields = {
+  title: string
+  estimatedMinutes: number
+  dueAt: string
+  recurrenceType: TaskRecurrenceType
+  scheduleStartDate: string
+  recurrenceEndDate: string
+  scheduledTime: string
+}
 export type NoteDraftFields = { title: string; category: string; content: string }
 
 export function ConfirmDeleteDialog({ message, onClose, onConfirm }: { message: string; onClose: () => void; onConfirm: () => void }) {
@@ -41,27 +49,49 @@ export function StageDialog({ initial, onClose, onSubmit }: { initial?: PlanItem
   )
 }
 
-export function TaskDialog({ stageTitle, initial, onClose, onSubmit }: { stageTitle: string; initial?: PlanTask; onClose: () => void; onSubmit: (fields: TaskDraftFields) => void }) {
-  const [draft, setDraft] = useState({ title: initial?.title ?? '', estimatedMinutes: initial?.estimatedMinutes ?? 60, dueAt: initial?.dueAt?.slice(0, 10) ?? '' })
+export function TaskDialog({ stageTitle, initial, onClose, onSubmit }: { stageTitle: string; initial?: PlanTask; onClose: () => void; onSubmit: (fields: TaskDraftFields) => Promise<boolean | void> | boolean | void }) {
+  const defaultDate = initial?.scheduleStartDate ?? initial?.dueAt?.slice(0, 10) ?? format(new Date(), 'yyyy-MM-dd')
+  const [draft, setDraft] = useState({
+    title: initial?.title ?? '',
+    estimatedMinutes: initial?.estimatedMinutes ?? 60,
+    recurrenceType: initial?.recurrenceType ?? 'once' as TaskRecurrenceType,
+    scheduleStartDate: defaultDate,
+    recurrenceEndDate: initial?.recurrenceEndDate ?? initial?.dueAt?.slice(0, 10) ?? defaultDate,
+    scheduledTime: initial?.scheduledTime?.slice(0, 5) ?? '09:00',
+  })
+  const [submitting, setSubmitting] = useState(false)
 
-  const submit = () => {
-    if (!draft.title.trim()) return
-    onSubmit({
-      title: draft.title.trim(),
-      estimatedMinutes: Math.max(1, draft.estimatedMinutes || 60),
-      dueAt: draft.dueAt ? `${draft.dueAt}T23:59:00` : undefined,
-    })
+  const submit = async () => {
+    if (submitting || !draft.title.trim() || !draft.scheduleStartDate || !draft.scheduledTime
+      || (draft.recurrenceType !== 'once' && !draft.recurrenceEndDate)) return
+      setSubmitting(true)
+      try {
+        const endDate = draft.recurrenceType === 'once' ? draft.scheduleStartDate : draft.recurrenceEndDate
+        await onSubmit({
+          title: draft.title.trim(),
+          estimatedMinutes: Math.max(1, draft.estimatedMinutes || 60),
+          recurrenceType: draft.recurrenceType,
+          scheduleStartDate: draft.scheduleStartDate,
+          recurrenceEndDate: endDate,
+          scheduledTime: draft.scheduledTime,
+          dueAt: `${endDate}T23:59:00`,
+        })
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
     <div className="modal-scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className="editor-modal" role="dialog" aria-modal="true" aria-label={initial ? '编辑计划任务' : '添加计划任务'}>
-        <div className="modal-heading"><div><span className="eyebrow">{stageTitle}</span><h2>{initial ? '编辑计划任务' : '添加计划任务'}</h2></div><button className="icon-button" type="button" onClick={onClose} title="关闭"><X size={18} /></button></div>
-        <div className="modal-fields">
-          <label>任务名称<input autoFocus value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="这项任务具体要完成什么" /></label>
-          <div className="field-row"><label>预计分钟<input type="number" min="1" step="15" value={draft.estimatedMinutes} onChange={(event) => setDraft({ ...draft, estimatedMinutes: Number(event.target.value) })} /></label><label>截止日期<input type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label></div>
-        </div>
-        <div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="button" onClick={submit}>{initial ? <Save size={16} /> : <Plus size={16} />} {initial ? '保存任务' : '添加任务'}</button></div>
+        <div className="modal-heading"><div><span className="eyebrow">{stageTitle}</span><h2>{initial ? '编辑计划任务' : '添加计划任务'}</h2></div><button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭"><X size={18} /></button></div>
+          <div className="modal-fields">
+            <label>任务名称<input autoFocus value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="这项任务具体要完成什么" /></label>
+            <div className="field-row"><label>预计分钟<input type="number" min="1" step="15" value={draft.estimatedMinutes} onChange={(event) => setDraft({ ...draft, estimatedMinutes: Number(event.target.value) })} /></label><label>执行频率<select value={draft.recurrenceType} onChange={(event) => setDraft({ ...draft, recurrenceType: event.target.value as TaskRecurrenceType })}><option value="once">仅一次</option><option value="daily">每天</option><option value="every_other_day">隔一天</option><option value="weekdays">工作日</option><option value="weekly">每周</option></select></label></div>
+            <div className="field-row"><label>开始日期<input type="date" value={draft.scheduleStartDate} onChange={(event) => setDraft({ ...draft, scheduleStartDate: event.target.value, recurrenceEndDate: draft.recurrenceType === 'once' || draft.recurrenceEndDate < event.target.value ? event.target.value : draft.recurrenceEndDate })} /></label><label>结束日期<input type="date" value={draft.recurrenceType === 'once' ? draft.scheduleStartDate : draft.recurrenceEndDate} disabled={draft.recurrenceType === 'once'} min={draft.scheduleStartDate} onChange={(event) => setDraft({ ...draft, recurrenceEndDate: event.target.value })} /></label></div>
+            <label>执行时间<input type="time" value={draft.scheduledTime} onChange={(event) => setDraft({ ...draft, scheduledTime: event.target.value })} /></label>
+          </div>
+        <div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose} disabled={submitting}>取消</button><button className="primary-button" type="button" onClick={() => void submit()} disabled={submitting}>{initial ? <Save size={16} /> : <Plus size={16} />} {submitting ? '保存中…' : initial ? '保存任务' : '添加任务'}</button></div>
       </section>
     </div>
   )
@@ -111,28 +141,35 @@ export function CategoryDialog({ onClose, onSubmit }: { onClose: () => void; onS
 }
 
 /** 计划相关弹窗只负责收集表单数据，保存动作由 App 传入。 */
-export function PlanDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: (plan: Plan) => void }) {
-  const [draft, setDraft] = useState({ title: '', subtitle: '', dueDate: '2026-12-31', color: '#d39a24' })
+export function PlanDialog({ initial, onClose, onSubmit }: { initial?: Plan; onClose: () => void; onSubmit: (plan: Plan) => Promise<boolean | void> | boolean | void }) {
+  const [draft, setDraft] = useState({ title: initial?.title ?? '', subtitle: initial?.subtitle ?? '', dueDate: initial?.dueDate || format(addMonths(new Date(), 3), 'yyyy-MM-dd'), color: initial?.color ?? '#d39a24' })
+  const [submitting, setSubmitting] = useState(false)
 
-  const submit = () => {
+  const submit = async () => {
+    if (submitting) return
     if (!draft.title.trim()) return
-    onSubmit({
-      id: 'plan-' + Date.now(), title: draft.title.trim(), subtitle: draft.subtitle.trim() || '新的长期计划',
-      progress: 0, taskProgress: 0, effortProgress: 0, color: draft.color, status: 'active', completedTasks: 0, totalTasks: 0,
-      dueDate: draft.dueDate, items: [], version: 0,
-    })
+    setSubmitting(true)
+    try {
+      await onSubmit(initial ? { ...initial, title: draft.title.trim(), subtitle: draft.subtitle.trim() || '新的长期计划', dueDate: draft.dueDate, color: draft.color } : {
+        id: 'plan-' + Date.now(), title: draft.title.trim(), subtitle: draft.subtitle.trim() || '新的长期计划',
+        progress: 0, taskProgress: 0, effortProgress: 0, color: draft.color, status: 'active', completedTasks: 0, totalTasks: 0,
+        dueDate: draft.dueDate, items: [], version: 0,
+      })
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
     <div className="modal-scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="editor-modal" role="dialog" aria-modal="true" aria-label="新建长期计划">
-        <div className="modal-heading"><div><span className="eyebrow">长期目标</span><h2>新建长期计划</h2></div><button className="icon-button" type="button" onClick={onClose} title="关闭"><X size={18} /></button></div>
+      <section className="editor-modal" role="dialog" aria-modal="true" aria-label={initial ? '编辑长期计划' : '新建长期计划'}>
+        <div className="modal-heading"><div><span className="eyebrow">长期目标</span><h2>{initial ? '编辑长期计划' : '新建长期计划'}</h2></div><button className="icon-button" type="button" onClick={onClose} disabled={submitting} title="关闭"><X size={18} /></button></div>
         <div className="modal-fields">
           <label>计划名称<input autoFocus value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="例如：完成高等数学系统学习" /></label>
           <label>计划说明<input value={draft.subtitle} onChange={(event) => setDraft({ ...draft, subtitle: event.target.value })} placeholder="一句话说明目标" /></label>
           <div className="field-row"><label>目标日期<input type="date" value={draft.dueDate} onChange={(event) => setDraft({ ...draft, dueDate: event.target.value })} /></label><label>识别颜色<input type="color" value={draft.color} onChange={(event) => setDraft({ ...draft, color: event.target.value })} /></label></div>
         </div>
-        <div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="button" onClick={submit}><Plus size={16} /> 创建计划</button></div>
+        <div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose} disabled={submitting}>取消</button><button className="primary-button" type="button" onClick={() => void submit()} disabled={submitting}>{initial ? <Save size={16} /> : <Plus size={16} />} {submitting ? '保存中…' : initial ? '保存计划' : '创建计划'}</button></div>
       </section>
     </div>
   )
@@ -147,7 +184,7 @@ export function ScheduleDialog({ plansData, initialItem, defaultDate, defaultPla
   onSubmit: (item: CalendarItem) => void
 }) {
   const initialPlan = plansData.find((plan) => plan.id === (initialItem?.planId ?? defaultPlanId)) ?? plansData[0]
-  const [draft, setDraft] = useState({ title: initialItem?.title ?? '', date: initialItem?.date ?? defaultDate ?? '2026-08-02', time: initialItem?.time ?? '09:00', duration: initialItem?.duration ?? 60, planId: initialPlan?.id ?? '' })
+  const [draft, setDraft] = useState({ title: initialItem?.title ?? '', date: initialItem?.date ?? defaultDate ?? format(new Date(), 'yyyy-MM-dd'), time: initialItem?.time ?? '09:00', duration: initialItem?.duration ?? 60, planId: initialPlan?.id ?? '' })
 
   const submit = () => {
     if (!draft.title.trim() || !draft.planId) return

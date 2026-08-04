@@ -1,6 +1,8 @@
 package com.changlu.planner.agent.core;
 
 import com.changlu.planner.features.command.AiCommandService;
+import com.changlu.planner.agent.subagents.document.DocumentSubagent;
+import com.changlu.planner.agent.subagents.memory.MemorySubagent;
 import com.changlu.planner.shared.database.Database;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -13,9 +15,14 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** 主 Agent 运行循环。专业能力由 Registry 提供，运行时只负责调度、状态和恢复。 */
-public final class AgentRuntime {
+public final class AgentRuntime implements AutoCloseable {
+  private static final Logger LOG = LoggerFactory.getLogger(AgentRuntime.class);
   private static final int MAX_ITERATIONS = 6;
 
   private final Database database;
@@ -23,16 +30,22 @@ public final class AgentRuntime {
   private final AgentRouter router;
   private final ToolRegistry tools;
   private final SubagentRegistry subagents;
+  private final DocumentSubagent documents;
+  private final MemorySubagent memory;
   private final ToolExecutor executor = new ToolExecutor();
+  private final ExecutorService workers = Executors.newFixedThreadPool(4);
   private final Gson gson = new Gson();
 
   public AgentRuntime(Database database, AiCommandService commands, AgentRouter router,
-                      ToolRegistry tools, SubagentRegistry subagents) {
+                      ToolRegistry tools, SubagentRegistry subagents, DocumentSubagent documents,
+                      MemorySubagent memory) {
     this.database = database;
     this.commands = commands;
     this.router = router;
     this.tools = tools;
     this.subagents = subagents;
+    this.documents = documents;
+    this.memory = memory;
   }
 
   public JsonObject start(JsonObject input, Database.Context identity, String channel) throws Exception {
@@ -45,20 +58,39 @@ public final class AgentRuntime {
     return execute(runId, request, identity, channel, 0);
   }
 
+  public JsonObject startAsync(JsonObject input, Database.Context identity, String channel) throws Exception {
+    String message = required(input, "message");
+    UUID conversationId = commands.ensureConversation(input, identity, channel);
+    UUID runId = UUID.randomUUID();
+    createRun(runId, identity, conversationId, channel, message);
+    JsonObject request = input.deepCopy();
+    request.addProperty("conversationId", conversationId.toString());
+    submit(runId, () -> execute(runId, request, identity, channel, 0));
+    return accepted(runId, conversationId, 0);
+  }
+
   public JsonObject resume(String reference, JsonObject input, Database.Context identity) throws Exception {
     UUID runId = UUID.fromString(reference);
     RunRow run = run(runId, identity);
-    if ("WAITING_CONFIRMATION".equals(run.status())) {
-      throw new IllegalStateException("当前运行正在等待草案确认");
-    }
-    if ("COMPLETED".equals(run.status()) || "CANCELLED".equals(run.status())) {
-      throw new IllegalStateException("当前运行已经结束");
-    }
+    validateResumable(run);
     String message = required(input, "message");
     appendGoal(runId, message);
     JsonObject request = input.deepCopy();
     request.addProperty("conversationId", run.conversationId().toString());
     return execute(runId, request, identity, run.channel(), run.iteration());
+  }
+
+  public JsonObject resumeAsync(String reference, JsonObject input, Database.Context identity) throws Exception {
+    UUID runId = UUID.fromString(reference);
+    RunRow run = run(runId, identity);
+    validateResumable(run);
+    String message = required(input, "message");
+    appendGoal(runId, message);
+    markRunning(runId);
+    JsonObject request = input.deepCopy();
+    request.addProperty("conversationId", run.conversationId().toString());
+    submit(runId, () -> execute(runId, request, identity, run.channel(), run.iteration()));
+    return accepted(runId, run.conversationId(), run.iteration());
   }
 
   public JsonObject get(String reference, Database.Context identity) throws Exception {
@@ -90,12 +122,29 @@ public final class AgentRuntime {
 
   public JsonObject session(Database.Context identity, String channel) throws Exception {
     JsonObject result = commands.session(identity, channel);
+    if (result.has("conversationId")) {
+      addRunState(result, UUID.fromString(result.get("conversationId").getAsString()), identity);
+    }
+    return result;
+  }
+
+  public JsonObject createConversation(Database.Context identity, String channel) throws Exception {
+    return commands.createConversation(identity, channel);
+  }
+
+  public JsonObject conversation(String reference, Database.Context identity, String channel) throws Exception {
+    JsonObject result = commands.conversationDetail(reference, identity, channel);
+    addRunState(result, UUID.fromString(reference), identity);
+    return result;
+  }
+
+  private void addRunState(JsonObject result, UUID conversationId, Database.Context identity) throws SQLException {
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
-        "SELECT id,status FROM agent_runs WHERE workspace_id=? AND user_id=? AND channel=? "
+        "SELECT id,status FROM agent_runs WHERE workspace_id=? AND user_id=? AND conversation_id=? "
             + "ORDER BY updated_at DESC LIMIT 1")) {
       p.setBytes(1, Database.uuidBytes(identity.workspaceId()));
       p.setBytes(2, Database.uuidBytes(identity.userId()));
-      p.setString(3, channel);
+      p.setBytes(3, Database.uuidBytes(conversationId));
       try (ResultSet rs = p.executeQuery()) {
         if (rs.next()) {
           result.addProperty("runId", Database.bytesUuid(rs.getBytes("id")).toString());
@@ -103,7 +152,6 @@ public final class AgentRuntime {
         }
       }
     }
-    return result;
   }
 
   private JsonObject execute(UUID runId, JsonObject input, Database.Context identity, String channel,
@@ -115,14 +163,14 @@ public final class AgentRuntime {
     int iteration = currentIteration + 1;
     updateRunning(runId, iteration);
     String message = required(input, "message");
-    AgentRouter.Decision decision = router.route(message, tools, subagents);
+    AgentRouter.Decision decision = router.route(message, documents.hasAttachments(input), tools, subagents);
     String toolCallId = runId + ":" + iteration;
     JsonObject arguments = new JsonObject();
     arguments.addProperty("message", message);
     startCall(runId, toolCallId, decision.executorType(), decision.executorName(), arguments,
         "tool".equals(decision.executorType()) && tools.require(decision.executorName()).requiresConfirmation());
     try {
-      AgentContext context = new AgentContext(runId, identity, channel);
+      AgentContext context = new AgentContext(runId, identity, channel, input.deepCopy());
       JsonObject result;
       if ("subagent".equals(decision.executorType())) {
         result = executor.execute(() -> subagents.require(decision.executorName()).execute(message, context));
@@ -130,8 +178,13 @@ public final class AgentRuntime {
             string(result, "reply", "已完成。"));
       } else {
         tools.require(decision.executorName());
-        result = executor.execute(() -> commands.command(input, identity, channel));
+        JsonObject commandInput = input.deepCopy();
+        String documentContext = documents.planningContext(commandInput, identity, message);
+        if (!documentContext.isBlank()) commandInput.addProperty("knowledgeContext", documentContext);
+        result = executor.execute(() -> commands.command(commandInput, identity, channel));
       }
+      memory.afterExchange(UUID.fromString(input.get("conversationId").getAsString()), message,
+          string(result, "reply", ""), identity);
       finishCall(toolCallId, "COMPLETED", result, null);
       recordProposedTools(runId, iteration, result);
       return finishRun(runId, iteration, input, decision, result, identity);
@@ -208,6 +261,45 @@ public final class AgentRuntime {
         "UPDATE agent_runs SET status='RUNNING',iteration=?,last_error=NULL WHERE id=?")) {
       p.setInt(1, iteration); p.setBytes(2, Database.uuidBytes(id)); p.executeUpdate();
     }
+  }
+
+  private void markRunning(UUID id) throws SQLException {
+    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
+        "UPDATE agent_runs SET status='RUNNING',last_error=NULL WHERE id=?")) {
+      p.setBytes(1, Database.uuidBytes(id)); p.executeUpdate();
+    }
+  }
+
+  private void validateResumable(RunRow run) {
+    if ("RUNNING".equals(run.status())) throw new IllegalStateException("当前运行仍在处理中");
+    if ("WAITING_CONFIRMATION".equals(run.status())) throw new IllegalStateException("当前运行正在等待草案确认");
+    if ("COMPLETED".equals(run.status()) || "CANCELLED".equals(run.status())) {
+      throw new IllegalStateException("当前运行已经结束");
+    }
+  }
+
+  private JsonObject accepted(UUID runId, UUID conversationId, int iteration) {
+    JsonObject result = new JsonObject();
+    result.addProperty("runId", runId.toString());
+    result.addProperty("conversationId", conversationId.toString());
+    result.addProperty("status", "RUNNING");
+    result.addProperty("iteration", iteration);
+    return result;
+  }
+
+  private void submit(UUID runId, AgentWork work) {
+    workers.submit(() -> {
+      try {
+        work.execute();
+      } catch (Exception error) {
+        LOG.error("[Agent后台运行失败] runId={} 原因={}", runId, error.getMessage(), error);
+      }
+    });
+  }
+
+  @Override
+  public void close() {
+    workers.shutdownNow();
   }
 
   private void appendGoal(UUID id, String message) throws SQLException {
@@ -347,4 +439,9 @@ public final class AgentRuntime {
 
   private record RunRow(UUID conversationId, String channel, String goal, String status, int iteration,
                         String result, String error) {}
+
+  @FunctionalInterface
+  private interface AgentWork {
+    JsonObject execute() throws Exception;
+  }
 }

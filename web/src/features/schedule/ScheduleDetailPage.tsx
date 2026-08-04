@@ -42,6 +42,7 @@ export function ScheduleDetailPage({
   noteItems,
   onNotesChange,
   onDeleteNote,
+  onOpenNote,
   onToggle,
   onEdit,
   onDelete,
@@ -52,6 +53,7 @@ export function ScheduleDetailPage({
   noteItems: Note[]
   onNotesChange: (notes: Note[]) => void
   onDeleteNote: (id: string) => Promise<boolean>
+  onOpenNote: (id: string) => void
   onToggle: (id: string) => void
   onEdit: (item: CalendarItem) => void
   onDelete: (id: string) => void
@@ -230,7 +232,11 @@ export function ScheduleDetailPage({
           <div className="schedule-related">
             <span className="eyebrow">相关长期笔记</span>
             {noteItems.filter((note) => note.category === '学习笔记').slice(0, 3).map((note) => (
-              <article key={note.id}><i style={{ backgroundColor: note.color }} /><div><strong>{note.title}</strong><span>{note.updatedAt}</span></div><ChevronRight size={15} /></article>
+              <button className="schedule-related-item" key={note.id} type="button" onClick={() => onOpenNote(note.id)}>
+                <i style={{ backgroundColor: note.color }} />
+                <div><strong>{note.title}</strong><span>{note.updatedAt}</span></div>
+                <ChevronRight size={15} />
+              </button>
             ))}
           </div>
         </aside>

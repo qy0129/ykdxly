@@ -55,6 +55,7 @@ public final class ModelClient {
     body.addProperty("model", model);
     body.addProperty("temperature", temperature);
     body.addProperty("max_tokens", maxTokens);
+    body.addProperty("enable_thinking", false);
     body.add("messages", messages);
     HttpRequest request = HttpRequest.newBuilder(URI.create(apiUrl))
         .timeout(Duration.ofSeconds(timeoutSeconds))
@@ -73,11 +74,46 @@ public final class ModelClient {
     String content = JsonParser.parseString(response.body()).getAsJsonObject().getAsJsonArray("choices").get(0)
         .getAsJsonObject().getAsJsonObject("message").get("content").getAsString().trim()
         .replaceFirst("^```(?:json)?\\s*", "").replaceFirst("\\s*```$", "");
-    try {
-      return JsonParser.parseString(content).getAsJsonObject();
-    } catch (Exception error) {
-      throw new IllegalStateException("AI 未返回有效 JSON", error);
+    JsonObject result = parseJsonObject(content);
+    if (result != null) return result;
+    throw new IllegalStateException("AI 未返回有效 JSON");
+  }
+
+  private JsonObject parseJsonObject(String content) {
+    try { return JsonParser.parseString(content).getAsJsonObject(); }
+    catch (Exception ignored) { }
+    int thoughtEnd = content.lastIndexOf("</think>");
+    String value = thoughtEnd >= 0 ? content.substring(thoughtEnd + 8).trim() : content;
+    value = value.replaceFirst("^```(?:json)?\\s*", "").replaceFirst("\\s*```$", "");
+    try { return JsonParser.parseString(value).getAsJsonObject(); }
+    catch (Exception ignored) { }
+
+    JsonObject last = null;
+    int start = -1;
+    int depth = 0;
+    boolean quoted = false;
+    boolean escaped = false;
+    for (int index = 0; index < value.length(); index++) {
+      char current = value.charAt(index);
+      if (start < 0) {
+        if (current == '{') { start = index; depth = 1; }
+        continue;
+      }
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (current == '\\') escaped = true;
+        else if (current == '"') quoted = false;
+        continue;
+      }
+      if (current == '"') quoted = true;
+      else if (current == '{') depth++;
+      else if (current == '}' && --depth == 0) {
+        try { last = JsonParser.parseString(value.substring(start, index + 1)).getAsJsonObject(); }
+        catch (Exception ignored) { }
+        start = -1;
+      }
     }
+    return last;
   }
 
   private boolean retryable(Exception error) {

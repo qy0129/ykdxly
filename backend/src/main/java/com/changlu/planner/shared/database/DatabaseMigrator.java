@@ -26,7 +26,10 @@ final class DatabaseMigrator {
       "005_plan_execution_loop.sql",
       "006_user_profile.sql",
       "007_profile_avatar_data.sql",
-      "008_agent_runtime.sql"
+      "008_agent_runtime.sql",
+      "009_agent_documents.sql",
+      "010_ai_conversations_memory.sql",
+      "011_task_recurrence.sql"
   );
 
   private DatabaseMigrator() {}

@@ -2,6 +2,7 @@ package com.changlu.planner.interfaces.http;
 
 import com.changlu.planner.agent.core.AgentFacade;
 import com.changlu.planner.agent.subagents.briefing.BriefingResult;
+import com.changlu.planner.agent.subagents.document.DocumentResult;
 import com.changlu.planner.features.briefing.ScheduleMaterialService;
 import com.changlu.planner.features.export.StatsPdfGenerator;
 import com.changlu.planner.features.plan.PlanExecutionService;
@@ -20,6 +21,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.ByteArrayOutputStream;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -35,6 +37,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 import org.slf4j.Logger;
@@ -45,6 +49,7 @@ import org.slf4j.MDC;
 public final class ApiServer {
   private static final Logger LOG = LoggerFactory.getLogger(ApiServer.class);
   private static final String RESPONSE_STATUS_ATTRIBUTE = "responseStatus";
+  private static final int MAX_AGENT_FILE_BYTES = 25 * 1024 * 1024;
   private final Database database;
   private final int port;
   private final Gson gson = new Gson();
@@ -54,6 +59,7 @@ public final class ApiServer {
   private final ScheduleMaterialService scheduleMaterials;
   private final StaticFileHandler staticFiles = new StaticFileHandler();
   private HttpServer server;
+  private ExecutorService httpExecutor;
 
   public ApiServer(Database database, int port) { this.database = database; this.port = port; this.agent = new AgentFacade(database); this.planExecution = new PlanExecutionService(database); this.reminders = new ReminderService(database); this.scheduleMaterials = new ScheduleMaterialService(database); }
   public int port() { return port; }
@@ -77,10 +83,15 @@ public final class ApiServer {
     server.createContext("/api/ai/commands", logged(this::aiCommand));
     server.createContext("/api/ai/drafts/", logged(this::aiDraft));
     server.createContext("/api/ai/session", logged(this::aiSession));
+    server.createContext("/api/ai/conversations", logged(this::aiConversations));
+    server.createContext("/api/ai/conversations/", logged(this::aiConversation));
+    server.createContext("/api/ai/memories", logged(this::aiMemories));
+    server.createContext("/api/ai/memories/", logged(this::aiMemory));
     server.createContext("/api/ai/change-sets/", logged(this::aiChangeSet));
     server.createContext("/api/agent/runs", logged(this::agentRuns));
     server.createContext("/api/agent/runs/", logged(this::agentRun));
     server.createContext("/api/agent/drafts/", logged(this::agentDraft));
+    server.createContext("/api/agent/files", logged(this::agentFiles));
     server.createContext("/api/review/facts", logged(this::reviewFacts));
     server.createContext("/api/review/today", logged(this::reviewToday));
     server.createContext("/api/stats", logged(this::stats));
@@ -92,10 +103,15 @@ public final class ApiServer {
     server.createContext("/api/integrations/wechat/ai/", logged(this::wechatAiDraft));
     server.createContext("/api/integrations/wechat/briefing", logged(this::wechatBriefing));
     server.createContext("/", staticFiles);
-    server.setExecutor(null);
+    httpExecutor = Executors.newFixedThreadPool(8);
+    server.setExecutor(httpExecutor);
     server.start();
   }
-  public void stop() { if (server != null) server.stop(0); }
+  public void stop() {
+    if (server != null) server.stop(0);
+    if (httpExecutor != null) httpExecutor.shutdownNow();
+    agent.close();
+  }
 
   private HttpHandler logged(HttpHandler handler) {
     return exchange -> {
@@ -245,14 +261,138 @@ public final class ApiServer {
     } catch (Exception ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "database_error", "message", ex.getMessage())); }
   }
 
+  private void aiConversations(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if ("GET".equals(e.getRequestMethod())) {
+        json(e, 200, agent.conversations(context(e), "web")); return;
+      }
+      if ("POST".equals(e.getRequestMethod())) {
+        json(e, 201, agent.createConversation(context(e), "web")); return;
+      }
+      error(e, 405, "method_not_allowed", "请求方法不支持", false);
+    } catch (Exception ex) {
+      LOG.error("[AI会话列表失败] 原因={}", ex.getMessage(), ex);
+      error(e, 500, "conversation_error", ex.getMessage(), true);
+    }
+  }
+
+  private void aiConversation(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      String[] parts = e.getRequestURI().getPath().split("/");
+      if (parts.length < 5 || parts[4].isBlank()) {
+        error(e, 400, "conversation_id_required", "缺少会话编号", false); return;
+      }
+      String id = parts[4];
+      if ("GET".equals(e.getRequestMethod())) {
+        json(e, 200, agent.conversation(id, context(e), "web")); return;
+      }
+      if ("PATCH".equals(e.getRequestMethod()) || "PUT".equals(e.getRequestMethod())) {
+        json(e, 200, agent.renameConversation(id, body(e), context(e))); return;
+      }
+      if ("DELETE".equals(e.getRequestMethod())) {
+        agent.deleteConversation(id, context(e)); json(e, 204, Map.of()); return;
+      }
+      error(e, 405, "method_not_allowed", "请求方法不支持", false);
+    } catch (IllegalArgumentException ex) {
+      error(e, 404, "conversation_not_found", ex.getMessage(), false);
+    } catch (Exception ex) {
+      LOG.error("[AI会话操作失败] 原因={}", ex.getMessage(), ex);
+      error(e, 500, "conversation_error", ex.getMessage(), true);
+    }
+  }
+
+  private void aiMemories(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if (!"GET".equals(e.getRequestMethod())) {
+        error(e, 405, "method_not_allowed", "请求方法不支持", false); return;
+      }
+      json(e, 200, agent.memories(context(e)));
+    } catch (Exception ex) {
+      LOG.error("[AI记忆读取失败] 原因={}", ex.getMessage(), ex);
+      error(e, 500, "memory_error", ex.getMessage(), true);
+    }
+  }
+
+  private void aiMemory(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      String[] parts = e.getRequestURI().getPath().split("/");
+      if (parts.length < 5 || parts[4].isBlank()) {
+        error(e, 400, "memory_id_required", "缺少记忆编号", false); return;
+      }
+      String id = parts[4];
+      if ("PATCH".equals(e.getRequestMethod()) || "PUT".equals(e.getRequestMethod())) {
+        json(e, 200, agent.updateMemory(id, body(e), context(e))); return;
+      }
+      if ("DELETE".equals(e.getRequestMethod())) {
+        agent.deleteMemory(id, context(e)); json(e, 204, Map.of()); return;
+      }
+      error(e, 405, "method_not_allowed", "请求方法不支持", false);
+    } catch (IllegalArgumentException ex) {
+      error(e, 404, "memory_not_found", ex.getMessage(), false);
+    } catch (Exception ex) {
+      LOG.error("[AI记忆操作失败] 原因={}", ex.getMessage(), ex);
+      error(e, 500, "memory_error", ex.getMessage(), true);
+    }
+  }
+
   private void agentRuns(HttpExchange e) throws IOException {
     try {
       if (options(e)) return;
       if (!"POST".equals(e.getRequestMethod())) { error(e, 405, "method_not_allowed", "请求方法不支持", false); return; }
-      json(e, 201, agent.start(body(e), context(e), "web"));
+      json(e, 202, agent.startAsync(body(e), context(e), "web"));
     } catch (IllegalArgumentException ex) { error(e, 400, "invalid_agent_request", ex.getMessage(), false); }
       catch (IllegalStateException ex) { error(e, 503, "agent_unavailable", ex.getMessage(), true); }
       catch (Exception ex) { ex.printStackTrace(); error(e, 500, "agent_error", ex.getMessage(), true); }
+  }
+
+  private void agentFiles(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      String[] path = e.getRequestURI().getPath().split("/");
+      if ("DELETE".equals(e.getRequestMethod()) && path.length == 5 && !path[4].isBlank()) {
+        agent.deleteDocument(path[4], context(e));
+        json(e, 204, Map.of());
+        return;
+      }
+      if (!"POST".equals(e.getRequestMethod())) {
+        error(e, 405, "method_not_allowed", "请求方法不支持", false); return;
+      }
+      String encodedName = e.getRequestHeaders().getFirst("X-File-Name");
+      if (encodedName == null || encodedName.isBlank()) {
+        error(e, 400, "file_name_required", "缺少文件名", false); return;
+      }
+      long contentLength = Long.parseLong(e.getRequestHeaders().getFirst("Content-Length") == null
+          ? "-1" : e.getRequestHeaders().getFirst("Content-Length"));
+      if (contentLength > MAX_AGENT_FILE_BYTES) {
+        error(e, 413, "file_too_large", "文件不能超过 25 MB", false); return;
+      }
+      byte[] bytes;
+      try (InputStream input = e.getRequestBody()) { bytes = input.readNBytes(MAX_AGENT_FILE_BYTES + 1); }
+      if (bytes.length == 0) { error(e, 400, "file_empty", "文件内容为空", false); return; }
+      if (bytes.length > MAX_AGENT_FILE_BYTES) {
+        error(e, 413, "file_too_large", "文件不能超过 25 MB", false); return;
+      }
+      String fileName = URLDecoder.decode(encodedName, StandardCharsets.UTF_8).replace('\\', '/');
+      fileName = fileName.substring(fileName.lastIndexOf('/') + 1).trim();
+      if (fileName.isBlank()) { error(e, 400, "file_name_required", "文件名无效", false); return; }
+      String mediaType = e.getRequestHeaders().getFirst("Content-Type");
+      DocumentResult result = agent.uploadDocument(bytes, fileName,
+          mediaType == null ? "application/octet-stream" : mediaType, context(e));
+      json(e, 201, result.toJson());
+    } catch (NumberFormatException ex) {
+      error(e, 400, "invalid_content_length", "文件长度无效", false);
+    } catch (IllegalArgumentException ex) {
+      error(e, 400, "invalid_document", ex.getMessage(), false);
+    } catch (IllegalStateException ex) {
+      error(e, 503, "document_service_unavailable", ex.getMessage(), true);
+    } catch (Exception ex) {
+      LOG.error("[文件上传失败] 原因={}", ex.getMessage(), ex);
+      error(e, 500, "document_upload_error", "文件解析失败：" + ex.getMessage(), true);
+    }
   }
 
   private void agentRun(HttpExchange e) throws IOException {
@@ -263,7 +403,7 @@ public final class ApiServer {
       String runId = parts[4];
       String action = parts.length > 5 ? parts[5] : "";
       if ("GET".equals(e.getRequestMethod()) && action.isBlank()) { json(e, 200, agent.get(runId, context(e))); return; }
-      if ("POST".equals(e.getRequestMethod()) && "resume".equals(action)) { json(e, 200, agent.resume(runId, body(e), context(e))); return; }
+      if ("POST".equals(e.getRequestMethod()) && "resume".equals(action)) { json(e, 202, agent.resumeAsync(runId, body(e), context(e))); return; }
       error(e, 405, "method_not_allowed", "请求方法不支持", false);
     } catch (IllegalArgumentException ex) { error(e, 404, "agent_run_not_found", ex.getMessage(), false); }
       catch (IllegalStateException ex) { error(e, 409, "agent_run_rejected", ex.getMessage(), false); }
@@ -492,7 +632,8 @@ public final class ApiServer {
       error(e, 405, "method_not_allowed", "请求方法不支持", false);
     } catch (IllegalArgumentException ex) { error(e, 400, "invalid_task", ex.getMessage(), false); }
       catch (IllegalStateException ex) { error(e, 409, "version_conflict", ex.getMessage(), false); }
-      catch (SQLException ex) { ex.printStackTrace(); error(e, 500, "database_error", ex.getMessage(), true); }
+      catch (SQLException ex) { LOG.error("[任务保存失败] 数据库异常", ex); error(e, 500, "database_error", "任务保存失败，请稍后重试", true); }
+      catch (Exception ex) { LOG.error("[任务保存失败] 未处理异常", ex); error(e, 500, "task_error", "任务保存失败，请稍后重试", true); }
   }
 
   private void planningPreferences(HttpExchange e) throws IOException {
@@ -510,9 +651,15 @@ public final class ApiServer {
       if (options(e)) return;
       String[] parts = e.getRequestURI().getPath().split("/");
       if ("GET".equals(e.getRequestMethod()) && parts.length == 3) { json(e, 200, planExecution.listTrash(context(e))); return; }
+      if ("DELETE".equals(e.getRequestMethod()) && parts.length == 5) {
+        String type = parts[3]; UUID id = UUID.fromString(parts[4]);
+        if (purgeTrashItem(type, id, workspace(e)) == 0) throw new IllegalArgumentException("记录不在回收站");
+        json(e, 204, Map.of()); return;
+      }
       if ("POST".equals(e.getRequestMethod()) && parts.length >= 6 && "restore".equals(parts[5])) {
         String type = parts[3]; UUID id = UUID.fromString(parts[4]);
         if ("task".equals(type)) { json(e, 200, planExecution.restoreTask(context(e), id, "web")); return; }
+        if ("stage".equals(type)) { json(e, 200, planExecution.restoreStage(context(e), id, "web")); return; }
         String table = switch (type) { case "plan" -> "plans"; case "todo" -> "todos"; case "schedule" -> "schedule_items"; default -> throw new IllegalArgumentException("不支持的回收站类型"); };
         try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("UPDATE " + table + " SET deleted_at=NULL,purge_after=NULL,version=version+1 WHERE id=? AND workspace_id=? AND deleted_at IS NOT NULL")) {
           p.setBytes(1, Database.uuidBytes(id)); p.setBytes(2, Database.uuidBytes(workspace(e)));
@@ -523,6 +670,21 @@ public final class ApiServer {
       error(e, 405, "method_not_allowed", "请求方法不支持", false);
     } catch (IllegalArgumentException ex) { error(e, 400, "invalid_trash_operation", ex.getMessage(), false); }
       catch (SQLException ex) { ex.printStackTrace(); error(e, 500, "database_error", ex.getMessage(), true); }
+  }
+
+  /** 永久删除严格限定为当前工作区内已经软删除的记录。 */
+  private int purgeTrashItem(String type, UUID id, UUID workspaceId) throws SQLException {
+    String sql = switch (type) {
+      case "plan" -> "DELETE FROM plans WHERE id=? AND workspace_id=? AND deleted_at IS NOT NULL";
+      case "todo" -> "DELETE FROM todos WHERE id=? AND workspace_id=? AND deleted_at IS NOT NULL";
+      case "schedule" -> "DELETE FROM schedule_items WHERE id=? AND workspace_id=? AND deleted_at IS NOT NULL";
+      case "stage" -> "DELETE s FROM plan_stages s JOIN plans p ON p.id=s.plan_id WHERE s.id=? AND p.workspace_id=? AND s.deleted_at IS NOT NULL";
+      case "task" -> "DELETE t FROM plan_tasks t JOIN plans p ON p.id=t.plan_id WHERE t.id=? AND p.workspace_id=? AND t.deleted_at IS NOT NULL";
+      default -> throw new IllegalArgumentException("不支持的回收站类型");
+    };
+    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
+      p.setBytes(1, Database.uuidBytes(id)); p.setBytes(2, Database.uuidBytes(workspaceId)); return p.executeUpdate();
+    }
   }
 
   private void planSubresource(HttpExchange e) throws IOException {
@@ -607,14 +769,35 @@ public final class ApiServer {
   }
 
   private JsonObject loadStats(UUID workspace) throws SQLException {
-      LocalDate today = LocalDate.now(); LocalDate from = today.minusDays(118);
+      LocalDate today = LocalDate.now();
+      LocalDate from = YearMonth.from(today).minusMonths(5).atDay(1);
+      LocalDate to = YearMonth.from(today).atEndOfMonth();
       Map<LocalDate, DailyStat> values = new LinkedHashMap<>();
-      for (LocalDate date = from; !date.isAfter(today); date = date.plusDays(1)) values.put(date, new DailyStat());
-      String scheduleSql = "SELECT DATE(start_at) day, COUNT(*) planned, SUM(status = 'done') completed, SUM(CASE WHEN status = 'done' THEN duration_minutes ELSE 0 END) minutes FROM schedule_items WHERE workspace_id = ? AND DATE(start_at) BETWEEN ? AND ? GROUP BY DATE(start_at)";
-      String todoSql = "SELECT DATE(COALESCE(due_at, created_at)) day, COUNT(*) planned, SUM(status = 'done') completed FROM todos WHERE workspace_id = ? AND DATE(COALESCE(due_at, created_at)) BETWEEN ? AND ? GROUP BY DATE(COALESCE(due_at, created_at))";
+      for (LocalDate date = from; !date.isAfter(to); date = date.plusDays(1)) values.put(date, new DailyStat());
+      // 日程只是任务的时间块，完成率只由计划任务和独立待办决定。
+      String taskSql = "SELECT DATE(COALESCE(t.due_at,t.created_at)) day, COUNT(*) planned, "
+          + "SUM(t.status='done') completed, "
+          + "SUM(CASE WHEN t.status='done' THEN COALESCE(t.actual_minutes,0) ELSE 0 END) minutes "
+          + "FROM plan_tasks t JOIN plans p ON p.id=t.plan_id JOIN plan_stages s ON s.id=t.stage_id "
+          + "WHERE p.workspace_id=? AND p.deleted_at IS NULL AND s.deleted_at IS NULL AND t.deleted_at IS NULL "
+          + "AND t.status NOT IN ('cancelled','skipped') "
+          + "AND NOT EXISTS (SELECT 1 FROM schedule_items recurrence_item WHERE recurrence_item.task_id=t.id "
+          + "AND recurrence_item.source_type='task_recurrence' AND recurrence_item.deleted_at IS NULL AND recurrence_item.status<>'cancelled') "
+          + "AND DATE(COALESCE(t.due_at,t.created_at)) BETWEEN ? AND ? "
+          + "GROUP BY DATE(COALESCE(t.due_at,t.created_at))";
+      String recurrenceSql = "SELECT DATE(i.start_at) day,COUNT(*) planned,SUM(i.status='done') completed "
+          + "FROM schedule_items i JOIN plan_tasks t ON t.id=i.task_id JOIN plans p ON p.id=t.plan_id "
+          + "JOIN plan_stages s ON s.id=t.stage_id WHERE p.workspace_id=? AND p.deleted_at IS NULL "
+          + "AND s.deleted_at IS NULL AND t.deleted_at IS NULL AND t.status NOT IN ('cancelled','skipped') "
+          + "AND i.deleted_at IS NULL AND i.source_type='task_recurrence' AND i.status<>'cancelled' "
+          + "AND DATE(i.start_at) BETWEEN ? AND ? GROUP BY DATE(i.start_at)";
+      String todoSql = "SELECT DATE(COALESCE(due_at,created_at)) day, COUNT(*) planned, SUM(status='done') completed "
+          + "FROM todos WHERE workspace_id=? AND deleted_at IS NULL AND status<>'cancelled' "
+          + "AND DATE(COALESCE(due_at,created_at)) BETWEEN ? AND ? GROUP BY DATE(COALESCE(due_at,created_at))";
       try (Connection c = database.connection()) {
-        try (PreparedStatement p = c.prepareStatement(scheduleSql)) { p.setBytes(1, Database.uuidBytes(workspace)); p.setDate(2, java.sql.Date.valueOf(from)); p.setDate(3, java.sql.Date.valueOf(today)); try (ResultSet rs = p.executeQuery()) { while (rs.next()) values.get(rs.getDate("day").toLocalDate()).add(rs.getInt("planned"), rs.getInt("completed"), rs.getInt("minutes")); } }
-        try (PreparedStatement p = c.prepareStatement(todoSql)) { p.setBytes(1, Database.uuidBytes(workspace)); p.setDate(2, java.sql.Date.valueOf(from)); p.setDate(3, java.sql.Date.valueOf(today)); try (ResultSet rs = p.executeQuery()) { while (rs.next()) values.get(rs.getDate("day").toLocalDate()).add(rs.getInt("planned"), rs.getInt("completed"), 0); } }
+        try (PreparedStatement p = c.prepareStatement(taskSql)) { p.setBytes(1, Database.uuidBytes(workspace)); p.setDate(2, java.sql.Date.valueOf(from)); p.setDate(3, java.sql.Date.valueOf(to)); try (ResultSet rs = p.executeQuery()) { while (rs.next()) values.get(rs.getDate("day").toLocalDate()).add(rs.getInt("planned"), rs.getInt("completed"), rs.getInt("minutes")); } }
+        try (PreparedStatement p = c.prepareStatement(recurrenceSql)) { p.setBytes(1, Database.uuidBytes(workspace)); p.setDate(2, java.sql.Date.valueOf(from)); p.setDate(3, java.sql.Date.valueOf(to)); try (ResultSet rs = p.executeQuery()) { while (rs.next()) values.get(rs.getDate("day").toLocalDate()).add(rs.getInt("planned"), rs.getInt("completed"), 0); } }
+        try (PreparedStatement p = c.prepareStatement(todoSql)) { p.setBytes(1, Database.uuidBytes(workspace)); p.setDate(2, java.sql.Date.valueOf(from)); p.setDate(3, java.sql.Date.valueOf(to)); try (ResultSet rs = p.executeQuery()) { while (rs.next()) values.get(rs.getDate("day").toLocalDate()).add(rs.getInt("planned"), rs.getInt("completed"), 0); } }
       }
       return statsPayload(values, today);
   }
@@ -811,7 +994,7 @@ public final class ApiServer {
 
   private boolean options(HttpExchange e) throws IOException { if (!"OPTIONS".equals(e.getRequestMethod())) return false; cors(e); e.sendResponseHeaders(204, -1); e.close(); return true; }
   private void json(HttpExchange e, int status, Object value) throws IOException { e.setAttribute(RESPONSE_STATUS_ATTRIBUTE, status); cors(e); byte[] bytes = gson.toJson(value).getBytes(StandardCharsets.UTF_8); e.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8"); e.sendResponseHeaders(status, status == 204 ? -1 : bytes.length); if (status != 204) try (OutputStream out = e.getResponseBody()) { out.write(bytes); } else e.close(); }
-  private void cors(HttpExchange e) { Headers h = e.getResponseHeaders(); h.set("Access-Control-Allow-Origin", "*"); h.set("Access-Control-Allow-Headers", "Content-Type, X-Workspace-Id, X-User-Id"); h.set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS"); }
+  private void cors(HttpExchange e) { Headers h = e.getResponseHeaders(); h.set("Access-Control-Allow-Origin", "*"); h.set("Access-Control-Allow-Headers", "Content-Type, X-Workspace-Id, X-User-Id, X-File-Name"); h.set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS"); }
   private JsonObject body(HttpExchange e) throws IOException {
     try (InputStream in = e.getRequestBody()) {
       String raw = new String(in.readAllBytes(), StandardCharsets.UTF_8);
@@ -825,6 +1008,11 @@ public final class ApiServer {
     try {
       if (options(e)) return;
       String[] parts = e.getRequestURI().getPath().split("/");
+      // /api/schedules/{id} 仍是日程 CRUD，只有 /materials 才属于资料子资源。
+      if (parts.length == 4 && !parts[3].isBlank()) {
+        crud(e, "schedule_items");
+        return;
+      }
       if (parts.length < 5 || parts[3].isBlank() || !"materials".equals(parts[4])) {
         json(e, 404, Map.of("error", "schedule_materials_not_found"));
         return;

@@ -131,7 +131,7 @@ export function Sidebar({
             return (
               <section className="sidebar-plan" key={plan.id}>
                 <button className="plan-summary" type="button" onClick={() => togglePlan(plan.id)}>
-                  <ProgressRing value={plan.progress} color={plan.color} />
+                  <ProgressRing value={plan.taskProgress} color={plan.color} />
                   <span className="plan-summary-copy">
                     <strong>{plan.title}</strong>
                     <small>{plan.subtitle}</small>
@@ -144,9 +144,9 @@ export function Sidebar({
                       <button type="button" key={item.id} onClick={() => onPlanOpen(plan.id)}>
                         <span className="subitem-title">{item.title}</span>
                         <span className="subitem-meta">
-                          <span>{item.progress}%</span>
+                          <span>{item.taskProgress}%</span>
                           <span className="mini-track">
-                            <i style={{ width: item.progress + '%', backgroundColor: plan.color }} />
+                            <i style={{ width: item.taskProgress + '%', backgroundColor: plan.color }} />
                           </span>
                         </span>
                       </button>
