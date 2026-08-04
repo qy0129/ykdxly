@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react'
 import { Eye, FileText, FolderOpen, Link2, Network, Pencil, Plus, Save, Search, Tag, Trash2, X } from 'lucide-react'
 import { notes as initialNotes } from '../../mocks/plannerData'
 import type { Note } from '../../types/planner'
@@ -168,6 +168,323 @@ export function NoteGraph({ noteItems, activeId, onSelect }: { noteItems: Note[]
   )
 }
 
+type ElasticGraphPoint = { x: number; y: number; vx: number; vy: number }
+type ElasticGraphInteraction = {
+  kind: 'node' | 'pan'
+  noteId?: string
+  startX: number
+  startY: number
+  originX: number
+  originY: number
+  lastX: number
+  lastY: number
+  lastAt: number
+}
+
+const ELASTIC_GRAPH_WIDTH = 760
+const ELASTIC_GRAPH_HEIGHT = 470
+const MIN_GRAPH_NODE_RADIUS = 14
+const MAX_GRAPH_NODE_RADIUS = 32
+const MAX_GRAPH_WORD_COUNT = 3000
+
+function graphWordCount(note: Note) {
+  return (note.content ?? note.excerpt ?? '').replace(/\s+/g, '').length
+}
+
+function graphFallbackPosition(index: number, count: number) {
+  return {
+    x: ELASTIC_GRAPH_WIDTH / 2 + Math.cos(index / Math.max(count, 1) * Math.PI * 2) * 250,
+    y: ELASTIC_GRAPH_HEIGHT / 2 + Math.sin(index / Math.max(count, 1) * Math.PI * 2) * 165,
+  }
+}
+
+function createElasticPositions(noteItems: Note[], current: Record<string, ElasticGraphPoint> = {}) {
+  return Object.fromEntries(noteItems.map((note, index) => {
+    const existing = current[note.id]
+    const base = existing ?? graphPositions[note.id] ?? graphFallbackPosition(index, noteItems.length)
+    return [note.id, { x: base.x, y: base.y, vx: existing?.vx ?? 0, vy: existing?.vy ?? 0 }]
+  })) as Record<string, ElasticGraphPoint>
+}
+
+function ElasticNoteGraph({ noteItems, activeId, onSelect }: { noteItems: Note[]; activeId: string; onSelect: (id: string) => void }) {
+  const [positions, setPositions] = useState<Record<string, ElasticGraphPoint>>(() => createElasticPositions(noteItems))
+  const positionsRef = useRef(positions)
+  const [viewport, setViewport] = useState({ x: 0, y: 0, scale: 1 })
+  const [hoveredId, setHoveredId] = useState<string | null>(null)
+  const [draggingId, setDraggingId] = useState<string | null>(null)
+  const svgRef = useRef<SVGSVGElement | null>(null)
+  const interactionRef = useRef<ElasticGraphInteraction | null>(null)
+  const suppressClickRef = useRef(false)
+
+  const model = useMemo(() => {
+    const noteIds = new Set(noteItems.map((note) => note.id))
+    const relations = noteItems.flatMap((note) => note.relatedIds
+      .filter((relatedId) => note.id < relatedId && noteIds.has(relatedId))
+      .map((relatedId) => ({ from: note.id, to: relatedId })))
+    const degree = Object.fromEntries(noteItems.map((note) => [note.id, new Set(note.relatedIds.filter((id) => noteIds.has(id))).size])) as Record<string, number>
+    const maxDegree = Math.max(1, ...Object.values(degree))
+    const radii = Object.fromEntries(noteItems.map((note) => {
+      const wordScore = Math.sqrt(Math.min(graphWordCount(note), MAX_GRAPH_WORD_COUNT) / MAX_GRAPH_WORD_COUNT)
+      const importanceScore = Math.min(degree[note.id] / Math.max(4, maxDegree), 1)
+      const score = wordScore * 0.65 + importanceScore * 0.35
+      return [note.id, MIN_GRAPH_NODE_RADIUS + score * (MAX_GRAPH_NODE_RADIUS - MIN_GRAPH_NODE_RADIUS)]
+    })) as Record<string, number>
+    const neighbors = Object.fromEntries(noteItems.map((note) => [note.id, new Set(note.relatedIds.filter((id) => noteIds.has(id)))])) as Record<string, Set<string>>
+    return { relations, degree, radii, neighbors }
+  }, [noteItems])
+  const focusedId = hoveredId ?? draggingId
+
+  useEffect(() => {
+    const next = createElasticPositions(noteItems, positionsRef.current)
+    positionsRef.current = next
+    setPositions(next)
+  }, [noteItems])
+
+  useEffect(() => {
+    let frame = 0
+    let last = performance.now()
+    const simulate = (now: number) => {
+      const dt = Math.min((now - last) / 1000, 0.035)
+      last = now
+      const current = positionsRef.current
+      const force = Object.fromEntries(noteItems.map((note) => [note.id, { x: 0, y: 0 }])) as Record<string, { x: number; y: number }>
+
+      noteItems.forEach((a, index) => noteItems.slice(index + 1).forEach((b) => {
+        const pa = current[a.id]
+        const pb = current[b.id]
+        if (!pa || !pb) return
+        const dx = pb.x - pa.x
+        const dy = pb.y - pa.y
+        const distanceSquared = Math.max(dx * dx + dy * dy, 900)
+        const distance = Math.sqrt(distanceSquared)
+        const nx = dx / distance
+        const ny = dy / distance
+        const repel = 750000 / distanceSquared
+        force[a.id].x -= nx * repel
+        force[a.id].y -= ny * repel
+        force[b.id].x += nx * repel
+        force[b.id].y += ny * repel
+        const minimumDistance = model.radii[a.id] + model.radii[b.id] + 28
+        if (distance < minimumDistance) {
+          const bump = (minimumDistance - distance) * 40
+          force[a.id].x -= nx * bump
+          force[a.id].y -= ny * bump
+          force[b.id].x += nx * bump
+          force[b.id].y += ny * bump
+        }
+      }))
+
+      if (draggingId) {
+        const source = current[draggingId]
+        if (source) noteItems.forEach((note) => {
+          if (note.id === draggingId || model.neighbors[draggingId]?.has(note.id)) return
+          const target = current[note.id]
+          if (!target) return
+          const dx = target.x - source.x
+          const dy = target.y - source.y
+          const distance = Math.max(1, Math.hypot(dx, dy))
+          const range = model.radii[draggingId] + model.radii[note.id] + 54
+          if (distance < range) {
+            const push = (range - distance) * 20
+            force[note.id].x += dx / distance * push
+            force[note.id].y += dy / distance * push
+          }
+        })
+      }
+
+      model.relations.forEach(({ from, to }) => {
+        const fromPoint = current[from]
+        const toPoint = current[to]
+        if (!fromPoint || !toPoint) return
+        const dx = toPoint.x - fromPoint.x
+        const dy = toPoint.y - fromPoint.y
+        const distance = Math.max(1, Math.hypot(dx, dy))
+        const draggedRelation = draggingId === from || draggingId === to
+        const stretch = (distance - 150) * (draggedRelation ? 7.8 : 3.1)
+        const nx = dx / distance
+        const ny = dy / distance
+        force[from].x += nx * stretch
+        force[from].y += ny * stretch
+        force[to].x -= nx * stretch
+        force[to].y -= ny * stretch
+        if (draggedRelation && draggingId) {
+          const otherId = draggingId === from ? to : from
+          force[otherId].x += (current[draggingId].x - current[otherId].x) * 0.04
+          force[otherId].y += (current[draggingId].y - current[otherId].y) * 0.04
+        }
+      })
+
+      noteItems.forEach((note) => {
+        const point = current[note.id]
+        if (!point || draggingId === note.id) return
+        force[note.id].x += (ELASTIC_GRAPH_WIDTH / 2 - point.x) * 0.12
+        force[note.id].y += (ELASTIC_GRAPH_HEIGHT / 2 - point.y) * 0.12
+        const damping = Math.pow(0.91, dt * 60)
+        point.vx = Math.max(-520, Math.min(520, (point.vx + force[note.id].x * dt) * damping))
+        point.vy = Math.max(-520, Math.min(520, (point.vy + force[note.id].y * dt) * damping))
+        point.x += point.vx * dt
+        point.y += point.vy * dt
+        const padding = 42
+        if (point.x < padding || point.x > ELASTIC_GRAPH_WIDTH - padding) { point.x = Math.max(padding, Math.min(ELASTIC_GRAPH_WIDTH - padding, point.x)); point.vx *= -0.4 }
+        if (point.y < padding || point.y > ELASTIC_GRAPH_HEIGHT - padding) { point.y = Math.max(padding, Math.min(ELASTIC_GRAPH_HEIGHT - padding, point.y)); point.vy *= -0.4 }
+      })
+
+      setPositions({ ...current })
+      frame = window.requestAnimationFrame(simulate)
+    }
+    frame = window.requestAnimationFrame(simulate)
+    return () => window.cancelAnimationFrame(frame)
+  }, [draggingId, model, noteItems])
+
+  const pointFromEvent = (event: { clientX: number; clientY: number }) => {
+    const rect = svgRef.current?.getBoundingClientRect()
+    if (!rect) return { x: 0, y: 0, rawX: 0, rawY: 0 }
+    const rawX = (event.clientX - rect.left) / rect.width * ELASTIC_GRAPH_WIDTH
+    const rawY = (event.clientY - rect.top) / rect.height * ELASTIC_GRAPH_HEIGHT
+    return { x: (rawX - viewport.x) / viewport.scale, y: (rawY - viewport.y) / viewport.scale, rawX, rawY }
+  }
+
+  const handlePointerDown = (event: ReactPointerEvent<SVGElement>, noteId?: string) => {
+    suppressClickRef.current = false
+    const point = pointFromEvent(event)
+    const node = noteId ? positionsRef.current[noteId] : null
+    interactionRef.current = {
+      kind: noteId ? 'node' : 'pan', noteId,
+      startX: event.clientX, startY: event.clientY,
+      originX: noteId && node ? node.x : viewport.x, originY: noteId && node ? node.y : viewport.y,
+      lastX: point.x, lastY: point.y, lastAt: performance.now(),
+    }
+    setDraggingId(noteId ?? null)
+  }
+
+  const handlePointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+    const interaction = interactionRef.current
+    if (!interaction) return
+    const rect = svgRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const point = pointFromEvent(event)
+    const deltaX = event.clientX - interaction.startX
+    const deltaY = event.clientY - interaction.startY
+    if (Math.abs(deltaX) + Math.abs(deltaY) > 3) suppressClickRef.current = true
+    if (interaction.kind === 'node' && interaction.noteId) {
+      const node = positionsRef.current[interaction.noteId]
+      if (!node) return
+      const now = performance.now()
+      const elapsed = Math.max(16, now - interaction.lastAt)
+      node.x = interaction.originX + deltaX / rect.width * ELASTIC_GRAPH_WIDTH / viewport.scale
+      node.y = interaction.originY + deltaY / rect.height * ELASTIC_GRAPH_HEIGHT / viewport.scale
+      node.vx = Math.max(-480, Math.min(480, (point.x - interaction.lastX) / elapsed * 1000))
+      node.vy = Math.max(-480, Math.min(480, (point.y - interaction.lastY) / elapsed * 1000))
+      interaction.lastX = point.x
+      interaction.lastY = point.y
+      interaction.lastAt = now
+      setPositions({ ...positionsRef.current })
+    } else {
+      setViewport((current) => ({ ...current, x: interaction.originX + deltaX / rect.width * ELASTIC_GRAPH_WIDTH, y: interaction.originY + deltaY / rect.height * ELASTIC_GRAPH_HEIGHT }))
+    }
+  }
+
+  const handlePointerUp = () => {
+    const interaction = interactionRef.current
+    if (interaction?.kind === 'node' && interaction.noteId && !suppressClickRef.current) onSelect(interaction.noteId)
+    interactionRef.current = null
+    setDraggingId(null)
+    window.setTimeout(() => { suppressClickRef.current = false }, 0)
+  }
+
+  const handleWheel = (event: ReactWheelEvent<SVGSVGElement>) => {
+    event.preventDefault()
+    const point = pointFromEvent(event)
+    const nextScale = Math.max(0.55, Math.min(2.1, viewport.scale - event.deltaY * 0.001))
+    setViewport({ x: point.rawX - point.x * nextScale, y: point.rawY - point.y * nextScale, scale: nextScale })
+  }
+
+  const resetViewport = () => setViewport({ x: 0, y: 0, scale: 1 })
+  const resetLayout = () => {
+    const next = Object.fromEntries(noteItems.map((note, index) => {
+      const angle = index / Math.max(noteItems.length, 1) * Math.PI * 2 - 0.5
+      const radius = 155 + index % 3 * 26
+      return [note.id, { x: ELASTIC_GRAPH_WIDTH / 2 + Math.cos(angle) * radius, y: ELASTIC_GRAPH_HEIGHT / 2 + Math.sin(angle) * radius * 0.72, vx: (Math.random() - 0.5) * 120, vy: (Math.random() - 0.5) * 120 }]
+    })) as Record<string, ElasticGraphPoint>
+    positionsRef.current = next
+    setPositions(next)
+    resetViewport()
+  }
+  const zoom = (amount: number) => setViewport((current) => ({ ...current, scale: Math.max(0.55, Math.min(2.1, current.scale + amount)) }))
+
+  return (
+    <div className="note-graph elastic-note-graph">
+      <div className="graph-tools" aria-label="图谱工具">
+        <button type="button" onClick={() => zoom(-0.1)} title="缩小">−</button>
+        <button type="button" onClick={resetViewport} title="重置视图">{Math.round(viewport.scale * 100)}%</button>
+        <button type="button" onClick={() => zoom(0.1)} title="放大">+</button>
+        <button type="button" onClick={resetLayout} title="重新布局">重排</button>
+      </div>
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${ELASTIC_GRAPH_WIDTH} ${ELASTIC_GRAPH_HEIGHT}`}
+        role="img"
+        aria-label="笔记关系图谱，可拖动节点和画布"
+        onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); handlePointerDown(event) }}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onWheel={handleWheel}
+      >
+        <g transform={`translate(${viewport.x} ${viewport.y}) scale(${viewport.scale})`}>
+          <g className="graph-links">
+            {model.relations.map((relation) => {
+              const from = positions[relation.from]
+              const to = positions[relation.to]
+              if (!from || !to) return null
+              const active = focusedId === relation.from || focusedId === relation.to
+              const stretched = draggingId === relation.from || draggingId === relation.to
+              return <line key={relation.from + relation.to} className={`${active ? 'active' : ''} ${stretched ? 'stretched' : ''}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} />
+            })}
+          </g>
+          <g className="graph-nodes">
+            {noteItems.map((note) => {
+              const position = positions[note.id]
+              if (!position) return null
+              const radius = model.radii[note.id]
+              const focused = focusedId === note.id
+              return (
+                <g
+                  key={note.id}
+                  data-note-id={note.id}
+                  className={`graph-node ${focused ? 'focused' : ''}`}
+                  onPointerDown={(event) => { event.stopPropagation(); svgRef.current?.setPointerCapture(event.pointerId); handlePointerDown(event, note.id) }}
+                  onPointerEnter={() => setHoveredId(note.id)}
+                  onPointerLeave={() => setHoveredId(null)}
+                  onClick={(event) => event.preventDefault()}
+                  onKeyDown={(event) => event.key === 'Enter' && onSelect(note.id)}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${note.title}，${graphWordCount(note)} 字，${model.degree[note.id]} 条关系`}
+                  aria-current={activeId === note.id ? 'true' : undefined}
+                >
+                  <title>{`${graphWordCount(note)} 字 · ${model.degree[note.id]} 条关系`}</title>
+                  <circle className="graph-node-halo" cx={position.x} cy={position.y} r={radius + 14} />
+                  <circle className="graph-node-core" cx={position.x} cy={position.y} r={radius} fill={note.color} />
+                  <line className="graph-focus-mark" x1={position.x - 8} x2={position.x + 8} y1={position.y - radius - 13} y2={position.y - radius - 13} />
+                  <text className="graph-node-title" x={position.x} y={position.y + radius + 18} textAnchor="middle">{note.title.slice(0, 10)}</text>
+                  <text className="graph-node-meta" x={position.x} y={position.y + radius + 32} textAnchor="middle">{note.category}</text>
+                </g>
+              )
+            })}
+          </g>
+        </g>
+      </svg>
+      <div className="graph-legend">
+        <span><i style={{ backgroundColor: '#7c647d' }} />学习笔记</span>
+        <span><i style={{ backgroundColor: '#d39a24' }} />计划方法</span>
+        <span><i style={{ backgroundColor: '#b85f42' }} />产品与收藏</span>
+        <span><i style={{ backgroundColor: '#72806a' }} />复盘记录</span>
+      </div>
+    </div>
+  )
+}
+
 export function NotesPage({
   noteItems,
   onChange,
@@ -193,7 +510,10 @@ export function NotesPage({
   const [selectedIds, setSelectedIds] = useState<string[]>([])
 
   useEffect(() => {
-    if (selectedNoteId) setActiveId(selectedNoteId)
+    if (selectedNoteId) {
+      setActiveId(selectedNoteId)
+      setMode('列表')
+    }
   }, [selectedNoteId])
 
   useEffect(() => {
@@ -276,7 +596,7 @@ export function NotesPage({
           <button
             type="button"
             className={activeCategory === category ? 'active' : ''}
-            onClick={() => { setActiveCategory(category); setSelectedIds([]) }}
+            onClick={() => { setActiveCategory(category); setSelectedIds([]); setMode('列表') }}
             key={category}
           >
             <FolderOpen size={16} />
@@ -310,7 +630,7 @@ export function NotesPage({
               <div><span className="eyebrow">知识关系</span><h3>笔记关系图谱</h3></div>
               <span className="section-note">拖动节点整理图谱，点击节点打开笔记</span>
             </div>
-            <NoteGraph noteItems={noteItems} activeId={activeId} onSelect={(id) => { setActiveId(id); setMode('列表') }} />
+            <ElasticNoteGraph noteItems={noteItems} activeId={activeId} onSelect={(id) => { setActiveId(id); setMode('列表') }} />
           </div>
         ) : (
           <div className="notes-layout">
