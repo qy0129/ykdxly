@@ -311,6 +311,19 @@ function reminderFromMinutes(value: ApiTodo['reminderMinutes']): TodoItem['remin
   return '无提醒'
 }
 
+const NOTE_GRAPH_COLORS = ['#7c647d', '#d39a24', '#b85f42', '#72806a']
+
+function noteGraphColor(category?: string | null, sourceType?: string) {
+  const key = `${category ?? ''}:${sourceType ?? ''}`.trim()
+  if (!key) return NOTE_GRAPH_COLORS[0]
+  if (key.includes('学习') || key.includes('阅读')) return NOTE_GRAPH_COLORS[0]
+  if (key.includes('计划') || key.includes('方法')) return NOTE_GRAPH_COLORS[1]
+  if (key.includes('产品') || key.includes('收藏')) return NOTE_GRAPH_COLORS[2]
+  if (key.includes('复盘') || key.includes('总结')) return NOTE_GRAPH_COLORS[3]
+  const score = Array.from(key).reduce((total, character) => total + (character.codePointAt(0) ?? 0), 0)
+  return NOTE_GRAPH_COLORS[score % NOTE_GRAPH_COLORS.length]
+}
+
 function todoDueAt(item: TodoItem) {
   const time = item.time === '未安排' ? '' : item.time
   return item.date && time ? `${item.date}T${time}:00` : null
@@ -373,7 +386,7 @@ export const plannerApi = {
       const when = splitDateTime(item.dueAt)
       return { id: item.id, title: item.title, date: when.date, time: when.time, priority: priorityFromApi(item.priority), done: item.status === 'done', reminder: reminderFromMinutes(item.reminderMinutes), version: item.version }
     })
-    const notes: Note[] = rawNotes.map((item, index) => ({ id: item.id, title: item.title, category: item.category || '未分类', excerpt: item.excerpt || item.content, content: item.content || item.excerpt, updatedAt: '刚刚', color: '#d39a24', relatedIds: relations[index].map((relation) => relation.id), source: item.sourceType === 'manual' ? '个人创建' : item.sourceType }))
+    const notes: Note[] = rawNotes.map((item, index) => ({ id: item.id, title: item.title, category: item.category || '未分类', excerpt: item.excerpt || item.content, content: item.content || item.excerpt, updatedAt: '刚刚', color: noteGraphColor(item.category, item.sourceType), relatedIds: relations[index].map((relation) => relation.id), source: item.sourceType === 'manual' ? '个人创建' : item.sourceType }))
     return { plans, schedules, todos, notes, trash, stats }
   },
 
