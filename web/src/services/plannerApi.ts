@@ -1,6 +1,6 @@
 import type { CalendarItem, Note, Plan, PlanItem, PlanTask, ScheduleMaterialsResponse, TaskRecurrenceType, TodoItem } from '../types/planner'
 
-const DEV_PORTS = new Set(['4173', '5173'])
+const DEV_PORTS = new Set(['4173', '5173', '5187'])
 const API_BASE = import.meta.env.VITE_API_BASE_URL
   ?? (DEV_PORTS.has(window.location.port) ? '/api' : `${window.location.origin}/api`)
 

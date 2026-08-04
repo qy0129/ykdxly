@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>关系图动效预览</title>
+  <style>
+    :root { --paper: #f4eee4; --ink: #2f2923; --muted: #897d70; --panel: #20211f; --panel-2: #262724; --line: #777063; --gold: #d8a63d; --gold-bright: #f2c969; --plum: #9584a2; --brick: #c77b5d; --sage: #9aab8b; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-width: 320px; min-height: 100%; background: var(--paper); color: var(--ink); font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif; }
+    body { padding: 42px clamp(18px, 5vw, 76px) 58px; }
+    .page { max-width: 1500px; margin: auto; }
+    .topline { display: flex; justify-content: space-between; align-items: end; gap: 24px; margin-bottom: 22px; }
+    .eyebrow { display: block; color: #9d7a2b; font-size: 12px; font-weight: 750; letter-spacing: .14em; text-transform: uppercase; margin-bottom: 8px; }
+    h1 { margin: 0; font-size: clamp(24px, 3vw, 38px); letter-spacing: 0; line-height: 1.1; }
+    .intro { max-width: 360px; margin: 0 0 4px; color: var(--muted); font-size: 14px; line-height: 1.6; text-align: right; }
+    .graph-shell { overflow: hidden; border: 1px solid #494a45; background: var(--panel); box-shadow: 0 24px 70px rgba(52, 40, 23, .15); }
+    .graph-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 20px; border-bottom: 1px solid rgba(255,255,255,.08); background: rgba(0,0,0,.12); }
+    .graph-label { display: flex; align-items: center; gap: 10px; color: #eee7dc; font-size: 14px; font-weight: 650; }
+    .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--gold-bright); box-shadow: 0 0 0 5px rgba(242,201,105,.1), 0 0 20px var(--gold); }
+    .tools { display: flex; align-items: center; gap: 6px; }
+    .tools button { min-width: 38px; height: 34px; padding: 0 10px; border: 1px solid rgba(255,255,255,.14); background: transparent; color: #e5ddd2; cursor: pointer; font: inherit; transition: .2s ease; }
+    .tools button:hover, .tools button.active { border-color: var(--gold); color: var(--gold-bright); background: rgba(216,166,61,.09); }
+    .canvas-wrap { position: relative; height: min(68vw, 680px); min-height: 480px; overflow: hidden; touch-action: none; background-color: var(--panel); background-image: linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px); background-size: 44px 44px; }
+    svg { display: block; width: 100%; height: 100%; user-select: none; }
+    .link { stroke: var(--line); stroke-width: 1.5; opacity: .62; }
+    .link.active { stroke: var(--gold); stroke-width: 2.4; opacity: .95; filter: url(#soft-glow); }
+    .link.stretched { stroke: var(--gold-bright); opacity: 1; filter: url(#soft-glow); }
+    .link.dimmed, .link-flow.dimmed { opacity: .16 !important; }
+    .link-flow { stroke: var(--gold-bright); stroke-width: 2; stroke-dasharray: 2 16; stroke-linecap: round; opacity: .72; animation: flow 1.8s linear infinite; }
+    @keyframes flow { to { stroke-dashoffset: -36; } }
+    .node { cursor: grab; }
+    .node:active { cursor: grabbing; }
+    .node-core { stroke: rgba(255,255,255,.08); stroke-width: 7; transition: transform .18s ease, stroke .18s ease, filter .18s ease; transform-box: fill-box; transform-origin: center; }
+    .node-halo { fill: none; stroke: currentColor; stroke-width: 1; opacity: .08; animation: breathe 3.4s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+    .node:hover .node-core, .node.selected .node-core { stroke: rgba(255,255,255,.72); stroke-width: 2; filter: brightness(1.08); transform: scale(1.06); }
+    .node:hover .node-halo, .node.selected .node-halo { opacity: 0; animation: none; }
+    .node-focus-mark { stroke: var(--gold-bright); stroke-width: 3; stroke-linecap: round; opacity: 0; transition: opacity .16s ease, transform .16s ease; pointer-events: none; }
+    .node:hover .node-focus-mark, .node.selected .node-focus-mark { opacity: 1; transform: translateY(-2px); }
+    .node:hover .node-title, .node.selected .node-title { fill: var(--gold-bright); }
+    .node.dimmed { opacity: 1; }
+    @keyframes breathe { 0%, 100% { transform: scale(.92); opacity: .05; } 50% { transform: scale(1.13); opacity: .22; } }
+    .node text { fill: #eee6d9; font-size: 14px; font-weight: 650; text-anchor: middle; pointer-events: none; transition: opacity .2s ease; }
+    .node .meta { fill: #988f84; font-size: 11px; font-weight: 500; }
+    .legend { position: absolute; left: 22px; bottom: 20px; display: flex; flex-wrap: wrap; gap: 14px; color: #9f978c; font-size: 12px; }
+    .legend span { display: flex; align-items: center; gap: 6px; }
+    .legend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .hint { position: absolute; right: 22px; bottom: 20px; color: #8e887f; font-size: 12px; }
+    .detail { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 18px; padding: 16px 20px; background: var(--panel-2); color: #ddd4c8; }
+    .detail strong { display: block; margin-bottom: 4px; font-size: 15px; }
+    .detail p { margin: 0; color: #989087; font-size: 12px; }
+    .detail-badge { border: 1px solid rgba(216,166,61,.45); padding: 7px 10px; color: var(--gold-bright); font-size: 11px; white-space: nowrap; }
+    @media (max-width: 700px) { body { padding: 24px 12px 30px; } .topline { display: block; } .intro { margin-top: 12px; text-align: left; } .canvas-wrap { min-height: 440px; height: 125vw; } .hint { display: none; } .graph-head { padding: 13px 14px; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; transition-duration: .001ms !important; } }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="topline">
+      <div><span class="eyebrow">Interaction study / 01</span><h1>让知识开始流动</h1></div>
+      <p class="intro">拖动一个节点，观察整组关系如何被牵引、回弹，并重新找到平衡。</p>
+    </div>
+    <section class="graph-shell">
+      <div class="graph-head"><div class="graph-label"><span class="live-dot"></span>笔记关系图谱 <small style="color:#888078;font-weight:500">· 12 个节点 · 12 条关系</small></div><div class="tools"><button id="minus" aria-label="缩小">−</button><button id="scale" aria-label="重置视图">100%</button><button id="plus" aria-label="放大">+</button><button id="orbit" aria-label="重新布局" title="重新布局">重排</button></div></div>
+      <div class="canvas-wrap" id="canvas"><svg id="graph" viewBox="0 0 1000 620" role="img" aria-label="可拖动的笔记关系图谱"><defs><filter id="soft-glow"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter><radialGradient id="gold"><stop offset="0" stop-color="#f4cc70"/><stop offset="1" stop-color="#c38b25"/></radialGradient></defs><g id="viewport"><g id="links"></g><g id="nodes"></g></g></svg><div class="legend"><span><i style="background:#9584a2"></i>学习笔记</span><span><i style="background:#d8a63d"></i>计划方法</span><span><i style="background:#c77b5d"></i>产品与收藏</span><span><i style="background:#9aab8b"></i>复盘记录</span><span><i style="background:#858279"></i>独立节点</span></div><div class="hint">拖动节点 · 拖动画布 · 滚轮缩放 · 悬停聚焦</div></div>
+      <div class="detail"><div><strong id="detail-title">未命名笔记</strong><p id="detail-copy">正在观察它与 3 条知识关系的连接状态</p></div><span class="detail-badge" id="detail-badge">计划方法</span></div>
+    </section>
+  </main>
+  <script>
+    const svg = document.getElementById('graph'), viewport = document.getElementById('viewport'), links = document.getElementById('links'), nodes = document.getElementById('nodes');
+    const data = [
+      { id:'n1', x:360, y:160, color:'#d8a63d', title:'费曼学习法', meta:'计划方法', words:2600, importance:5 }, { id:'n2', x:530, y:255, color:'#9584a2', title:'间隔重复', meta:'学习笔记', words:1800, importance:4 },
+      { id:'n3', x:310, y:385, color:'#9aab8b', title:'周复盘记录', meta:'复盘记录', words:1100, importance:4 }, { id:'n4', x:710, y:150, color:'#c77b5d', title:'阅读清单', meta:'产品与收藏', words:420, importance:2 },
+      { id:'n5', x:705, y:405, color:'#d8a63d', title:'知识卡片', meta:'计划方法', words:3200, importance:5 }, { id:'n6', x:150, y:285, color:'#9584a2', title:'深度工作', meta:'学习笔记', words:900, importance:4 },
+      { id:'n7', x:865, y:300, color:'#9aab8b', title:'月度总结', meta:'复盘记录', words:1500, importance:5 }, { id:'n8', x:490, y:495, color:'#c77b5d', title:'灵感收藏', meta:'产品与收藏', words:260, importance:2 },
+      { id:'n9', x:110, y:110, color:'#858279', title:'独立想法 A', meta:'独立节点', words:60, importance:1 }, { id:'n10', x:900, y:110, color:'#858279', title:'独立想法 B', meta:'独立节点', words:180, importance:2 },
+      { id:'n11', x:115, y:520, color:'#858279', title:'独立想法 C', meta:'独立节点', words:700, importance:1 }, { id:'n12', x:900, y:520, color:'#858279', title:'独立想法 D', meta:'独立节点', words:2400, importance:4 }
+    ];
+    const edges = [['n1','n2'],['n1','n3'],['n1','n6'],['n2','n4'],['n2','n5'],['n3','n5'],['n3','n8'],['n4','n7'],['n5','n7'],['n5','n8'],['n6','n3'],['n7','n8']];
+    const state = Object.fromEntries(data.map(n => [n.id, {...n, vx:(Math.random()-.5)*8, vy:(Math.random()-.5)*8}]));
+    const degree = Object.fromEntries(data.map(n => [n.id, edges.filter(edge => edge.includes(n.id)).length]));
+    const neighbors = Object.fromEntries(data.map(n => [n.id, edges.filter(edge => edge.includes(n.id)).map(edge => edge[0]===n.id?edge[1]:edge[0])]));
+    const MIN_NODE_RADIUS = 14, MAX_NODE_RADIUS = 32, MAX_WORDS = 3000;
+    const radiusById = Object.fromEntries(data.map(n => { const wordScore=Math.sqrt(Math.min(Math.max(n.words,0),MAX_WORDS)/MAX_WORDS); const importanceScore=(Math.min(Math.max(n.importance,1),5)-1)/4; const score=wordScore*.65+importanceScore*.35; return [n.id,MIN_NODE_RADIUS+score*(MAX_NODE_RADIUS-MIN_NODE_RADIUS)]; }));
+    let selected = 'n1', hovered = null, dragging = null, panning = null, scale = 1, panX = 0, panY = 0, last = performance.now();
+    function render(){
+      const focus=hovered||(dragging?dragging.id:null), related=new Set(focus?[focus,...neighbors[focus]]:[]);
+      edges.forEach(([a,b], index) => { const p=state[a], q=state[b], active=!!focus&&(a===focus||b===focus), stretched=!!dragging&&(a===dragging.id||b===dragging.id), dimmed=!!focus&&!active&&!stretched, tension=Math.max(0,Math.min(1,(Math.hypot(q.x-p.x,q.y-p.y)-190)/220)); const pair=links.children[index*2], flow=links.children[index*2+1]; pair.setAttribute('x1',p.x); pair.setAttribute('y1',p.y); pair.setAttribute('x2',q.x); pair.setAttribute('y2',q.y); pair.classList.toggle('active',active); pair.classList.toggle('stretched',stretched); pair.classList.toggle('dimmed',dimmed); pair.style.strokeWidth=stretched?`${2.2+tension*2.6}px`:''; flow.setAttribute('x1',p.x); flow.setAttribute('y1',p.y); flow.setAttribute('x2',q.x); flow.setAttribute('y2',q.y); flow.classList.toggle('dimmed',dimmed); flow.setAttribute('opacity',stretched?.95:(active?.9:.18)); });
+      data.forEach((n, index) => { const el=nodes.children[index], p=state[n.id], radius=radiusById[n.id]; el.setAttribute('transform',`translate(${p.x} ${p.y})`); el.classList.toggle('selected',n.id===focus); el.classList.toggle('dimmed',!!focus&&!related.has(n.id)); el.querySelector('.node-core').setAttribute('r',radius); el.querySelector('.node-halo').setAttribute('r',radius+14); const marker=el.querySelector('.node-focus-mark'); marker.setAttribute('y1',-(radius+13)); marker.setAttribute('y2',-(radius+13)); const showLabel=scale>.84||n.id===focus||degree[n.id]>=4; el.querySelectorAll('text').forEach(text=>text.style.opacity=showLabel?'1':'0'); });
+      document.getElementById('scale').textContent = `${Math.round(scale*100)}%`; viewport.setAttribute('transform', `translate(${panX} ${panY}) scale(${scale})`);
+    }
+    function buildGraph(){
+      links.innerHTML=edges.map(() => '<line class="link"/><line class="link-flow"/>').join('');
+      nodes.innerHTML=data.map(n => `<g class="node" data-id="${n.id}" transform="translate(${n.x} ${n.y})"><circle class="node-halo" r="38" color="${n.color}"/><circle class="node-core" r="24" fill="${n.color}"/><line class="node-focus-mark" x1="-8" x2="8" y1="-38" y2="-38"/><text class="node-title" y="48">${n.title}</text><text class="meta" y="65">${n.meta}</text></g>`).join('');
+      nodes.querySelectorAll('.node').forEach(el => { el.addEventListener('pointerdown', startDrag); el.addEventListener('pointerenter',()=>{hovered=el.dataset.id;render()}); el.addEventListener('pointerleave',()=>{hovered=null;render()}); el.addEventListener('click', () => select(el.dataset.id)); });
+    }
+    function select(id){ selected=id; const n=state[id]; document.getElementById('detail-title').textContent=n.title; document.getElementById('detail-badge').textContent=n.meta; document.getElementById('detail-copy').textContent=`${n.words.toLocaleString()} 字 · 重要度 ${n.importance}/5 · ${edges.filter(e=>e.includes(id)).length} 条知识关系`; render(); }
+    function point(e){ const r=svg.getBoundingClientRect(); const rawX=(e.clientX-r.left)/r.width*1000, rawY=(e.clientY-r.top)/r.height*620; return {x:(rawX-panX)/scale,y:(rawY-panY)/scale,rawX,rawY}; }
+    function startDrag(e){ e.stopPropagation(); const p=point(e), id=e.currentTarget.dataset.id; dragging={id,ox:p.x-state[id].x,oy:p.y-state[id].y,lastX:p.x,lastY:p.y,lastAt:performance.now()}; svg.setPointerCapture(e.pointerId); select(id); }
+    svg.addEventListener('pointerdown', e => { if(e.target.closest('.node')) return; const p=point(e); panning={startX:p.rawX,startY:p.rawY,originX:panX,originY:panY}; svg.setPointerCapture(e.pointerId); render(); });
+    svg.addEventListener('pointermove', e => { const p=point(e); if(dragging){ const n=state[dragging.id], now=performance.now(), elapsed=Math.max(16,now-dragging.lastAt); n.x=p.x-dragging.ox; n.y=p.y-dragging.oy; n.vx=Math.max(-480,Math.min(480,(p.x-dragging.lastX)/elapsed*1000)); n.vy=Math.max(-480,Math.min(480,(p.y-dragging.lastY)/elapsed*1000)); dragging.lastX=p.x; dragging.lastY=p.y; dragging.lastAt=now; render(); } else if(panning){ panX=panning.originX+p.rawX-panning.startX; panY=panning.originY+p.rawY-panning.startY; render(); } });
+    svg.addEventListener('pointerup', e => { dragging=null; panning=null; if(svg.hasPointerCapture(e.pointerId))svg.releasePointerCapture(e.pointerId); const hit=document.elementFromPoint(e.clientX,e.clientY)?.closest?.('.node'); hovered=hit?.dataset.id??null; render(); });
+    svg.addEventListener('wheel', e => { e.preventDefault(); const p=point(e), next=Math.max(.72,Math.min(1.5,scale-e.deltaY*.0008)); panX=p.rawX-p.x*next; panY=p.rawY-p.y*next; scale=next; render(); }, {passive:false});
+    function resetLayout(){ const center={x:500,y:310}; data.forEach((n,i)=>{const angle=i/data.length*Math.PI*2-.5; const radius=210+(i%3)*38; const p=state[n.id]; p.x=center.x+Math.cos(angle)*radius; p.y=center.y+Math.sin(angle)*radius*.72; p.vx=(Math.random()-.5)*180; p.vy=(Math.random()-.5)*180;}); panX=0;panY=0;scale=1;hovered=null;render(); }
+    function tick(now){ const dt=Math.min((now-last)/1000,.035); last=now; const force=Object.fromEntries(data.map(n=>[n.id,{x:0,y:0}])); data.forEach((a,i)=>{data.slice(i+1).forEach(b=>{const pa=state[a.id],pb=state[b.id],dx=pb.x-pa.x,dy=pb.y-pa.y,d2=Math.max(dx*dx+dy*dy,900),d=Math.sqrt(d2),push=750000/d2,nx=dx/d,ny=dy/d; force[a.id].x-=nx*push;force[a.id].y-=ny*push;force[b.id].x+=nx*push;force[b.id].y+=ny*push; const min=radiusById[a.id]+radiusById[b.id]+28;if(d<min){const bump=(min-d)*40;force[a.id].x-=nx*bump;force[a.id].y-=ny*bump;force[b.id].x+=nx*bump;force[b.id].y+=ny*bump;}});}); if(dragging){const source=state[dragging.id];data.forEach(n=>{if(n.id===dragging.id||neighbors[dragging.id].includes(n.id))return;const target=state[n.id],dx=target.x-source.x,dy=target.y-source.y,d=Math.max(1,Math.hypot(dx,dy)),range=radiusById[dragging.id]+radiusById[n.id]+54;if(d<range){const push=(range-d)*20;force[n.id].x+=dx/d*push;force[n.id].y+=dy/d*push;}});} edges.forEach(([a,b])=>{const pa=state[a],pb=state[b],dx=pb.x-pa.x,dy=pb.y-pa.y,d=Math.max(1,Math.hypot(dx,dy)),dragged=!!dragging&&(a===dragging.id||b===dragging.id),stretch=(d-190)*(dragged?7.8:3.1),nx=dx/d,ny=dy/d;force[a].x+=nx*stretch;force[a].y+=ny*stretch;force[b].x-=nx*stretch;force[b].y-=ny*stretch;if(dragged){const moving=a===dragging.id?a:b,other=moving===a?b:a;force[other].x+=(state[moving].x-state[other].x)*.04;force[other].y+=(state[moving].y-state[other].y)*.04;}}); data.forEach(n=>{const p=state[n.id];if(dragging?.id===n.id)return;force[n.id].x+=(500-p.x)*.12;force[n.id].y+=(310-p.y)*.12;p.vx=(p.vx+force[n.id].x*dt)*Math.pow(.91,dt*60);p.vy=(p.vy+force[n.id].y*dt)*Math.pow(.91,dt*60);p.vx=Math.max(-520,Math.min(520,p.vx));p.vy=Math.max(-520,Math.min(520,p.vy));p.x+=p.vx*dt;p.y+=p.vy*dt;const pad=48;if(p.x<pad||p.x>1000-pad){p.x=Math.max(pad,Math.min(1000-pad,p.x));p.vx*=-.4}if(p.y<pad||p.y>620-pad){p.y=Math.max(pad,Math.min(620-pad,p.y));p.vy*=-.4}});render();requestAnimationFrame(tick); }
+    document.getElementById('minus').onclick=()=>{scale=Math.max(.72,scale-.1);render()}; document.getElementById('plus').onclick=()=>{scale=Math.min(1.5,scale+.1);render()}; document.getElementById('scale').onclick=()=>{scale=1;panX=0;panY=0;render()}; document.getElementById('orbit').onclick=()=>resetLayout();
+    buildGraph(); resetLayout(); select('n1'); requestAnimationFrame(tick);
+  </script>
+</body>
+</html>
