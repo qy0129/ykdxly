@@ -2,6 +2,7 @@ package com.changlu.planner.integrations.wechat;
 
 import com.changlu.planner.shared.config.EnvironmentConfig;
 import com.changlu.planner.shared.database.Database;
+import com.changlu.planner.features.reminder.ReminderService;
 import com.github.wechat.ilink.sdk.ILinkClient;
 import com.github.wechat.ilink.sdk.core.config.ILinkConfig;
 import com.github.wechat.ilink.sdk.core.context.ResumeContext;
@@ -25,13 +26,21 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** 长路计划的微信入口：扫码、免扫码恢复、收发文本和计划提醒。 */
 public final class WechatBotAgent implements AutoCloseable {
+  private static final Logger LOG = LoggerFactory.getLogger(WechatBotAgent.class);
   private static final long LOGIN_STATUS_INTERVAL_MS = 2000L;
   private final AtomicBoolean running = new AtomicBoolean(true);
+  private final Database database;
   private final ResumeContextStore resumeStore;
+  private final ReminderService reminders;
   private final QrLoginPage qrPage = new QrLoginPage();
   private final PlannerWechatClient planner = new PlannerWechatClient();
   private final ExecutorService briefingExecutor = Executors.newSingleThreadExecutor(runnable -> {
@@ -40,18 +49,26 @@ public final class WechatBotAgent implements AutoCloseable {
     return thread;
   });
   private final AtomicBoolean briefingInProgress = new AtomicBoolean();
+  private final ScheduledExecutorService reminderExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+    Thread thread = new Thread(runnable, "wechat-reminder-dispatcher");
+    thread.setDaemon(true);
+    return thread;
+  });
   private volatile ILinkClient client;
+  private volatile ScheduledFuture<?> reminderTask;
   private volatile String webUrl;
   private volatile String pendingGreetingUserId = "";
   private Thread worker;
 
   public WechatBotAgent(Database database) {
+    this.database = database;
     this.resumeStore = new ResumeContextStore(database);
+    this.reminders = new ReminderService(database);
   }
 
   public void start() {
     webUrl = configuredWebUrl();
-    System.out.println("[微信 Bot] 网页地址: " + webUrl);
+    LOG.info("[微信Bot] 启动，网页地址={}", webUrl);
     worker = new Thread(this::runLoop, "wechat-bot-agent");
     worker.setDaemon(true);
     worker.start();
@@ -65,20 +82,23 @@ public final class WechatBotAgent implements AutoCloseable {
         client = current;
         boolean loggedIn = saved != null && current.isLoggedIn();
         if (loggedIn) {
-          try { current.getUpdates(); resumeStore.save(current.exportResumeContext()); System.out.println("[微信登录] 已恢复上次会话，无需重新扫码"); }
-          catch (Exception error) { System.err.println("[微信登录] 会话已失效，重新扫码: " + rootMessage(error)); resumeStore.clear(); closeClient(current); loggedIn = false; }
+          try { current.getUpdates(); resumeStore.save(current.exportResumeContext()); LOG.info("[微信登录] 已恢复上次会话，无需重新扫码"); }
+          catch (Exception error) { LOG.warn("[微信登录] 会话已失效，重新扫码，原因={}", rootMessage(error)); resumeStore.clear(); closeClient(current); loggedIn = false; }
         }
         if (!loggedIn) {
-          System.out.println("[微信登录] 正在获取二维码...");
+          LOG.info("[微信登录] 正在获取二维码");
           Path page = qrPage.render(current.executeLogin());
-          System.out.println("[微信登录] 请打开二维码页面扫码: " + page.toUri());
+          LOG.info("[微信登录] 请打开二维码页面扫码，地址={}", page.toUri());
           qrPage.open(page);
           loggedIn = waitForLogin(current);
         }
-        if (loggedIn) { onReady(current); waitUntilStopped(); }
+        if (loggedIn) {
+          onReady(current);
+          pollMessagesUntilStopped(current);
+        }
         closeClient(current);
       } catch (InterruptedException error) { Thread.currentThread().interrupt(); return; }
-      catch (Exception error) { System.err.println("[微信 Bot] 连接失败，稍后重试: " + rootMessage(error)); sleep(3000); }
+      catch (Exception error) { LOG.error("[微信Bot] 连接失败，稍后重试，原因={}", rootMessage(error), error); sleep(3000); }
     }
   }
 
@@ -89,7 +109,7 @@ public final class WechatBotAgent implements AutoCloseable {
           @Override public void onLoginSuccess(com.github.wechat.ilink.sdk.core.login.LoginContext context) {
             if (client != null) resumeStore.save(client.exportResumeContext());
           }
-          @Override public void onLoginFailure(Throwable error) { System.err.println("[微信登录] 失败: " + rootMessage(error)); }
+          @Override public void onLoginFailure(Throwable error) { LOG.error("[微信登录] 失败，原因={}", rootMessage(error), error); }
         })
         .onMessage((OnMessageListener) messages -> {
           if (client != null) resumeStore.save(client.exportResumeContext());
@@ -104,7 +124,7 @@ public final class WechatBotAgent implements AutoCloseable {
     CompletableFuture<?> future = current.getLoginFuture();
     while (running.get() && !current.isLoggedIn()) {
       LoginStatus status = current.getLoginStatus();
-      if (status.getStatus() != last) { System.out.println("[微信登录] 状态: " + status.getStatus()); last = status.getStatus(); }
+      if (status.getStatus() != last) { LOG.info("[微信登录] 状态={}", status.getStatus()); last = status.getStatus(); }
       if (status.getStatus() == LoginStatus.Status.ERROR || status.getStatus() == LoginStatus.Status.EXPIRED) return false;
       if (future != null && future.isDone()) { try { future.join(); } catch (CompletionException | CancellationException error) { return false; } return current.isLoggedIn(); }
       Thread.sleep(LOGIN_STATUS_INTERVAL_MS);
@@ -116,10 +136,11 @@ public final class WechatBotAgent implements AutoCloseable {
     String userId = current.getLoginContext() == null ? "" : current.getLoginContext().getUserId();
     if (userId.isBlank()) return;
     pendingGreetingUserId = userId;
+    scheduleReminderDispatch(current, userId);
     if (hasSendContext(current, userId)) {
       schedulePendingGreeting(current, userId);
     } else {
-      System.out.println("[微信 Bot] 登录成功，等待用户第一条消息刷新会话 Token 后发送简报");
+      LOG.info("[微信Bot] 登录成功，等待用户第一条消息刷新会话令牌后发送简报，用户={}", userId);
     }
   }
 
@@ -129,23 +150,30 @@ public final class WechatBotAgent implements AutoCloseable {
     String text = textOf(message);
     if (userId == null || userId.isBlank() || text.isBlank()) return;
     schedulePendingGreeting(current, userId);
+    long startedAt = System.nanoTime();
+    LOG.info("[微信用户输入] 用户={} 内容={}", userId, logText(text));
     try {
       String reply;
-      if (isNoteCapture(text)) reply = planner.capture(userId, text);
-      else if (isReadOnlyCommand(text)) reply = planner.command(userId, text);
-      else if (text.contains("计划网页") || text.contains("工作台") || text.equals("打开计划")) reply = webLinkMessage();
-      else reply = planner.aiChat(userId, text);
+      String route;
+      if (isNoteCapture(text)) { route = "笔记记录"; reply = planner.capture(userId, text); }
+      else if (isReadOnlyCommand(text)) { route = "只读查询"; reply = planner.command(userId, text); }
+      else if (text.contains("计划网页") || text.contains("工作台") || text.equals("打开计划")) { route = "网页链接"; reply = webLinkMessage(); }
+      else { route = "AI对话"; reply = planner.aiChat(userId, text); }
       current.sendText(userId, reply);
+      long durationMs = (System.nanoTime() - startedAt) / 1_000_000;
+      LOG.info("[微信输出反馈] 用户={} 处理方式={} 耗时={}毫秒 内容={}",
+          userId, route, durationMs, logText(reply));
     } catch (Exception error) {
       String detail = rootMessage(error);
-      System.err.println("[微信 Bot] 消息处理失败: " + detail);
+      LOG.error("[微信消息处理失败] 用户={} 内容={} 原因={}", userId, logText(text), detail, error);
       try {
         String fallback = detail.toLowerCase().contains("timed out")
             ? "AI 响应超时了，请稍后再试一次。"
             : "这条消息暂时处理失败，请稍后再试。";
         current.sendText(userId, fallback);
+        LOG.warn("[微信错误反馈] 用户={} 内容={}", userId, fallback);
       } catch (Exception sendError) {
-        System.err.println("[微信 Bot] 错误提示发送失败: " + rootMessage(sendError));
+        LOG.error("[微信错误反馈发送失败] 用户={} 原因={}", userId, rootMessage(sendError), sendError);
       }
     }
   }
@@ -157,14 +185,14 @@ public final class WechatBotAgent implements AutoCloseable {
     String message = (briefing.isBlank() ? "今日简报暂时没有生成。" : briefing) + "\n\n" + markdownWebLink();
     current.sendText(userId, message);
     pendingGreetingUserId = "";
-    System.out.println("[微信 Bot] 已向微信发送登录简报和计划网页链接");
+    LOG.info("[微信简报反馈] 用户={} 内容={}", userId, logText(message));
   }
 
   private void schedulePendingGreeting(ILinkClient current, String userId) {
     if (!userId.equals(pendingGreetingUserId) || !briefingInProgress.compareAndSet(false, true)) return;
     briefingExecutor.execute(() -> {
       try { sendPendingGreeting(current, userId); }
-      catch (Exception error) { System.err.println("[微信 Bot] 登录简报发送失败，等待下一条消息重试: " + rootMessage(error)); }
+      catch (Exception error) { LOG.error("[微信简报发送失败] 用户={} 原因={}", userId, rootMessage(error), error); }
       finally { briefingInProgress.set(false); }
     });
   }
@@ -221,10 +249,44 @@ public final class WechatBotAgent implements AutoCloseable {
     } catch (Exception ignored) { }
     return "127.0.0.1";
   }
-  private void waitUntilStopped() throws InterruptedException { while (running.get()) Thread.sleep(1000); }
+  /**
+   * SDK 不会自动拉取微信消息，必须持续调用 getUpdates()。
+   * 收到消息后 SDK 会更新会话令牌，提醒调度器才能向该用户发送主动消息。
+   */
+  private void pollMessagesUntilStopped(ILinkClient current) throws InterruptedException {
+    while (running.get() && client == current && current.isLoggedIn()) {
+      try {
+        current.getUpdates();
+      } catch (Exception error) {
+        if (!running.get()) return;
+        LOG.warn("[微信消息轮询失败] 原因={}", rootMessage(error));
+        Thread.sleep(3000L);
+      }
+    }
+  }
   private void sleep(long millis) { try { Thread.sleep(millis); } catch (InterruptedException error) { Thread.currentThread().interrupt(); } }
   private void closeClient(ILinkClient target) { try { target.cancelLogin(); target.close(); } catch (Exception ignored) { } }
+  private String logText(String value) {
+    String normalized = value == null ? "" : value.replace("\r", "\\r").replace("\n", "\\n");
+    return normalized.length() <= 8000 ? normalized : normalized.substring(0, 8000) + "... [已截断，原长度=" + normalized.length() + "]";
+  }
+
+  private void scheduleReminderDispatch(ILinkClient current, String userId) {
+    ScheduledFuture<?> previous = reminderTask;
+    if (previous != null) previous.cancel(false);
+    reminderTask = reminderExecutor.scheduleWithFixedDelay(() -> {
+      // 微信 SDK 登录成功不等于已经拿到可发送消息的会话令牌；令牌未刷新时先等待用户消息。
+      if (!running.get() || client != current || !current.isLoggedIn() || !hasSendContext(current, userId)) return;
+      try {
+        Database.Context context = database.contextForExternalUser(userId);
+        reminders.retryMissingContext(context);
+        reminders.dispatchWechat(context, message -> current.sendText(userId, message + "\n\n" + markdownWebLink()));
+      } catch (Exception error) {
+        LOG.warn("[微信提醒失败] 用户={} 原因={}", userId, rootMessage(error));
+      }
+    }, 0, 30, TimeUnit.SECONDS);
+  }
   private String rootMessage(Throwable error) { Throwable current = error; while (current.getCause() != null && current.getCause() != current) current = current.getCause(); return current.getMessage() == null ? current.getClass().getSimpleName() : current.getMessage(); }
 
-  @Override public void close() { running.set(false); briefingExecutor.shutdownNow(); if (worker != null) worker.interrupt(); if (client != null) { try { resumeStore.save(client.exportResumeContext()); } catch (Exception ignored) { } closeClient(client); } }
+  @Override public void close() { running.set(false); briefingExecutor.shutdownNow(); reminderExecutor.shutdownNow(); if (reminderTask != null) reminderTask.cancel(false); if (worker != null) worker.interrupt(); if (client != null) { try { resumeStore.save(client.exportResumeContext()); } catch (Exception ignored) { } closeClient(client); } }
 }

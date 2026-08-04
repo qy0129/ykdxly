@@ -1,7 +1,7 @@
-import { BarChart3, BrainCircuit, CalendarDays, CheckSquare2, ListChecks, NotebookPen } from 'lucide-react'
+import { BarChart3, BrainCircuit, CalendarDays, CheckSquare2, ListChecks, MessageSquareText, NotebookPen } from 'lucide-react'
 
 /** 顶层页面状态集中定义，避免布局组件和 App 各自维护一套字符串。 */
-export type View = 'calendar' | 'plans' | 'todos' | 'notes' | 'stats' | 'review' | 'schedule'
+export type View = 'calendar' | 'plans' | 'todos' | 'notes' | 'stats' | 'agent' | 'review' | 'schedule'
 export type NavView = Exclude<View, 'schedule'>
 export type GlobalTargetType = 'plan' | 'todo' | 'note' | 'schedule'
 
@@ -23,5 +23,6 @@ export const navItems: Array<{ id: NavView; label: string; icon: typeof Calendar
   { id: 'todos', label: '待办', icon: CheckSquare2 },
   { id: 'notes', label: '笔记', icon: NotebookPen },
   { id: 'stats', label: '计划统计', icon: BarChart3 },
+  { id: 'agent', label: 'AI 对话', icon: MessageSquareText },
   { id: 'review', label: 'AI 复盘', icon: BrainCircuit },
 ]

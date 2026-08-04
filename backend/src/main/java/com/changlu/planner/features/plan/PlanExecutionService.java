@@ -311,6 +311,9 @@ public final class PlanExecutionService {
       if (p.executeUpdate() == 0) throw new IllegalStateException("schedule_version_conflict");
     }
     JsonObject after = schedule(c, context.workspaceId(), scheduleId, false);
+    if (status != null && after.has("taskId") && !after.get("taskId").isJsonNull()) {
+      syncLinkedTask(c, context.workspaceId(), UUID.fromString(after.get("taskId").getAsString()), "done".equals(status));
+    }
     String action = string(fields, "actionType", status == null ? "update_schedule" : status + "_schedule");
     record(c, context, draftId, changeSetId, "schedule", scheduleId, action, before, after,
         string(fields, "reason", action), source, optionalInt(fields, "actualMinutes"), after.get("version").getAsInt());
@@ -325,6 +328,22 @@ public final class PlanExecutionService {
         c.commit(); return result;
       } catch (Exception error) { c.rollback(); throw error; }
       finally { c.setAutoCommit(true); }
+    }
+  }
+
+  private void syncLinkedTask(Connection c, UUID workspaceId, UUID taskId, boolean done) throws SQLException {
+    String status = done ? "done" : "pending";
+    try (PreparedStatement p = c.prepareStatement(
+        "UPDATE plan_tasks t JOIN plans p ON p.id=t.plan_id SET t.status=?, "
+            + "t.completed_at=CASE WHEN ?='done' THEN COALESCE(t.completed_at,NOW()) ELSE NULL END, "
+            + "t.version=t.version+1 WHERE t.id=? AND p.workspace_id=? AND t.deleted_at IS NULL")) {
+      p.setString(1, status); p.setString(2, status); p.setBytes(3, Database.uuidBytes(taskId)); p.setBytes(4, Database.uuidBytes(workspaceId));
+      if (p.executeUpdate() > 0) {
+        try (PreparedStatement plan = c.prepareStatement("SELECT plan_id FROM plan_tasks WHERE id=?")) {
+          plan.setBytes(1, Database.uuidBytes(taskId));
+          try (ResultSet rs = plan.executeQuery()) { if (rs.next()) recomputeProgress(c, Database.bytesUuid(rs.getBytes(1))); }
+        }
+      }
     }
   }
 

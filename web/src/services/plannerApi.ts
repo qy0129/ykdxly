@@ -1,4 +1,4 @@
-import type { CalendarItem, Note, Plan, PlanItem, PlanTask, TodoItem } from '../types/planner'
+import type { CalendarItem, Note, Plan, PlanItem, PlanTask, ScheduleMaterialsResponse, TodoItem } from '../types/planner'
 
 const DEV_PORTS = new Set(['4173', '5173'])
 const API_BASE = import.meta.env.VITE_API_BASE_URL
@@ -67,6 +67,14 @@ interface ApiTodo {
   version: number
 }
 
+export interface TodoReminder {
+  id: string
+  todoId: string
+  title: string
+  dueAt: string
+  reminderMinutes: number
+}
+
 interface ApiNote {
   id: string
   title: string
@@ -128,8 +136,19 @@ export interface AiCommandResponse {
   draft?: AiDraft
 }
 
+export interface AgentRunResponse extends AiCommandResponse {
+  runId: string
+  status: 'RUNNING' | 'WAITING_USER' | 'WAITING_CONFIRMATION' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+  iteration: number
+  executorType: 'tool' | 'subagent'
+  executorName: string
+  report?: ReviewReport
+}
+
 export interface AiSession {
   conversationId?: string
+  runId?: string
+  runStatus?: AgentRunResponse['status']
   messages: Array<{ role: 'user' | 'assistant'; content: string; createdAt: string }>
   draft?: AiDraft
 }
@@ -152,6 +171,16 @@ export interface ReviewFacts {
   blocked: number
   estimationError7d: number
   logs: Array<{ entityType: string; action: string; note: string; actualMinutes?: number; occurredAt: string }>
+}
+
+export interface ReviewReport {
+  date: string
+  facts: ReviewFacts
+  summary: string
+  highlights: string[]
+  risks: string[]
+  nextActions: string[]
+  generatedAt: string
 }
 
 export interface UserProfile {
@@ -192,6 +221,24 @@ function priorityFromApi(value: ApiTodo['priority']): TodoItem['priority'] {
 
 function priorityToApi(value: TodoItem['priority']) {
   return value === '高' ? 'high' : value === '低' ? 'low' : 'medium'
+}
+
+/** 将界面上的提醒选项转换为数据库使用的分钟数。null 表示不提醒。 */
+function reminderToMinutes(value: TodoItem['reminder']) {
+  if (value === '到点提醒') return 0
+  if (value === '提前 30 分钟') return 30
+  if (value === '提前 2 小时') return 120
+  if (value === '提前 1 天') return 1440
+  return null
+}
+
+/** 将数据库分钟数还原为界面文案，避免到点提醒显示成“提前 0 分钟”。 */
+function reminderFromMinutes(value: ApiTodo['reminderMinutes']): TodoItem['reminder'] {
+  if (value === 0) return '到点提醒'
+  if (value === 30) return '提前 30 分钟'
+  if (value === 120) return '提前 2 小时'
+  if (value === 1440) return '提前 1 天'
+  return '无提醒'
 }
 
 function todoDueAt(item: TodoItem) {
@@ -241,11 +288,13 @@ export const plannerApi = {
     })
     const todos: TodoItem[] = rawTodos.map((item) => {
       const when = splitDateTime(item.dueAt)
-      return { id: item.id, title: item.title, date: when.date, time: when.time, priority: priorityFromApi(item.priority), done: item.status === 'done', reminder: item.reminderMinutes == null ? '无提醒' : `提前 ${item.reminderMinutes} 分钟`, version: item.version }
+      return { id: item.id, title: item.title, date: when.date, time: when.time, priority: priorityFromApi(item.priority), done: item.status === 'done', reminder: reminderFromMinutes(item.reminderMinutes), version: item.version }
     })
-    const notes: Note[] = rawNotes.map((item, index) => ({ id: item.id, title: item.title, category: item.category || '未分类', excerpt: item.excerpt, updatedAt: '刚刚', color: '#d39a24', relatedIds: relations[index].map((relation) => relation.id), source: item.sourceType === 'manual' ? '个人创建' : item.sourceType }))
+    const notes: Note[] = rawNotes.map((item, index) => ({ id: item.id, title: item.title, category: item.category || '未分类', excerpt: item.excerpt || item.content, content: item.content || item.excerpt, updatedAt: '刚刚', color: '#d39a24', relatedIds: relations[index].map((relation) => relation.id), source: item.sourceType === 'manual' ? '个人创建' : item.sourceType }))
     return { plans, schedules, todos, notes, stats }
   },
+
+  loadDueReminders: () => request<TodoReminder[]>('/reminders/due'),
 
   createPlan: (item: Plan) => request<ApiPlan>('/plans', { method: 'POST', body: JSON.stringify({ title: item.title, description: item.subtitle, color: item.color, status: item.status, dueDate: item.dueDate || null }) }),
   updatePlan: (item: Plan) => request<ApiPlan>(`/plans/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, description: item.subtitle, color: item.color, status: item.status, dueDate: item.dueDate || null, expectedVersion: item.version }) }),
@@ -254,9 +303,10 @@ export const plannerApi = {
   createSchedule: (item: CalendarItem) => request<ApiSchedule>('/schedules', { method: 'POST', body: JSON.stringify({ title: item.title, startAt: `${item.date}T${item.time}:00`, durationMinutes: item.duration, status: item.status, planId: item.planId ?? null, stageId: item.stageId ?? null, taskId: item.taskId ?? null }) }),
   updateSchedule: (item: CalendarItem) => request<ApiSchedule>(`/schedules/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, startAt: `${item.date}T${item.time}:00`, durationMinutes: item.duration, status: item.status, planId: item.planId ?? null, stageId: item.stageId ?? null, taskId: item.taskId ?? null, expectedVersion: item.version }) }),
   deleteSchedule: (id: string) => request<void>(`/schedules/${id}`, { method: 'DELETE' }),
+  loadScheduleMaterials: (id: string, refresh = false) => request<ScheduleMaterialsResponse>(`/schedules/${id}/materials${refresh ? '?refresh=true' : ''}`),
 
-  createTodo: (item: TodoItem) => request<ApiTodo>('/todos', { method: 'POST', body: JSON.stringify({ title: item.title, dueAt: todoDueAt(item), status: item.done ? 'done' : 'pending', priority: priorityToApi(item.priority) }) }),
-  updateTodo: (item: TodoItem) => request<ApiTodo>(`/todos/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, dueAt: todoDueAt(item), status: item.done ? 'done' : 'pending', priority: priorityToApi(item.priority), expectedVersion: item.version }) }),
+  createTodo: (item: TodoItem) => request<ApiTodo>('/todos', { method: 'POST', body: JSON.stringify({ title: item.title, dueAt: todoDueAt(item), status: item.done ? 'done' : 'pending', priority: priorityToApi(item.priority), reminderMinutes: reminderToMinutes(item.reminder) }) }),
+  updateTodo: (item: TodoItem) => request<ApiTodo>(`/todos/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, dueAt: todoDueAt(item), status: item.done ? 'done' : 'pending', priority: priorityToApi(item.priority), reminderMinutes: reminderToMinutes(item.reminder), expectedVersion: item.version }) }),
   deleteTodo: (id: string) => request<void>(`/todos/${id}`, { method: 'DELETE' }),
 
   createPlanStage: (planId: string, item: PlanItem) => request<ApiStage>(`/plans/${planId}/stages`, { method: 'POST', body: JSON.stringify({ title: item.title, dueLabel: item.dueLabel }) }),
@@ -268,8 +318,8 @@ export const plannerApi = {
   taskAction: (item: PlanTask, action: 'complete' | 'delay' | 'block' | 'skip' | 'cancel' | 'reopen', fields: Record<string, unknown> = {}) => request<ApiTask>(`/tasks/${item.id}/${action}`, { method: 'POST', body: JSON.stringify({ ...fields, expectedVersion: item.version }) }),
   deleteTask: (item: PlanTask) => request<void>(`/tasks/${item.id}`, { method: 'DELETE', body: JSON.stringify({ expectedVersion: item.version }) }),
 
-  createNote: (item: Note) => request<ApiNote>('/notes', { method: 'POST', body: JSON.stringify({ title: item.title, category: item.category, excerpt: item.excerpt, content: item.excerpt, sourceType: 'manual' }) }),
-  updateNote: (item: Note) => request<ApiNote>(`/notes/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, category: item.category, excerpt: item.excerpt, content: item.excerpt }) }),
+  createNote: (item: Note) => request<ApiNote>('/notes', { method: 'POST', body: JSON.stringify({ title: item.title, category: item.category, excerpt: item.excerpt, content: item.content ?? item.excerpt, sourceType: 'manual' }) }),
+  updateNote: (item: Note) => request<ApiNote>(`/notes/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, category: item.category, excerpt: item.excerpt, content: item.content ?? item.excerpt }) }),
   deleteNote: (id: string) => request<void>(`/notes/${id}`, { method: 'DELETE' }),
   createNoteRelation: (fromNoteId: string, toNoteId: string) => request<void>(`/notes/${fromNoteId}/relations`, { method: 'POST', body: JSON.stringify({ toNoteId }) }),
   deleteNoteRelation: (fromNoteId: string, toNoteId: string) => request<void>(`/notes/${fromNoteId}/relations`, { method: 'DELETE', body: JSON.stringify({ toNoteId }) }),
@@ -289,6 +339,17 @@ export const plannerApi = {
     method: 'POST',
     body: JSON.stringify({ message, conversationId }),
   }),
+  startAgent: (message: string, conversationId?: string) => request<AgentRunResponse>('/agent/runs', {
+    method: 'POST',
+    body: JSON.stringify({ message, conversationId }),
+  }),
+  resumeAgent: (runId: string, message: string) => request<AgentRunResponse>(`/agent/runs/${runId}/resume`, {
+    method: 'POST',
+    body: JSON.stringify({ message }),
+  }),
+  loadAgentRun: (runId: string) => request<AgentRunResponse>(`/agent/runs/${runId}`),
+  confirmAgentDraft: (id: string) => request<{ id: string; changeSetId: string; status: string; runId?: string; runStatus?: string; executed: AiDraftAction[] }>(`/agent/drafts/${id}/confirm`, { method: 'POST' }),
+  cancelAgentDraft: (id: string) => request<{ id: string; status: string; runId?: string; runStatus?: string }>(`/agent/drafts/${id}/cancel`, { method: 'POST' }),
   confirmAiDraft: (id: string) => request<{ id: string; changeSetId: string; status: string; executed: AiDraftAction[] }>(`/ai/drafts/${id}/confirm`, { method: 'POST' }),
   cancelAiDraft: (id: string) => request<{ id: string; status: string }>(`/ai/drafts/${id}/cancel`, { method: 'POST' }),
   loadAiSession: () => request<AiSession>('/ai/session'),
@@ -298,6 +359,8 @@ export const plannerApi = {
   loadProfile: () => request<UserProfile>('/profile'),
   saveProfile: (value: UserProfile) => request<UserProfile>('/profile', { method: 'PUT', body: JSON.stringify(value) }),
   reviewFacts: () => request<ReviewFacts>('/review/facts'),
+  loadTodayReview: () => request<ReviewReport>('/review/today'),
+  regenerateTodayReview: () => request<ReviewReport>('/review/today/regenerate', { method: 'POST' }),
   chatReview: (message: string, history: AiReviewMessage[], conversationId?: string) => request<AiReviewResponse>('/ai/review/chat', {
     method: 'POST',
     body: JSON.stringify({ message, history, conversationId }),

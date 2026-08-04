@@ -79,6 +79,7 @@ export interface Note {
   title: string
   category: string
   excerpt: string
+  content?: string
   updatedAt: string
   color: string
   relatedIds: string[]
@@ -87,10 +88,20 @@ export interface Note {
 
 export interface SourceMaterial {
   id: string
-  source: '小红书' | '哔哩哔哩' | '网页'
+  kind?: 'platform' | 'web'
+  source: string
   title: string
   summary: string
   meta: string
   url: string
   color: string
+}
+
+export interface ScheduleMaterialsResponse {
+  query: string
+  materials: SourceMaterial[]
+  keyPoints: string[]
+  studyNote: string
+  sections: Array<{ title: string; content: string }>
+  aiGenerated: boolean
 }

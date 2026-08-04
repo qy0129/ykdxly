@@ -1,7 +1,8 @@
 package com.changlu.planner.features.command;
 
+import com.changlu.planner.agent.core.ModelClient;
+import com.changlu.planner.agent.tools.PlanningTools;
 import com.changlu.planner.features.plan.PlanExecutionService;
-import com.changlu.planner.shared.config.EnvironmentConfig;
 import com.changlu.planner.shared.database.Database;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -9,54 +10,47 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
-import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * AI 指令边界。模型只负责把自然语言转换成结构化意图，所有归属、版本、
  * 排期和状态校验都由后端完成，写操作只能在用户确认草案后执行。
  */
 public final class AiCommandService {
-  private static final List<String> ACTION_TYPES = List.of(
-      "create_plan", "update_plan", "delete_plan", "restore_plan",
-      "create_stage", "update_stage", "delete_stage", "restore_stage",
-      "create_task", "update_task", "complete_task", "delay_task", "block_task",
-      "skip_task", "cancel_task", "delete_task", "restore_task",
-      "create_todo", "update_todo", "complete_todo", "delay_todo", "delete_todo", "restore_todo",
-      "create_schedule", "update_schedule", "complete_schedule", "delay_schedule", "delete_schedule", "restore_schedule",
-      "batch_reschedule", "update_preference");
-
+  private static final Logger LOG = LoggerFactory.getLogger(AiCommandService.class);
   private final Database database;
   private final PlanExecutionService plans;
+  private final ModelClient modelClient;
   private final Gson gson = new Gson();
-  private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(15)).build();
-  private final String apiKey = EnvironmentConfig.value("PLANNER_AI_API_KEY", "api.key", "");
-  private final String apiUrl = EnvironmentConfig.value("PLANNER_AI_API_URL", "api.url", "https://api.siliconflow.cn/v1/chat/completions");
-  private final String model = EnvironmentConfig.value("PLANNER_AI_MODEL", "ai.model", "Qwen/Qwen3.5-9B");
 
   public AiCommandService(Database database) {
+    this(database, new ModelClient());
+  }
+
+  public AiCommandService(Database database, ModelClient modelClient) {
     this.database = database;
     this.plans = new PlanExecutionService(database);
+    this.modelClient = modelClient;
   }
 
   public JsonObject command(JsonObject input, Database.Context context, String channel) throws Exception {
-    if (apiKey.isBlank()) throw new IllegalStateException("PLANNER_AI_API_KEY 未配置");
+    if (!modelClient.configured()) throw new IllegalStateException("PLANNER_AI_API_KEY 未配置");
     String text = required(input, "message");
     UUID conversationId = conversation(input, context, channel);
+    LOG.info("[AI输入] 渠道={} 会话={} 用户={} 工作区={} 内容={}",
+        channel, conversationId, context.userId(), context.workspaceId(), text);
     JsonObject modelResult = ask(text, loadContext(context), conversationId);
     JsonArray actions = array(modelResult, "actions");
 
@@ -71,24 +65,34 @@ public final class AiCommandService {
     validateAndEnrich(actions, context);
 
     String reply = string(modelResult, "reply", "我已经分析了你的请求。");
+    JsonArray questions = array(modelResult, "questions");
     JsonObject result = new JsonObject();
     result.addProperty("conversationId", conversationId.toString());
     result.addProperty("reply", reply);
-    result.add("questions", array(modelResult, "questions"));
+    result.add("questions", questions);
     result.add("actions", actions);
+    LOG.info("[AI输出] 渠道={} 会话={} 回复={} 追问={} 动作数量={} 动作={}",
+        channel, conversationId, reply, questions, actions.size(), actions);
     saveMessage(conversationId, "user", text, null);
     saveMessage(conversationId, "assistant", reply, actions);
-    if (actions.isEmpty()) return result;
+    if (actions.isEmpty()) {
+      LOG.info("[AI反馈] 会话={} 结果=仅回复，无待确认操作", conversationId);
+      return result;
+    }
 
     UUID draftId = UUID.randomUUID();
     UUID changeSetId = UUID.randomUUID();
     saveDraft(draftId, changeSetId, context, conversationId, channel, text, reply, actions);
     result.add("draft", draft(draftId, context));
+    LOG.info("[AI草案] 会话={} 草案={} 变更集={} 动作数量={} 状态=待确认",
+        conversationId, draftId, changeSetId, actions.size());
     return result;
   }
 
   public JsonObject confirm(String draftReference, Database.Context context) throws Exception {
     UUID draftId = draftId(draftReference, context);
+    LOG.info("[AI草案确认] 草案编号={} 草案={} 用户={} 工作区={}",
+        draftReference, draftId, context.userId(), context.workspaceId());
     try (Connection c = database.connection()) {
       c.setAutoCommit(false);
       try {
@@ -116,14 +120,23 @@ public final class AiCommandService {
         c.commit();
         JsonObject result = new JsonObject(); result.addProperty("id", draftId.toString());
         result.addProperty("changeSetId", draft.changeSetId().toString()); result.addProperty("status", "confirmed");
-        result.add("executed", executed); return result;
-      } catch (Exception error) { c.rollback(); throw error; }
+        result.add("executed", executed);
+        LOG.info("[AI执行反馈] 草案={} 变更集={} 执行数量={} 执行结果={}",
+            draftId, draft.changeSetId(), executed.size(), executed);
+        return result;
+      } catch (Exception error) {
+        c.rollback();
+        LOG.warn("[AI草案确认失败] 草案={} 原因={}", draftId, error.getMessage(), error);
+        throw error;
+      }
       finally { c.setAutoCommit(true); }
     }
   }
 
   public JsonObject cancel(String draftReference, Database.Context context) throws Exception {
     UUID id = draftId(draftReference, context);
+    LOG.info("[AI草案取消] 草案编号={} 草案={} 用户={} 工作区={}",
+        draftReference, id, context.userId(), context.workspaceId());
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
         "UPDATE ai_action_drafts SET status = 'cancelled', cancelled_at = NOW() "
             + "WHERE id = ? AND workspace_id = ? AND user_id = ? AND status = 'pending'")) {
@@ -131,11 +144,24 @@ public final class AiCommandService {
       p.setBytes(3, Database.uuidBytes(context.userId()));
       if (p.executeUpdate() == 0) throw new IllegalStateException("草案不存在或已经处理");
     }
-    JsonObject result = new JsonObject(); result.addProperty("id", id.toString()); result.addProperty("status", "cancelled"); return result;
+    JsonObject result = new JsonObject(); result.addProperty("id", id.toString()); result.addProperty("status", "cancelled");
+    LOG.info("[AI草案反馈] 草案={} 状态=已取消", id);
+    return result;
   }
 
   public JsonObject draft(String reference, Database.Context context) throws Exception {
     return draft(draftId(reference, context), context);
+  }
+
+  /** Agent Runtime 在不同执行器之间复用同一个会话。 */
+  public UUID ensureConversation(JsonObject input, Database.Context context, String channel) throws SQLException {
+    return conversation(input, context, channel);
+  }
+
+  /** 非规划 Subagent 的消息也写入统一的 AI 会话历史。 */
+  public void saveExchange(UUID conversationId, String userMessage, String assistantMessage) throws SQLException {
+    saveMessage(conversationId, "user", userMessage, null);
+    saveMessage(conversationId, "assistant", assistantMessage, null);
   }
 
   /** 恢复网页或微信最近会话及仍待处理的草案。 */
@@ -157,6 +183,8 @@ public final class AiCommandService {
   /** 仅当变更集中的实体都没有再次修改时，才允许整组撤销。 */
   public JsonObject undo(String changeSetReference, Database.Context context) throws SQLException {
     UUID changeSetId = UUID.fromString(changeSetReference);
+    LOG.info("[AI变更撤销] 变更集={} 用户={} 工作区={}",
+        changeSetId, context.userId(), context.workspaceId());
     try (Connection c = database.connection()) {
       c.setAutoCommit(false);
       try {
@@ -179,8 +207,14 @@ public final class AiCommandService {
           p.setBytes(1, Database.uuidBytes(changeSetId)); p.setBytes(2, Database.uuidBytes(context.workspaceId())); p.setBytes(3, Database.uuidBytes(context.userId())); p.executeUpdate();
         }
         c.commit(); JsonObject result = new JsonObject(); result.addProperty("changeSetId", changeSetId.toString());
-        result.addProperty("status", "undone"); result.addProperty("restored", records.size()); return result;
-      } catch (Exception error) { c.rollback(); throw error; }
+        result.addProperty("status", "undone"); result.addProperty("restored", records.size());
+        LOG.info("[AI撤销反馈] 变更集={} 恢复数量={} 状态=已撤销", changeSetId, records.size());
+        return result;
+      } catch (Exception error) {
+        c.rollback();
+        LOG.warn("[AI变更撤销失败] 变更集={} 原因={}", changeSetId, error.getMessage(), error);
+        throw error;
+      }
       finally { c.setAutoCommit(true); }
     }
   }
@@ -211,18 +245,8 @@ public final class AiCommandService {
   private JsonObject ask(String userText, String context, UUID conversationId) throws Exception {
     JsonArray messages = new JsonArray(); messages.add(message("system", systemPrompt(context)));
     messages.addAll(historyForModel(conversationId)); messages.add(message("user", userText));
-    JsonObject body = new JsonObject(); body.addProperty("model", model); body.addProperty("temperature", 0.1);
-    body.addProperty("max_tokens", 5000); body.add("messages", messages);
-    HttpRequest request = HttpRequest.newBuilder(URI.create(apiUrl)).timeout(Duration.ofSeconds(60))
-        .header("Authorization", "Bearer " + apiKey).header("Content-Type", "application/json")
-        .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(body))).build();
-    HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
-    if (response.statusCode() / 100 != 2) throw new IllegalStateException("AI 服务返回 " + response.statusCode());
-    String content = JsonParser.parseString(response.body()).getAsJsonObject().getAsJsonArray("choices").get(0)
-        .getAsJsonObject().getAsJsonObject("message").get("content").getAsString().trim()
-        .replaceFirst("^```(?:json)?\\s*", "").replaceFirst("\\s*```$", "");
-    try { return JsonParser.parseString(content).getAsJsonObject(); }
-    catch (Exception error) { throw new IllegalStateException("AI 未返回有效的结构化草案"); }
+    LOG.info("[AI规划调用] 会话={} 消息数量={} 上下文长度={}", conversationId, messages.size(), context.length());
+    return modelClient.completeJson("planning-agent", messages, 0.1, 5000);
   }
 
   private String systemPrompt(String context) {
@@ -281,7 +305,7 @@ public final class AiCommandService {
       for (JsonElement item : actions) {
         if (!item.isJsonObject()) throw new IllegalArgumentException("AI 操作格式无效");
         JsonObject action = item.getAsJsonObject(); String type = required(action, "type");
-        if (!ACTION_TYPES.contains(type)) throw new IllegalArgumentException("AI 返回了不支持的操作：" + type);
+        if (!PlanningTools.ACTION_TYPES.contains(type)) throw new IllegalArgumentException("AI 返回了不支持的操作：" + type);
         requireOnly(action, List.of("type", "summary", "targetId", "fields", "expectedVersion"));
         JsonObject fields = fields(action);
         if (type.startsWith("create_") && !"create_schedule".equals(type) && string(fields, "title", "").isBlank()) throw new IllegalArgumentException("创建操作缺少标题");

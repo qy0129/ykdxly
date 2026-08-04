@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { format, parseISO } from 'date-fns'
-import { Bell, CalendarDays, Check, CheckCircle2, Circle, PenLine, Plus, SquareCheckBig, X } from 'lucide-react'
+import { Bell, CalendarDays, Check, CheckCircle2, Circle, PenLine, Plus, SquareCheckBig, Trash2, X } from 'lucide-react'
 import type { TodoItem } from '../../types/planner'
+import { TodoDialog } from '../../components/dialogs/PlannerDialogs'
 
 /** 待办页面维护局部编辑状态，数据增删改仍由 App 统一协调。 */
 export function TodosPage({
@@ -9,32 +10,35 @@ export function TodosPage({
   onCreate,
   onUpdate,
   onDelete,
+  onDeleteMany,
   onToggle,
 }: {
   todoItems: TodoItem[]
   onCreate: (item: TodoItem) => void
   onUpdate: (item: TodoItem) => void
   onDelete: (id: string) => void
+  onDeleteMany: (ids: string[]) => Promise<boolean>
   onToggle: (id: string) => void
 }) {
   const today = format(new Date(), 'yyyy-MM-dd')
   const [filter, setFilter] = useState<'全部' | '今天' | '已完成'>('全部')
-  const [newTitle, setNewTitle] = useState('')
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState<TodoItem | null>(null)
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [todoDialogOpen, setTodoDialogOpen] = useState(false)
+
+  useEffect(() => {
+    const ids = new Set(todoItems.map((item) => item.id))
+    setSelectedIds((current) => current.filter((id) => ids.has(id)))
+  }, [todoItems])
 
   const visibleItems = todoItems.filter((item) => {
-    if (filter === '今天') return item.date === today && !item.done
+    if (filter === '今天') return item.date === today
     if (filter === '已完成') return item.done
     return true
   })
-
-  const addTodo = () => {
-    const title = newTitle.trim()
-    if (!title) return
-    onCreate({ id: 'td-' + Date.now(), title, date: '', time: '', priority: '中', done: false, reminder: '无提醒' })
-    setNewTitle('')
-  }
+  const visibleIds = visibleItems.map((item) => item.id)
+  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id))
 
   const displayDate = (date: string) => date === today ? '今天' : format(parseISO(date), 'M 月 d 日')
 
@@ -46,35 +50,42 @@ export function TodosPage({
     setDraft(null)
   }
 
+  const toggleSelection = (id: string) => {
+    setSelectedIds((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id])
+  }
+
+  const deleteSelected = async () => {
+    if (selectedIds.length > 0 && await onDeleteMany(selectedIds)) setSelectedIds([])
+  }
+
   return (
     <div className="todos-page content-page">
       <section className="todo-quick-add">
         <SquareCheckBig size={20} />
-        <input
-          value={newTitle}
-          onChange={(event) => setNewTitle(event.target.value)}
-          onKeyDown={(event) => event.key === 'Enter' && addTodo()}
-          placeholder="添加一件只需要完成一次的事"
-          aria-label="新待办标题"
-        />
-        <button className="primary-button" type="button" onClick={addTodo}><Plus size={16} /> 添加待办</button>
+        <div className="todo-quick-copy"><strong>添加一次性待办</strong><span>设置日期、时间、优先级和提醒</span></div>
+        <button className="primary-button" type="button" onClick={() => setTodoDialogOpen(true)}><Plus size={16} /> 添加待办</button>
       </section>
 
       <div className="todo-toolbar">
         <div className="segmented-control">
           {(['全部', '今天', '已完成'] as const).map((item) => (
-            <button type="button" className={filter === item ? 'active' : ''} onClick={() => setFilter(item)} key={item}>{item}</button>
+            <button type="button" className={filter === item ? 'active' : ''} onClick={() => { setFilter(item); setSelectedIds([]) }} key={item}>{item}</button>
           ))}
         </div>
-        <span>待完成 {todoItems.filter((item) => !item.done).length} 项</span>
+        <div className="batch-actions">
+          {visibleItems.length > 0 && <label className="batch-select"><input className="batch-checkbox" type="checkbox" checked={allVisibleSelected} onChange={() => setSelectedIds(allVisibleSelected ? selectedIds.filter((id) => !visibleIds.includes(id)) : Array.from(new Set([...selectedIds, ...visibleIds])))} />全选当前</label>}
+          {selectedIds.length > 0 && <button className="secondary-button danger-text" type="button" onClick={() => void deleteSelected()}><Trash2 size={15} /> 删除已选（{selectedIds.length}）</button>}
+          <span className="batch-summary">待完成 {todoItems.filter((item) => !item.done).length} 项</span>
+        </div>
       </div>
 
       <section className="todo-list">
         <div className="todo-list-head">
-          <span>待办事项</span><span>日期与时间</span><span>提醒</span><span>优先级</span><span />
+          <span><input className="batch-checkbox" type="checkbox" checked={allVisibleSelected} onChange={() => setSelectedIds(allVisibleSelected ? selectedIds.filter((id) => !visibleIds.includes(id)) : Array.from(new Set([...selectedIds, ...visibleIds])))} aria-label="全选当前待办" /></span><span>状态</span><span>待办事项</span><span>日期与时间</span><span>提醒</span><span>优先级</span><span />
         </div>
         {visibleItems.map((item) => (
-            <article className={'todo-row ' + (item.done ? 'done' : '')} key={item.id}>
+            <article className={'todo-row ' + (item.done ? 'done ' : '') + (editingId === item.id ? 'editing' : '')} key={item.id}>
+              <input className="batch-checkbox" type="checkbox" checked={selectedIds.includes(item.id)} onChange={() => toggleSelection(item.id)} aria-label={`选择待办：${item.title}`} />
               <button
                 type="button"
                 className="todo-check"
@@ -94,9 +105,9 @@ export function TodosPage({
               ) : (
                 <>
                   <strong>{item.title}</strong>
-                  <span><CalendarDays size={14} /> {item.date ? `${displayDate(item.date)} · ${item.time}` : '未安排'}</span>
-                  <span><Bell size={14} /> {item.reminder}</span>
-                  <b className={'priority priority-' + item.priority}>{item.priority}</b>
+                  <span className="todo-date"><CalendarDays size={14} /> {item.date ? `${displayDate(item.date)} · ${item.time}` : '未安排'}</span>
+                  <span className="todo-reminder"><Bell size={14} /> {item.reminder}</span>
+                  <b className={'todo-priority priority priority-' + item.priority}>{item.priority}</b>
                 </>
               )}
               {editingId === item.id ? (
@@ -107,7 +118,7 @@ export function TodosPage({
             </article>
         ))}
       </section>
+      {todoDialogOpen && <TodoDialog onClose={() => setTodoDialogOpen(false)} onSubmit={(item) => { onCreate(item); setTodoDialogOpen(false) }} />}
     </div>
   )
 }
-

@@ -1,7 +1,114 @@
 import { useState } from 'react'
 import { format } from 'date-fns'
-import { CheckSquare2, Plus, Save, X } from 'lucide-react'
-import type { CalendarItem, Plan, TodoItem } from '../../types/planner'
+import { CheckSquare2, Plus, Save, Trash2, X } from 'lucide-react'
+import type { CalendarItem, Plan, PlanItem, PlanTask, TodoItem } from '../../types/planner'
+
+export type StageDraftFields = { title: string; dueLabel: string }
+export type TaskDraftFields = { title: string; estimatedMinutes: number; dueAt?: string }
+export type NoteDraftFields = { title: string; category: string; content: string }
+
+export function ConfirmDeleteDialog({ message, onClose, onConfirm }: { message: string; onClose: () => void; onConfirm: () => void }) {
+  return (
+    <div className="modal-scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="editor-modal confirm-modal" role="dialog" aria-modal="true" aria-label="确认是否删除">
+        <div className="modal-heading"><div><span className="eyebrow">删除操作</span><h2>确认是否删除</h2></div><button className="icon-button" type="button" onClick={onClose} title="关闭"><X size={18} /></button></div>
+        <div className="confirm-modal-content"><Trash2 size={22} /><p>{message}</p></div>
+        <div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button danger-button" type="button" onClick={onConfirm}><Trash2 size={16} /> 确认删除</button></div>
+      </section>
+    </div>
+  )
+}
+
+export function StageDialog({ initial, onClose, onSubmit }: { initial?: PlanItem; onClose: () => void; onSubmit: (fields: StageDraftFields) => void }) {
+  const [draft, setDraft] = useState<StageDraftFields>({ title: initial?.title ?? '', dueLabel: initial?.dueLabel === '待安排' ? '' : initial?.dueLabel ?? '' })
+
+  const submit = () => {
+    if (!draft.title.trim()) return
+    onSubmit({ title: draft.title.trim(), dueLabel: draft.dueLabel })
+  }
+
+  return (
+    <div className="modal-scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="editor-modal" role="dialog" aria-modal="true" aria-label={initial ? '编辑计划阶段' : '添加计划阶段'}>
+        <div className="modal-heading"><div><span className="eyebrow">推进路径</span><h2>{initial ? '编辑计划阶段' : '添加计划阶段'}</h2></div><button className="icon-button" type="button" onClick={onClose} title="关闭"><X size={18} /></button></div>
+        <div className="modal-fields">
+          <label>阶段名称<input autoFocus value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="例如：完成资料收集" /></label>
+          <label>截止日期<input type="date" value={draft.dueLabel} onChange={(event) => setDraft({ ...draft, dueLabel: event.target.value })} /></label>
+        </div>
+        <div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="button" onClick={submit}>{initial ? <Save size={16} /> : <Plus size={16} />} {initial ? '保存阶段' : '添加阶段'}</button></div>
+      </section>
+    </div>
+  )
+}
+
+export function TaskDialog({ stageTitle, initial, onClose, onSubmit }: { stageTitle: string; initial?: PlanTask; onClose: () => void; onSubmit: (fields: TaskDraftFields) => void }) {
+  const [draft, setDraft] = useState({ title: initial?.title ?? '', estimatedMinutes: initial?.estimatedMinutes ?? 60, dueAt: initial?.dueAt?.slice(0, 10) ?? '' })
+
+  const submit = () => {
+    if (!draft.title.trim()) return
+    onSubmit({
+      title: draft.title.trim(),
+      estimatedMinutes: Math.max(1, draft.estimatedMinutes || 60),
+      dueAt: draft.dueAt ? `${draft.dueAt}T23:59:00` : undefined,
+    })
+  }
+
+  return (
+    <div className="modal-scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="editor-modal" role="dialog" aria-modal="true" aria-label={initial ? '编辑计划任务' : '添加计划任务'}>
+        <div className="modal-heading"><div><span className="eyebrow">{stageTitle}</span><h2>{initial ? '编辑计划任务' : '添加计划任务'}</h2></div><button className="icon-button" type="button" onClick={onClose} title="关闭"><X size={18} /></button></div>
+        <div className="modal-fields">
+          <label>任务名称<input autoFocus value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="这项任务具体要完成什么" /></label>
+          <div className="field-row"><label>预计分钟<input type="number" min="1" step="15" value={draft.estimatedMinutes} onChange={(event) => setDraft({ ...draft, estimatedMinutes: Number(event.target.value) })} /></label><label>截止日期<input type="date" value={draft.dueAt} onChange={(event) => setDraft({ ...draft, dueAt: event.target.value })} /></label></div>
+        </div>
+        <div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="button" onClick={submit}>{initial ? <Save size={16} /> : <Plus size={16} />} {initial ? '保存任务' : '添加任务'}</button></div>
+      </section>
+    </div>
+  )
+}
+
+export function NoteDialog({ initialCategory, categories, onClose, onSubmit }: { initialCategory?: string; categories: string[]; onClose: () => void; onSubmit: (fields: NoteDraftFields) => void }) {
+  const [draft, setDraft] = useState<NoteDraftFields>({ title: '', category: initialCategory && initialCategory !== '全部笔记' ? initialCategory : '学习笔记', content: '' })
+  const categoryOptions = Array.from(new Set(['学习笔记', ...categories.filter((category) => category !== '全部笔记')]))
+
+  const submit = () => {
+    if (!draft.title.trim()) return
+    onSubmit({ ...draft, title: draft.title.trim() })
+  }
+
+  return (
+    <div className="modal-scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="editor-modal" role="dialog" aria-modal="true" aria-label="新建笔记">
+        <div className="modal-heading"><div><span className="eyebrow">知识库</span><h2>新建笔记</h2></div><button className="icon-button" type="button" onClick={onClose} title="关闭"><X size={18} /></button></div>
+        <div className="modal-fields">
+          <label>笔记标题<input autoFocus value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} placeholder="例如：本周复盘方法" /></label>
+          <label>所属分类<select value={draft.category} onChange={(event) => setDraft({ ...draft, category: event.target.value })}>{categoryOptions.map((category) => <option key={category}>{category}</option>)}</select></label>
+          <label>初始内容<textarea rows={5} value={draft.content} onChange={(event) => setDraft({ ...draft, content: event.target.value })} placeholder="记录这条笔记的核心内容" /></label>
+        </div>
+        <div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="button" onClick={submit}><Plus size={16} /> 创建笔记</button></div>
+      </section>
+    </div>
+  )
+}
+
+export function CategoryDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: (category: string) => void }) {
+  const [category, setCategory] = useState('')
+
+  const submit = () => {
+    if (!category.trim()) return
+    onSubmit(category.trim())
+  }
+
+  return (
+    <div className="modal-scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="editor-modal" role="dialog" aria-modal="true" aria-label="新建笔记分类">
+        <div className="modal-heading"><div><span className="eyebrow">知识库</span><h2>新建分类</h2></div><button className="icon-button" type="button" onClick={onClose} title="关闭"><X size={18} /></button></div>
+        <div className="modal-fields"><label>分类名称<input autoFocus value={category} onChange={(event) => setCategory(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && submit()} placeholder="例如：项目复盘" /></label></div>
+        <div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="button" onClick={submit}><Plus size={16} /> 创建分类</button></div>
+      </section>
+    </div>
+  )
+}
 
 /** 计划相关弹窗只负责收集表单数据，保存动作由 App 传入。 */
 export function PlanDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: (plan: Plan) => void }) {

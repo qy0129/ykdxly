@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { ArrowRight, Bell, CalendarDays, CheckSquare2, ChevronDown, Menu, MoreHorizontal, Plus, Search, Target, X } from 'lucide-react'
+import { useEffect, useRef, useState, type ChangeEvent } from 'react'
+import { ArrowRight, Bell, CalendarDays, CheckSquare2, ChevronDown, ImageUp, Menu, MoreHorizontal, Plus, Search, Target, Trash2, X } from 'lucide-react'
 import type { Plan } from '../../types/planner'
 import { plannerApi, type UserProfile } from '../../services/plannerApi'
 import { ProgressRing } from '../ui/ProgressRing'
@@ -15,6 +15,7 @@ function profileInitial(displayName: string) {
 export function Sidebar({
   activeView,
   plansData,
+  weeklyCompletion,
   onViewChange,
   onPlanOpen,
   onCreatePlan,
@@ -23,6 +24,7 @@ export function Sidebar({
 }: {
   activeView: View
   plansData: Plan[]
+  weeklyCompletion: number
   onViewChange: (view: View) => void
   onPlanOpen: (planId: string) => void
   onCreatePlan: () => void
@@ -34,13 +36,36 @@ export function Sidebar({
   const [profileDraft, setProfileDraft] = useState<UserProfile>(defaultProfile)
   const [profileOpen, setProfileOpen] = useState(false)
   const [profileSaving, setProfileSaving] = useState(false)
+  const [profileError, setProfileError] = useState('')
+  const avatarInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     void plannerApi.loadProfile().then((value) => {
       setProfile(value)
       setProfileDraft(value)
-    }).catch(() => undefined)
+    }).catch((cause) => setProfileError(cause instanceof Error ? cause.message : '用户资料读取失败'))
   }, [])
+
+  const selectAvatar = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      setProfileError('请选择图片文件')
+      return
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setProfileError('头像图片不能超过 2 MB')
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = () => {
+      setProfileDraft((current) => ({ ...current, avatarUrl: String(reader.result) }))
+      setProfileError('')
+    }
+    reader.onerror = () => setProfileError('头像图片读取失败')
+    reader.readAsDataURL(file)
+  }
 
   const togglePlan = (planId: string) => {
     setExpandedPlans((current) =>
@@ -140,13 +165,13 @@ export function Sidebar({
           <div className="avatar">
             {profile.avatarUrl ? <img src={profile.avatarUrl} alt="" /> : profileInitial(profile.displayName)}
           </div>
-          <div><strong>{profile.displayName}</strong><span>本周完成率 81%</span></div>
+          <div><strong>{profile.displayName}</strong><span>本周完成率 {weeklyCompletion}%</span></div>
           <button
             className="icon-button"
             type="button"
             title="用户设置"
             aria-expanded={profileOpen}
-            onClick={() => { setProfileDraft(profile); setProfileOpen((value) => !value) }}
+            onClick={() => { setProfileDraft(profile); setProfileError(''); setProfileOpen((value) => !value) }}
           >
             <MoreHorizontal size={18} />
           </button>
@@ -154,17 +179,24 @@ export function Sidebar({
             <section className="profile-popover">
               <div className="profile-popover-heading"><strong>用户资料</strong><span>设置用户名和头像</span></div>
               <label>用户名<input value={profileDraft.displayName} maxLength={100} onChange={(event) => setProfileDraft((current) => ({ ...current, displayName: event.target.value }))} /></label>
-              <label>头像地址<input value={profileDraft.avatarUrl} type="url" placeholder="https://..." onChange={(event) => setProfileDraft((current) => ({ ...current, avatarUrl: event.target.value }))} /></label>
               <div className="profile-preview">
                 <div className="avatar">{profileDraft.avatarUrl ? <img src={profileDraft.avatarUrl} alt="" /> : profileInitial(profileDraft.displayName)}</div>
-                <span>头像预览</span>
+                <input ref={avatarInputRef} className="profile-file-input" type="file" accept="image/*" onChange={selectAvatar} />
+                <button className="secondary-button" type="button" onClick={() => avatarInputRef.current?.click()}><ImageUp size={15} /> 选择本地图片</button>
+                {profileDraft.avatarUrl && <button className="icon-button" type="button" title="移除头像" onClick={() => setProfileDraft((current) => ({ ...current, avatarUrl: '' }))}><Trash2 size={15} /></button>}
               </div>
+              <label>或使用头像地址<input value={profileDraft.avatarUrl.startsWith('data:') ? '' : profileDraft.avatarUrl} type="url" placeholder={profileDraft.avatarUrl.startsWith('data:') ? '已选择本地图片' : 'https://...'} onChange={(event) => setProfileDraft((current) => ({ ...current, avatarUrl: event.target.value }))} /></label>
+              {profileError && <div className="profile-error" role="alert">{profileError}</div>}
               <div className="dialog-actions">
                 <button className="primary-button" type="button" disabled={profileSaving} onClick={() => {
                   const next = { displayName: profileDraft.displayName.trim() || defaultProfile.displayName, avatarUrl: profileDraft.avatarUrl.trim() }
-                  setProfile(next)
                   setProfileSaving(true)
-                  void plannerApi.saveProfile(next).then(setProfile).catch(() => undefined).finally(() => { setProfileSaving(false); setProfileOpen(false) })
+                  setProfileError('')
+                  void plannerApi.saveProfile(next).then((saved) => {
+                    setProfile(saved)
+                    setProfileDraft(saved)
+                    setProfileOpen(false)
+                  }).catch((cause) => setProfileError(cause instanceof Error ? cause.message : '用户资料保存失败')).finally(() => setProfileSaving(false))
                 }}>保存</button>
                 <button className="secondary-button" type="button" disabled={profileSaving} onClick={() => setProfileOpen(false)}>取消</button>
               </div>
