@@ -1,10 +1,11 @@
 package com.changlu.planner.interfaces.http;
 
-import com.changlu.planner.features.briefing.BriefingSubAgent;
-import com.changlu.planner.features.command.AiCommandService;
+import com.changlu.planner.agent.core.AgentFacade;
+import com.changlu.planner.agent.subagents.briefing.BriefingResult;
+import com.changlu.planner.features.briefing.ScheduleMaterialService;
 import com.changlu.planner.features.export.StatsPdfGenerator;
 import com.changlu.planner.features.plan.PlanExecutionService;
-import com.changlu.planner.features.review.AiReviewService;
+import com.changlu.planner.features.reminder.ReminderService;
 import com.changlu.planner.shared.database.Database;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -12,6 +13,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.InputStream;
@@ -35,54 +37,117 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 /** HTTP 适配层：负责把外部请求转换为现有业务方法，不保存独立的业务状态。 */
 public final class ApiServer {
+  private static final Logger LOG = LoggerFactory.getLogger(ApiServer.class);
+  private static final String RESPONSE_STATUS_ATTRIBUTE = "responseStatus";
   private final Database database;
   private final int port;
   private final Gson gson = new Gson();
-  private final AiReviewService aiReview;
-  private final AiCommandService aiCommands;
+  private final AgentFacade agent;
   private final PlanExecutionService planExecution;
-  private final BriefingSubAgent briefingAgent;
+  private final ReminderService reminders;
+  private final ScheduleMaterialService scheduleMaterials;
   private final StaticFileHandler staticFiles = new StaticFileHandler();
   private HttpServer server;
 
-  public ApiServer(Database database, int port) { this.database = database; this.port = port; this.aiReview = new AiReviewService(database); this.aiCommands = new AiCommandService(database); this.planExecution = new PlanExecutionService(database); this.briefingAgent = new BriefingSubAgent(database); }
+  public ApiServer(Database database, int port) { this.database = database; this.port = port; this.agent = new AgentFacade(database); this.planExecution = new PlanExecutionService(database); this.reminders = new ReminderService(database); this.scheduleMaterials = new ScheduleMaterialService(database); }
   public int port() { return port; }
 
   public void start() throws IOException {
     server = HttpServer.create(new InetSocketAddress("0.0.0.0", port), 0);
     // 路由按外部能力分组；静态文件由独立 handler 托管，避免和 API 逻辑混在一起。
-    server.createContext("/api/health", this::health);
-    server.createContext("/api/profile", this::profile);
-    server.createContext("/api/plans", exchange -> crud(exchange, "plans"));
-    server.createContext("/api/plans/", this::planSubresource);
-    server.createContext("/api/schedules", exchange -> crud(exchange, "schedule_items"));
-    server.createContext("/api/todos", exchange -> crud(exchange, "todos"));
-    server.createContext("/api/tasks", this::tasks);
-    server.createContext("/api/planning/preferences", this::planningPreferences);
-    server.createContext("/api/trash", this::trash);
-    server.createContext("/api/notes", this::notes);
-    server.createContext("/api/ai/review/chat", this::aiReviewChat);
-    server.createContext("/api/ai/commands", this::aiCommand);
-    server.createContext("/api/ai/drafts/", this::aiDraft);
-    server.createContext("/api/ai/session", this::aiSession);
-    server.createContext("/api/ai/change-sets/", this::aiChangeSet);
-    server.createContext("/api/review/facts", this::reviewFacts);
-    server.createContext("/api/stats", this::stats);
-    server.createContext("/api/export/xlsx", this::excelExport);
-    server.createContext("/api/export/pdf", this::pdfExport);
-    server.createContext("/api/integrations/wechat/capture", this::wechatCapture);
-    server.createContext("/api/integrations/wechat/command", this::wechatCommand);
-    server.createContext("/api/integrations/wechat/ai", this::wechatAiCommand);
-    server.createContext("/api/integrations/wechat/ai/", this::wechatAiDraft);
-    server.createContext("/api/integrations/wechat/briefing", this::wechatBriefing);
+    server.createContext("/api/health", logged(this::health));
+    server.createContext("/api/profile", logged(this::profile));
+    server.createContext("/api/plans", logged(exchange -> crud(exchange, "plans")));
+    server.createContext("/api/plans/", logged(this::planSubresource));
+    server.createContext("/api/schedules", logged(exchange -> crud(exchange, "schedule_items")));
+    server.createContext("/api/schedules/", logged(this::scheduleSubresource));
+    server.createContext("/api/todos", logged(exchange -> crud(exchange, "todos")));
+    server.createContext("/api/reminders/due", logged(this::dueReminders));
+    server.createContext("/api/tasks", logged(this::tasks));
+    server.createContext("/api/planning/preferences", logged(this::planningPreferences));
+    server.createContext("/api/trash", logged(this::trash));
+    server.createContext("/api/notes", logged(this::notes));
+    server.createContext("/api/ai/review/chat", logged(this::aiReviewChat));
+    server.createContext("/api/ai/commands", logged(this::aiCommand));
+    server.createContext("/api/ai/drafts/", logged(this::aiDraft));
+    server.createContext("/api/ai/session", logged(this::aiSession));
+    server.createContext("/api/ai/change-sets/", logged(this::aiChangeSet));
+    server.createContext("/api/agent/runs", logged(this::agentRuns));
+    server.createContext("/api/agent/runs/", logged(this::agentRun));
+    server.createContext("/api/agent/drafts/", logged(this::agentDraft));
+    server.createContext("/api/review/facts", logged(this::reviewFacts));
+    server.createContext("/api/review/today", logged(this::reviewToday));
+    server.createContext("/api/stats", logged(this::stats));
+    server.createContext("/api/export/xlsx", logged(this::excelExport));
+    server.createContext("/api/export/pdf", logged(this::pdfExport));
+    server.createContext("/api/integrations/wechat/capture", logged(this::wechatCapture));
+    server.createContext("/api/integrations/wechat/command", logged(this::wechatCommand));
+    server.createContext("/api/integrations/wechat/ai", logged(this::wechatAiCommand));
+    server.createContext("/api/integrations/wechat/ai/", logged(this::wechatAiDraft));
+    server.createContext("/api/integrations/wechat/briefing", logged(this::wechatBriefing));
     server.createContext("/", staticFiles);
     server.setExecutor(null);
     server.start();
   }
   public void stop() { if (server != null) server.stop(0); }
+
+  private HttpHandler logged(HttpHandler handler) {
+    return exchange -> {
+      if ("OPTIONS".equals(exchange.getRequestMethod())) {
+        handler.handle(exchange);
+        return;
+      }
+      String requestId = UUID.randomUUID().toString().substring(0, 8);
+      long startedAt = System.nanoTime();
+      MDC.put("requestId", requestId);
+      exchange.getResponseHeaders().set("X-Request-Id", requestId);
+      LOG.info("[用户操作] 开始 请求方式={} 路径={} 用户={} 工作区={} 来源={}",
+          exchange.getRequestMethod(), exchange.getRequestURI(), requestUser(exchange),
+          requestWorkspace(exchange), exchange.getRemoteAddress());
+      try {
+        handler.handle(exchange);
+      } catch (IOException | RuntimeException error) {
+        LOG.error("[用户操作] 未捕获异常 请求方式={} 路径={} 原因={}",
+            exchange.getRequestMethod(), exchange.getRequestURI(), error.getMessage(), error);
+        throw error;
+      } finally {
+        long durationMs = (System.nanoTime() - startedAt) / 1_000_000;
+        Object status = exchange.getAttribute(RESPONSE_STATUS_ATTRIBUTE);
+        LOG.info("[用户操作] 完成 请求方式={} 路径={} 状态={} 耗时={}毫秒",
+            exchange.getRequestMethod(), exchange.getRequestURI(), status == null ? "未知" : status, durationMs);
+        MDC.remove("requestId");
+      }
+    };
+  }
+
+  private String requestUser(HttpExchange exchange) {
+    String wechatUser = exchange.getRequestHeaders().getFirst("X-Wechat-User-Id");
+    if (wechatUser != null && !wechatUser.isBlank()) return "wechat:" + wechatUser;
+    String user = exchange.getRequestHeaders().getFirst("X-User-Id");
+    return user == null || user.isBlank() ? Database.DEFAULT_USER_ID.toString() : user;
+  }
+
+  private String requestWorkspace(HttpExchange exchange) {
+    String workspace = exchange.getRequestHeaders().getFirst("X-Workspace-Id");
+    return workspace == null || workspace.isBlank() ? Database.DEFAULT_WORKSPACE_ID.toString() : workspace;
+  }
+
+  private void dueReminders(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if (!"GET".equals(e.getRequestMethod())) { json(e, 405, Map.of("error", "method_not_allowed")); return; }
+      json(e, 200, reminders.dueForWeb(context(e)));
+    } catch (SQLException ex) {
+      LOG.error("[提醒查询失败] 原因={}", ex.getMessage(), ex);
+      json(e, 500, Map.of("error", "database_error", "message", ex.getMessage()));
+    }
+  }
 
   private void health(HttpExchange e) throws IOException { json(e, 200, Map.of("ok", true, "service", "changlu-planner")); }
 
@@ -91,7 +156,7 @@ public final class ApiServer {
       if (options(e)) return;
       if ("GET".equals(e.getRequestMethod())) {
         try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
-            "SELECT display_name, avatar_url FROM users WHERE id = ?")) {
+            "SELECT display_name, COALESCE(avatar_url, '') avatar_url FROM users WHERE id = ?")) {
           p.setBytes(1, Database.uuidBytes(user(e)));
           try (ResultSet rs = p.executeQuery()) {
             if (!rs.next()) { json(e, 404, Map.of("error", "user_not_found")); return; }
@@ -105,7 +170,7 @@ public final class ApiServer {
         String displayName = string(body, "displayName", "").trim();
         if (displayName.isBlank()) { json(e, 400, Map.of("error", "display_name_required")); return; }
         String avatarUrl = string(body, "avatarUrl", "").trim();
-        if (avatarUrl.length() > 1000) { json(e, 400, Map.of("error", "avatar_url_too_long")); return; }
+        if (avatarUrl.length() > 3_000_000) { json(e, 400, Map.of("error", "avatar_image_too_large", "message", "头像图片不能超过 2 MB")); return; }
         try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
             "UPDATE users SET display_name = ?, avatar_url = ? WHERE id = ?")) {
           p.setString(1, displayName); p.setString(2, avatarUrl); p.setBytes(3, Database.uuidBytes(user(e)));
@@ -122,7 +187,7 @@ public final class ApiServer {
     try {
       if (options(e)) return;
       if (!"POST".equals(e.getRequestMethod())) { json(e, 405, Map.of("error", "method_not_allowed")); return; }
-      json(e, 200, aiCommands.command(body(e), context(e), "web"));
+      json(e, 200, agent.start(body(e), context(e), "web"));
     } catch (IllegalArgumentException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
       catch (IllegalStateException ex) { json(e, 503, Map.of("error", "ai_unavailable", "message", ex.getMessage())); }
       catch (Exception ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "ai_error", "message", ex.getMessage())); }
@@ -132,7 +197,7 @@ public final class ApiServer {
     try {
       if (options(e)) return;
       if (!"POST".equals(e.getRequestMethod())) { json(e, 405, Map.of("error", "method_not_allowed")); return; }
-      json(e, 200, aiCommands.command(body(e), context(e), "web"));
+      json(e, 200, agent.start(body(e), context(e), "web"));
     } catch (IllegalArgumentException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
       catch (IllegalStateException ex) { json(e, 503, Map.of("error", "ai_unavailable", "message", ex.getMessage())); }
       catch (Exception ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "ai_command_error", "message", ex.getMessage())); }
@@ -145,9 +210,9 @@ public final class ApiServer {
       if (parts.length < 5 || parts[4].isBlank()) { json(e, 400, Map.of("error", "draft_id_required")); return; }
       String reference = parts[4]; String action = parts.length > 5 ? parts[5] : "";
       Database.Context context = new Database.Context(user(e), workspace(e));
-      if ("GET".equals(e.getRequestMethod()) && action.isBlank()) { json(e, 200, aiCommands.draft(reference, context)); return; }
-      if ("POST".equals(e.getRequestMethod()) && "confirm".equals(action)) { json(e, 200, aiCommands.confirm(reference, context)); return; }
-      if ("POST".equals(e.getRequestMethod()) && "cancel".equals(action)) { json(e, 200, aiCommands.cancel(reference, context)); return; }
+      if ("GET".equals(e.getRequestMethod()) && action.isBlank()) { json(e, 200, agent.draft(reference, context)); return; }
+      if ("POST".equals(e.getRequestMethod()) && "confirm".equals(action)) { json(e, 200, agent.confirm(reference, context)); return; }
+      if ("POST".equals(e.getRequestMethod()) && "cancel".equals(action)) { json(e, 200, agent.cancel(reference, context)); return; }
       json(e, 405, Map.of("error", "method_not_allowed"));
     } catch (IllegalArgumentException | IllegalStateException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
       catch (Exception ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "draft_error", "message", ex.getMessage())); }
@@ -157,7 +222,7 @@ public final class ApiServer {
     try {
       if (options(e)) return;
       if (!"GET".equals(e.getRequestMethod())) { error(e, 405, "method_not_allowed", "请求方法不支持", false); return; }
-      json(e, 200, aiCommands.session(context(e), "web"));
+      json(e, 200, agent.session(context(e), "web"));
     } catch (Exception ex) { ex.printStackTrace(); error(e, 500, "session_error", ex.getMessage(), true); }
   }
 
@@ -167,7 +232,7 @@ public final class ApiServer {
       String[] parts = e.getRequestURI().getPath().split("/");
       if (parts.length < 6 || parts[4].isBlank() || !"undo".equals(parts[5])) { error(e, 400, "change_set_required", "缺少要撤销的变更集", false); return; }
       if (!"POST".equals(e.getRequestMethod())) { error(e, 405, "method_not_allowed", "请求方法不支持", false); return; }
-      json(e, 200, aiCommands.undo(parts[4], context(e)));
+      json(e, 200, agent.undo(parts[4], context(e)));
     } catch (IllegalArgumentException | IllegalStateException ex) { error(e, 409, "undo_rejected", ex.getMessage(), false); }
       catch (Exception ex) { ex.printStackTrace(); error(e, 500, "undo_error", ex.getMessage(), true); }
   }
@@ -176,8 +241,60 @@ public final class ApiServer {
     try {
       if (options(e)) return;
       if (!"GET".equals(e.getRequestMethod())) { json(e, 405, Map.of("error", "method_not_allowed")); return; }
-      json(e, 200, aiCommands.reviewFacts(new Database.Context(user(e), workspace(e))));
-    } catch (SQLException ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "database_error", "message", ex.getMessage())); }
+      json(e, 200, agent.reviewFacts(new Database.Context(user(e), workspace(e))));
+    } catch (Exception ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "database_error", "message", ex.getMessage())); }
+  }
+
+  private void agentRuns(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if (!"POST".equals(e.getRequestMethod())) { error(e, 405, "method_not_allowed", "请求方法不支持", false); return; }
+      json(e, 201, agent.start(body(e), context(e), "web"));
+    } catch (IllegalArgumentException ex) { error(e, 400, "invalid_agent_request", ex.getMessage(), false); }
+      catch (IllegalStateException ex) { error(e, 503, "agent_unavailable", ex.getMessage(), true); }
+      catch (Exception ex) { ex.printStackTrace(); error(e, 500, "agent_error", ex.getMessage(), true); }
+  }
+
+  private void agentRun(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      String[] parts = e.getRequestURI().getPath().split("/");
+      if (parts.length < 5 || parts[4].isBlank()) { error(e, 400, "run_id_required", "缺少 Agent 运行编号", false); return; }
+      String runId = parts[4];
+      String action = parts.length > 5 ? parts[5] : "";
+      if ("GET".equals(e.getRequestMethod()) && action.isBlank()) { json(e, 200, agent.get(runId, context(e))); return; }
+      if ("POST".equals(e.getRequestMethod()) && "resume".equals(action)) { json(e, 200, agent.resume(runId, body(e), context(e))); return; }
+      error(e, 405, "method_not_allowed", "请求方法不支持", false);
+    } catch (IllegalArgumentException ex) { error(e, 404, "agent_run_not_found", ex.getMessage(), false); }
+      catch (IllegalStateException ex) { error(e, 409, "agent_run_rejected", ex.getMessage(), false); }
+      catch (Exception ex) { ex.printStackTrace(); error(e, 500, "agent_run_error", ex.getMessage(), true); }
+  }
+
+  private void agentDraft(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      String[] parts = e.getRequestURI().getPath().split("/");
+      if (parts.length < 6 || parts[4].isBlank()) { error(e, 400, "draft_id_required", "缺少草案编号", false); return; }
+      String draftId = parts[4];
+      String action = parts[5];
+      if ("POST".equals(e.getRequestMethod()) && "confirm".equals(action)) { json(e, 200, agent.confirm(draftId, context(e))); return; }
+      if ("POST".equals(e.getRequestMethod()) && "cancel".equals(action)) { json(e, 200, agent.cancel(draftId, context(e))); return; }
+      error(e, 405, "method_not_allowed", "请求方法不支持", false);
+    } catch (IllegalArgumentException | IllegalStateException ex) { error(e, 409, "draft_rejected", ex.getMessage(), false); }
+      catch (Exception ex) { ex.printStackTrace(); error(e, 500, "draft_error", ex.getMessage(), true); }
+  }
+
+  private void reviewToday(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      boolean regenerate = "POST".equals(e.getRequestMethod())
+          && e.getRequestURI().getPath().endsWith("/regenerate");
+      if (!"GET".equals(e.getRequestMethod()) && !regenerate) {
+        error(e, 405, "method_not_allowed", "请求方法不支持", false); return;
+      }
+      json(e, 200, agent.reviewToday(context(e), regenerate));
+    } catch (IllegalStateException ex) { error(e, 503, "review_unavailable", ex.getMessage(), true); }
+      catch (Exception ex) { ex.printStackTrace(); error(e, 500, "review_error", ex.getMessage(), true); }
   }
 
   private void wechatAiCommand(HttpExchange e) throws IOException {
@@ -185,7 +302,7 @@ public final class ApiServer {
       if (options(e)) return;
       if (!"POST".equals(e.getRequestMethod())) { json(e, 405, Map.of("error", "method_not_allowed")); return; }
       Database.Context context = database.contextForExternalUser(e.getRequestHeaders().getFirst("X-Wechat-User-Id"));
-      json(e, 200, aiCommands.command(body(e), context, "wechat"));
+      json(e, 200, agent.start(body(e), context, "wechat"));
     } catch (IllegalArgumentException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
       catch (IllegalStateException ex) { json(e, 503, Map.of("error", "ai_unavailable", "message", ex.getMessage())); }
       catch (Exception ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "ai_command_error", "message", ex.getMessage())); }
@@ -198,8 +315,8 @@ public final class ApiServer {
       if (parts.length < 7 || parts[5].isBlank()) { json(e, 400, Map.of("error", "draft_id_required")); return; }
       Database.Context context = database.contextForExternalUser(e.getRequestHeaders().getFirst("X-Wechat-User-Id"));
       String reference = parts[5]; String action = parts[6];
-      if ("POST".equals(e.getRequestMethod()) && "confirm".equals(action)) { json(e, 200, aiCommands.confirm(reference, context)); return; }
-      if ("POST".equals(e.getRequestMethod()) && "cancel".equals(action)) { json(e, 200, aiCommands.cancel(reference, context)); return; }
+      if ("POST".equals(e.getRequestMethod()) && "confirm".equals(action)) { json(e, 200, agent.confirm(reference, context)); return; }
+      if ("POST".equals(e.getRequestMethod()) && "cancel".equals(action)) { json(e, 200, agent.cancel(reference, context)); return; }
       json(e, 405, Map.of("error", "method_not_allowed"));
     } catch (IllegalArgumentException | IllegalStateException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
       catch (Exception ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "draft_error", "message", ex.getMessage())); }
@@ -221,7 +338,7 @@ public final class ApiServer {
       Database.Context context = database.contextForExternalUser(externalId);
       if (!type.equals("笔记")) {
         JsonObject input = new JsonObject(); input.addProperty("message", text);
-        JsonObject result = aiCommands.command(input, context, "wechat");
+        JsonObject result = agent.start(input, context, "wechat");
         result.addProperty("handled", true); result.addProperty("message", result.get("reply").getAsString());
         json(e, 200, result); return;
       }
@@ -340,9 +457,9 @@ public final class ApiServer {
     try {
       if (options(e)) return;
       if (!"GET".equals(e.getRequestMethod())) { json(e, 405, Map.of("error", "method_not_allowed")); return; }
-      BriefingSubAgent.Result briefing = briefingAgent.build(e.getRequestHeaders().getFirst("X-Wechat-User-Id"));
+      BriefingResult briefing = agent.briefing(e.getRequestHeaders().getFirst("X-Wechat-User-Id"));
       json(e, 200, Map.of("plans", briefing.plans(), "progress", briefing.progress(), "pendingTodos", briefing.pendingTodos(), "overdueTodos", briefing.overdueTodos(), "tone", briefing.tone(), "message", briefing.message()));
-    } catch (SQLException ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "database_error", "message", ex.getMessage())); }
+    } catch (Exception ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "briefing_error", "message", ex.getMessage())); }
   }
 
   private void tasks(HttpExchange e) throws IOException {
@@ -538,7 +655,7 @@ public final class ApiServer {
         zipText(zip, "xl/worksheets/sheet2.xml", sheetXml(new String[]{"日期", "时间", "日程", "时长", "状态"}, schedules));
         zipText(zip, "xl/worksheets/sheet3.xml", sheetXml(new String[]{"日期", "时间", "待办", "优先级", "状态"}, todos));
       }
-      e.getResponseHeaders().set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"); e.getResponseHeaders().set("Content-Disposition", "attachment; filename=changlu-plan.xlsx"); e.sendResponseHeaders(200, bytes.size()); try (OutputStream out = e.getResponseBody()) { bytes.writeTo(out); }
+      e.getResponseHeaders().set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"); e.getResponseHeaders().set("Content-Disposition", "attachment; filename=changlu-plan.xlsx"); e.setAttribute(RESPONSE_STATUS_ATTRIBUTE, 200); e.sendResponseHeaders(200, bytes.size()); try (OutputStream out = e.getResponseBody()) { bytes.writeTo(out); }
     } catch (SQLException ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "database_error", "message", ex.getMessage())); }
   }
 
@@ -556,6 +673,7 @@ public final class ApiServer {
       byte[] bytes = new StatsPdfGenerator().generate(loadStats(workspace), plans, schedules, todos);
       e.getResponseHeaders().set("Content-Type", "application/pdf");
       e.getResponseHeaders().set("Content-Disposition", "attachment; filename=changlu-plan-statistics.pdf");
+      e.setAttribute(RESPONSE_STATUS_ATTRIBUTE, 200);
       e.sendResponseHeaders(200, bytes.length);
       try (OutputStream out = e.getResponseBody()) { out.write(bytes); }
     } catch (SQLException ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "database_error", "message", ex.getMessage())); }
@@ -692,9 +810,52 @@ public final class ApiServer {
   private String categoryName(byte[] id) throws SQLException { try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("SELECT name FROM note_categories WHERE id = ?")) { p.setBytes(1, id); try (ResultSet rs = p.executeQuery()) { return rs.next() ? rs.getString(1) : "未分类"; } } }
 
   private boolean options(HttpExchange e) throws IOException { if (!"OPTIONS".equals(e.getRequestMethod())) return false; cors(e); e.sendResponseHeaders(204, -1); e.close(); return true; }
-  private void json(HttpExchange e, int status, Object value) throws IOException { cors(e); byte[] bytes = gson.toJson(value).getBytes(StandardCharsets.UTF_8); e.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8"); e.sendResponseHeaders(status, status == 204 ? -1 : bytes.length); if (status != 204) try (OutputStream out = e.getResponseBody()) { out.write(bytes); } else e.close(); }
+  private void json(HttpExchange e, int status, Object value) throws IOException { e.setAttribute(RESPONSE_STATUS_ATTRIBUTE, status); cors(e); byte[] bytes = gson.toJson(value).getBytes(StandardCharsets.UTF_8); e.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8"); e.sendResponseHeaders(status, status == 204 ? -1 : bytes.length); if (status != 204) try (OutputStream out = e.getResponseBody()) { out.write(bytes); } else e.close(); }
   private void cors(HttpExchange e) { Headers h = e.getResponseHeaders(); h.set("Access-Control-Allow-Origin", "*"); h.set("Access-Control-Allow-Headers", "Content-Type, X-Workspace-Id, X-User-Id"); h.set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS"); }
-  private JsonObject body(HttpExchange e) throws IOException { try (InputStream in = e.getRequestBody()) { String raw = new String(in.readAllBytes(), StandardCharsets.UTF_8); return raw.isBlank() ? new JsonObject() : gson.fromJson(raw, JsonObject.class); } }
+  private JsonObject body(HttpExchange e) throws IOException {
+    try (InputStream in = e.getRequestBody()) {
+      String raw = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+      JsonObject body = raw.isBlank() ? new JsonObject() : gson.fromJson(raw, JsonObject.class);
+      if (!body.isEmpty()) LOG.info("[用户操作] 请求参数 body={}", safeBody(body));
+      return body;
+    }
+  }
+
+  private void scheduleSubresource(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      String[] parts = e.getRequestURI().getPath().split("/");
+      if (parts.length < 5 || parts[3].isBlank() || !"materials".equals(parts[4])) {
+        json(e, 404, Map.of("error", "schedule_materials_not_found"));
+        return;
+      }
+      if (!"GET".equals(e.getRequestMethod())) {
+        json(e, 405, Map.of("error", "method_not_allowed"));
+        return;
+      }
+      boolean refresh = e.getRequestURI().getRawQuery() != null && e.getRequestURI().getRawQuery().contains("refresh=true");
+      json(e, 200, scheduleMaterials.load(context(e), UUID.fromString(parts[3]), refresh));
+    } catch (IllegalArgumentException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
+      catch (Exception ex) { LOG.warn("[日程资料] 获取失败: {}", ex.getMessage()); json(e, 502, Map.of("error", "schedule_materials_unavailable", "message", "暂时无法获取学习资料")); }
+  }
+
+  private String safeBody(JsonObject body) {
+    JsonObject safe = body.deepCopy();
+    for (String key : new ArrayList<>(safe.keySet())) {
+      String normalized = key.toLowerCase();
+      if (normalized.contains("password") || normalized.contains("token") || normalized.contains("secret")
+          || normalized.contains("apikey") || normalized.contains("api_key")
+          || normalized.contains("authorization") || normalized.equals("avatarurl")) {
+        safe.addProperty(key, "[已脱敏]");
+      }
+    }
+    return abbreviate(gson.toJson(safe), 4000);
+  }
+
+  private String abbreviate(String value, int maxLength) {
+    if (value == null || value.length() <= maxLength) return value;
+    return value.substring(0, maxLength) + "... [已截断，原长度=" + value.length() + "]";
+  }
   private UUID workspace(HttpExchange e) { return uuidHeader(e, "X-Workspace-Id", Database.DEFAULT_WORKSPACE_ID); }
   private UUID user(HttpExchange e) { return uuidHeader(e, "X-User-Id", Database.DEFAULT_USER_ID); }
   private Database.Context context(HttpExchange e) { return new Database.Context(user(e), workspace(e)); }

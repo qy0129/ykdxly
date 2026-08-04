@@ -1,11 +1,10 @@
-package com.changlu.planner.features.briefing;
+package com.changlu.planner.agent.subagents.briefing;
 
 import com.changlu.planner.shared.config.EnvironmentConfig;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
-
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -14,13 +13,14 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 
-/** Weather tool used only by the briefing sub-agent. */
+/** 简报 Subagent 的天气查询工具。 */
 final class WeatherTool {
   private static final String DISTRICT_URL = "https://restapi.amap.com/v3/config/district";
   private static final String WEATHER_URL = "https://restapi.amap.com/v3/weather/weatherInfo";
   private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
   private final String apiKey = EnvironmentConfig.value("AMAP_API_KEY", "amap.api.key", "");
-  private final String location = EnvironmentConfig.value("BRIEFING_DEFAULT_LOCATION", "briefing.default.location", "杭州");
+  private final String location = EnvironmentConfig.value(
+      "BRIEFING_DEFAULT_LOCATION", "briefing.default.location", "杭州");
 
   String current() {
     if (apiKey.isBlank() || location.isBlank()) return "";

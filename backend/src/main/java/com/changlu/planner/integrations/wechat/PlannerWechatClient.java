@@ -53,7 +53,7 @@ final class PlannerWechatClient {
     preview.append("\n\n草案编号：").append(code)
         .append("\n回复“确认 ").append(code).append("”执行，回复“取消 ").append(code).append("”放弃。")
         .toString();
-    if (actions.size() > 3) preview.append("\n\n[点击此链接](").append(webUrl()).append("?view=review&draft=").append(draft.get("id").getAsString()).append(")");
+    if (actions.size() > 3) preview.append("\n\n[点击此链接](").append(webUrl()).append("#/agent)");
     return preview.toString();
   }
 

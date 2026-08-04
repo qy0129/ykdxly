@@ -1,0 +1,2 @@
+ALTER TABLE users
+  MODIFY COLUMN avatar_url MEDIUMTEXT NULL;
