@@ -522,6 +522,8 @@ function ElasticNoteGraph({ noteItems, activeId, categoryColors, onSelect }: { n
   )
 }
 
+/* The following older ElasticNoteGraph implementation was duplicated below and is intentionally removed. */
+/*
 type ElasticGraphPoint = { x: number; y: number; vx: number; vy: number }
 type ElasticGraphInteraction = {
   kind: 'node' | 'pan'
@@ -837,6 +839,7 @@ function ElasticNoteGraph({ noteItems, activeId, onSelect }: { noteItems: Note[]
     </div>
   )
 }
+*/
 
 export function NotesPage({
   noteItems,

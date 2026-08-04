@@ -10,11 +10,13 @@ import com.changlu.planner.agent.subagents.research.WebSearchTool;
 import com.changlu.planner.agent.subagents.review.ReviewSubagent;
 import com.changlu.planner.agent.subagents.scheduling.ConflictTool;
 import com.changlu.planner.agent.subagents.scheduling.SchedulingSubagent;
+import com.changlu.planner.agent.subagents.travel.TravelModule;
 import com.changlu.planner.agent.tools.PlanningTools;
 import com.changlu.planner.features.command.AiCommandService;
 import com.changlu.planner.shared.database.Database;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonArray;
+import java.util.List;
 
 /** 网页和微信共用的 Agent 应用入口。 */
 public final class AgentFacade implements AutoCloseable {
@@ -30,18 +32,30 @@ public final class AgentFacade implements AutoCloseable {
     memory = new MemorySubagent(database, model);
     commands = new AiCommandService(database, model, memory);
     ToolRegistry tools = PlanningTools.registry();
-    SubagentRegistry subagents = new SubagentRegistry();
+    com.changlu.planner.agent.core.registry.SubagentRegistry subagents =
+        new com.changlu.planner.agent.core.registry.SubagentRegistry();
+    com.changlu.planner.agent.core.tool.ToolRegistry standardTools =
+        new com.changlu.planner.agent.core.tool.ToolRegistry();
     WebSearchTool webSearch = new WebSearchTool();
     review = new ReviewSubagent(database, commands, model);
     briefing = new BriefingSubagent(database, webSearch);
     documents = new DocumentSubagent(database, model);
-    subagents.register(review);
-    subagents.register(briefing);
-    subagents.register(new ResearchSubagent(webSearch));
-    subagents.register(new SchedulingSubagent(new ConflictTool(database)));
-    subagents.register(documents);
-    subagents.register(memory);
-    runtime = new AgentRuntime(database, commands, new AgentRouter(model), tools, subagents, documents, memory);
+    subagents.register(new com.changlu.planner.agent.core.registry.LegacySubagentAdapter(review,
+        List.of("复盘", "总结今天", "每日复盘"), List.of("修改计划")));
+    subagents.register(new com.changlu.planner.agent.core.registry.LegacySubagentAdapter(briefing,
+        List.of("简报", "今日安排", "今日概览"), List.of("修改日程")));
+    subagents.register(new com.changlu.planner.agent.core.registry.LegacySubagentAdapter(
+        new ResearchSubagent(webSearch), List.of("搜索", "查资料", "查新闻", "公开网页"), List.of("内部数据查询")));
+    subagents.register(new com.changlu.planner.agent.core.registry.LegacySubagentAdapter(
+        new SchedulingSubagent(new ConflictTool(database)), List.of("冲突", "检查日程", "排期问题", "可用时段"),
+        List.of("修改日程")));
+    subagents.register(new com.changlu.planner.agent.core.registry.LegacySubagentAdapter(documents,
+        List.of("文件", "文档", "附件", "知识库"), List.of("根据文件写入计划")));
+    subagents.register(new com.changlu.planner.agent.core.registry.LegacySubagentAdapter(memory,
+        List.of("你记得我", "长期记忆", "记住我的", "忘记我的"), List.of("当前会话临时内容")));
+    new TravelModule(model, commands, webSearch).register(subagents, standardTools);
+    runtime = new AgentRuntime(database, commands, new AgentRouter(model), tools, subagents, standardTools,
+        documents, memory);
   }
 
   public JsonObject start(JsonObject input, Database.Context context, String channel) throws Exception {
