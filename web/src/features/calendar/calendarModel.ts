@@ -9,5 +9,8 @@ export const weekLabels = ['周一', '周二', '周三', '周四', '周五', '�
 export function getCalendarProgress(item: CalendarItem, plans: Plan[]) {
   if (item.kind === 'todo') return item.status === 'done' ? 100 : 0
   if (item.status === 'done') return 100
-  return item.progress ?? plans.find((plan) => plan.id === item.planId)?.progress ?? 0
+  if (!item.taskId) return 0
+  const task = plans.flatMap((plan) => plan.items.flatMap((stage) => stage.tasks))
+    .find((candidate) => candidate.id === item.taskId)
+  return task?.status === 'done' ? 100 : 0
 }

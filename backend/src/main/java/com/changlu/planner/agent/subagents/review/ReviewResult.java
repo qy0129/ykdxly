@@ -12,7 +12,8 @@ public record ReviewResult(
     JsonArray highlights,
     JsonArray risks,
     JsonArray nextActions,
-    String generatedAt
+    String generatedAt,
+    boolean aiGenerated
 ) {
   public static ReviewResult fromGenerated(JsonObject facts, JsonObject generated, String generatedAt) {
     return new ReviewResult(
@@ -22,7 +23,8 @@ public record ReviewResult(
         array(generated, "highlights"),
         array(generated, "risks"),
         array(generated, "nextActions"),
-        generatedAt);
+        generatedAt,
+        true);
   }
 
   public static ReviewResult fromCache(JsonObject facts, String summary, JsonObject suggestions,
@@ -34,7 +36,8 @@ public record ReviewResult(
         array(suggestions, "highlights"),
         array(suggestions, "risks"),
         array(suggestions, "nextActions"),
-        generatedAt);
+        generatedAt,
+        !suggestions.has("aiGenerated") || suggestions.get("aiGenerated").getAsBoolean());
   }
 
   public static ReviewResult fallback(JsonObject facts, String generatedAt) {
@@ -56,7 +59,7 @@ public record ReviewResult(
     nextActions.add(completed == 0 ? "选择一项 30 分钟内可完成的任务并开始" : "从未完成事项中确认明天最重要的一项");
     if (delayed + blocked > 0) nextActions.add("逐项补充延期或阻塞原因");
     return new ReviewResult(text(facts, "date", LocalDate.now().toString()), facts, summary,
-        highlights, risks, nextActions, generatedAt);
+        highlights, risks, nextActions, generatedAt, false);
   }
 
   public JsonObject suggestions() {
@@ -64,6 +67,7 @@ public record ReviewResult(
     value.add("highlights", highlights.deepCopy());
     value.add("risks", risks.deepCopy());
     value.add("nextActions", nextActions.deepCopy());
+    value.addProperty("aiGenerated", aiGenerated);
     return value;
   }
 
@@ -76,6 +80,7 @@ public record ReviewResult(
     value.add("risks", risks.deepCopy());
     value.add("nextActions", nextActions.deepCopy());
     value.addProperty("generatedAt", generatedAt);
+    value.addProperty("aiGenerated", aiGenerated);
     return value;
   }
 

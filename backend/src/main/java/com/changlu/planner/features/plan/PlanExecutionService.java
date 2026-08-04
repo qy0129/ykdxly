@@ -12,11 +12,14 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.DayOfWeek;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.util.HashSet;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 
 /** Deterministic plan execution rules shared by HTTP, AI and channel adapters. */
@@ -27,7 +30,10 @@ public final class PlanExecutionService {
   public PlanExecutionService(Database database) { this.database = database; }
 
   public JsonArray listTasks(UUID planId, Database.Context context) throws SQLException {
-    String sql = "SELECT t.* FROM plan_tasks t JOIN plans p ON p.id = t.plan_id "
+    String sql = "SELECT t.*, COALESCE(occ.total_count,0) schedule_count, COALESCE(occ.done_count,0) completed_schedule_count "
+        + "FROM plan_tasks t JOIN plans p ON p.id = t.plan_id "
+        + "LEFT JOIN (SELECT task_id,COUNT(*) total_count,SUM(status='done') done_count FROM schedule_items "
+        + "WHERE deleted_at IS NULL AND source_type='task_recurrence' AND status<>'cancelled' GROUP BY task_id) occ ON occ.task_id=t.id "
         + "WHERE t.plan_id = ? AND p.workspace_id = ? AND t.deleted_at IS NULL AND p.deleted_at IS NULL "
         + "ORDER BY t.stage_id, t.sort_order, t.created_at";
     JsonArray rows = new JsonArray();
@@ -44,6 +50,12 @@ public final class PlanExecutionService {
       appendTrash(c, rows, "plan", "plans", context.workspaceId());
       appendTrash(c, rows, "todo", "todos", context.workspaceId());
       appendTrash(c, rows, "schedule", "schedule_items", context.workspaceId());
+      try (PreparedStatement p = c.prepareStatement(
+          "SELECT s.id, s.title, s.deleted_at, s.purge_after FROM plan_stages s JOIN plans p ON p.id = s.plan_id "
+              + "WHERE p.workspace_id = ? AND s.deleted_at IS NOT NULL ORDER BY s.deleted_at DESC")) {
+        p.setBytes(1, Database.uuidBytes(context.workspaceId()));
+        try (ResultSet rs = p.executeQuery()) { while (rs.next()) rows.add(trashRow(rs, "stage")); }
+      }
       try (PreparedStatement p = c.prepareStatement(
           "SELECT t.id, t.title, t.deleted_at, t.purge_after FROM plan_tasks t JOIN plans p ON p.id = t.plan_id "
               + "WHERE p.workspace_id = ? AND t.deleted_at IS NOT NULL ORDER BY t.deleted_at DESC")) {
@@ -150,14 +162,31 @@ public final class PlanExecutionService {
                                UUID draftId, UUID changeSetId, String source) throws SQLException {
     UUID stageId = UUID.fromString(required(fields, "stageId"));
     requireStage(c, context.workspaceId(), planId, stageId);
+    String recurrenceType = string(fields, "recurrenceType", "once");
+    LocalDate scheduleStart = localDate(fields, "scheduleStartDate");
+    LocalDate recurrenceEnd = localDate(fields, "recurrenceEndDate");
+    LocalTime scheduledTime = localTime(fields, "scheduledTime");
+    if (scheduleStart != null || recurrenceEnd != null || scheduledTime != null || fields.has("recurrenceType")) {
+      if (scheduledTime == null) throw new IllegalArgumentException("请选择执行时间");
+      TaskRecurrence.dates(recurrenceType, scheduleStart, recurrenceEnd);
+      if ("once".equals(recurrenceType)) recurrenceEnd = scheduleStart;
+    }
     UUID id = UUID.randomUUID();
-    String sql = "INSERT INTO plan_tasks (id, plan_id, stage_id, title, description, status, priority, estimated_minutes, due_at, sort_order) "
-        + "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)";
+    String sql = "INSERT INTO plan_tasks (id, plan_id, stage_id, title, description, status, priority, estimated_minutes, due_at, "
+        + "recurrence_type, schedule_start_date, recurrence_end_date, scheduled_time, sort_order) "
+        + "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)";
     try (PreparedStatement p = c.prepareStatement(sql)) {
       p.setBytes(1, Database.uuidBytes(id)); p.setBytes(2, Database.uuidBytes(planId)); p.setBytes(3, Database.uuidBytes(stageId));
       p.setString(4, required(fields, "title")); p.setString(5, nullable(fields, "description")); p.setString(6, priority(fields));
-      setInteger(p, 7, optionalInt(fields, "estimatedMinutes")); p.setObject(8, timestamp(fields, "dueAt")); p.setInt(9, intValue(fields, "sortOrder", 0));
+      setInteger(p, 7, optionalInt(fields, "estimatedMinutes")); p.setObject(8, timestamp(fields, "dueAt"));
+      p.setString(9, recurrenceType); p.setObject(10, sqlDate(scheduleStart)); p.setObject(11, sqlDate(recurrenceEnd));
+      p.setObject(12, scheduledTime == null ? null : java.sql.Time.valueOf(scheduledTime)); p.setInt(13, intValue(fields, "sortOrder", 0));
       p.executeUpdate();
+    }
+    if (scheduleStart != null) {
+      replacePendingTaskSchedules(c, context, id, planId, stageId, required(fields, "title"),
+          intValue(fields, "estimatedMinutes", 60), recurrenceType, scheduleStart, recurrenceEnd, scheduledTime,
+          draftId, changeSetId);
     }
     recomputeProgress(c, planId);
     JsonObject after = task(c, context.workspaceId(), id, false);
@@ -186,19 +215,38 @@ public final class PlanExecutionService {
     if ("done".equals(before.get("status").getAsString()) && "done".equals(status)) return before;
     String sql = "UPDATE plan_tasks SET title = COALESCE(?, title), description = COALESCE(?, description), "
         + "status = COALESCE(?, status), priority = COALESCE(?, priority), estimated_minutes = COALESCE(?, estimated_minutes), "
-        + "actual_minutes = COALESCE(?, actual_minutes), due_at = COALESCE(?, due_at), "
+        + "actual_minutes = COALESCE(?, actual_minutes), due_at = COALESCE(?, due_at), recurrence_type = COALESCE(?, recurrence_type), "
+        + "schedule_start_date = COALESCE(?, schedule_start_date), recurrence_end_date = COALESCE(?, recurrence_end_date), scheduled_time = COALESCE(?, scheduled_time), "
         + "blocked_reason = CASE WHEN ? = 'blocked' THEN ? WHEN ? IS NOT NULL AND ? <> 'blocked' THEN NULL ELSE blocked_reason END, "
         + "completed_at = CASE WHEN ? = 'done' THEN NOW() WHEN ? IS NOT NULL AND ? <> 'done' THEN NULL ELSE completed_at END, version = version + 1 "
         + "WHERE id = ? AND version = ? AND deleted_at IS NULL AND plan_id IN (SELECT id FROM plans WHERE workspace_id = ? AND deleted_at IS NULL)";
     try (PreparedStatement p = c.prepareStatement(sql)) {
       p.setString(1, nullable(fields, "title")); p.setString(2, nullable(fields, "description")); p.setString(3, status);
       p.setString(4, nullable(fields, "priority")); setInteger(p, 5, optionalInt(fields, "estimatedMinutes")); setInteger(p, 6, optionalInt(fields, "actualMinutes"));
-      p.setObject(7, timestamp(fields, "dueAt")); p.setString(8, status); p.setString(9, nullable(fields, "reason")); p.setString(10, status); p.setString(11, status);
-      p.setString(12, status); p.setString(13, status); p.setString(14, status);
-      p.setBytes(15, Database.uuidBytes(taskId)); p.setInt(16, expected); p.setBytes(17, Database.uuidBytes(context.workspaceId()));
+      p.setObject(7, timestamp(fields, "dueAt")); p.setString(8, nullable(fields, "recurrenceType"));
+      p.setObject(9, sqlDate(localDate(fields, "scheduleStartDate"))); p.setObject(10, sqlDate(localDate(fields, "recurrenceEndDate")));
+      LocalTime requestedTime = localTime(fields, "scheduledTime");
+      p.setObject(11, requestedTime == null ? null : java.sql.Time.valueOf(requestedTime));
+      p.setString(12, status); p.setString(13, nullable(fields, "reason")); p.setString(14, status); p.setString(15, status);
+      p.setString(16, status); p.setString(17, status); p.setString(18, status);
+      p.setBytes(19, Database.uuidBytes(taskId)); p.setInt(20, expected); p.setBytes(21, Database.uuidBytes(context.workspaceId()));
       if (p.executeUpdate() == 0) throw new IllegalStateException("task_version_conflict");
     }
     JsonObject after = task(c, context.workspaceId(), taskId, false);
+    if (hasSchedulingFields(fields)) {
+      String recurrenceType = string(after, "recurrenceType", "once");
+      LocalDate scheduleStart = localDate(after, "scheduleStartDate");
+      LocalDate recurrenceEnd = localDate(after, "recurrenceEndDate");
+      LocalTime scheduledTime = localTime(after, "scheduledTime");
+      if (scheduledTime == null) throw new IllegalArgumentException("请选择执行时间");
+      TaskRecurrence.dates(recurrenceType, scheduleStart, recurrenceEnd);
+      replacePendingTaskSchedules(c, context, taskId,
+          UUID.fromString(after.get("planId").getAsString()), UUID.fromString(after.get("stageId").getAsString()),
+          after.get("title").getAsString(), after.get("estimatedMinutes").isJsonNull() ? 60 : after.get("estimatedMinutes").getAsInt(),
+          recurrenceType, scheduleStart, recurrenceEnd, scheduledTime, draftId, changeSetId);
+      syncLinkedTask(c, context.workspaceId(), taskId);
+      after = task(c, context.workspaceId(), taskId, false);
+    }
     UUID planId = UUID.fromString(after.get("planId").getAsString());
     String action = string(fields, "actionType", status == null ? "update_task" : status + "_task");
     record(c, context, draftId, changeSetId, "plan_task", taskId, action, before, after,
@@ -216,6 +264,12 @@ public final class PlanExecutionService {
           p.setBytes(1, Database.uuidBytes(taskId)); p.setInt(2, expectedVersion); p.setBytes(3, Database.uuidBytes(context.workspaceId()));
           if (p.executeUpdate() == 0) throw new IllegalStateException("task_version_conflict");
         }
+        // 未完成的自动安排和任务一起进入回收站，已完成记录继续保留用于复盘。
+        try (PreparedStatement p = c.prepareStatement(
+            "UPDATE schedule_items SET deleted_at=NOW(),purge_after=DATE_ADD(NOW(),INTERVAL 30 DAY),version=version+1 "
+                + "WHERE task_id=? AND source_type='task_recurrence' AND status<>'done' AND deleted_at IS NULL")) {
+          p.setBytes(1, Database.uuidBytes(taskId)); p.executeUpdate();
+        }
         JsonObject after = task(c, context.workspaceId(), taskId, true);
         record(c, context, null, UUID.randomUUID(), "plan_task", taskId, "delete_task", before, after, "移入回收站", source, null, after.get("version").getAsInt());
         recomputeProgress(c, UUID.fromString(before.get("planId").getAsString())); c.commit(); return after;
@@ -232,6 +286,11 @@ public final class PlanExecutionService {
         try (PreparedStatement p = c.prepareStatement("UPDATE plan_tasks SET deleted_at = NULL, purge_after = NULL, version = version + 1 WHERE id = ? AND deleted_at IS NOT NULL AND plan_id IN (SELECT id FROM plans WHERE workspace_id = ?)")) {
           p.setBytes(1, Database.uuidBytes(taskId)); p.setBytes(2, Database.uuidBytes(context.workspaceId()));
           if (p.executeUpdate() == 0) throw new IllegalArgumentException("task_not_in_trash");
+        }
+        try (PreparedStatement p = c.prepareStatement(
+            "UPDATE schedule_items SET deleted_at=NULL,purge_after=NULL,version=version+1 "
+                + "WHERE task_id=? AND source_type='task_recurrence' AND deleted_at IS NOT NULL")) {
+          p.setBytes(1, Database.uuidBytes(taskId)); p.executeUpdate();
         }
         JsonObject after = task(c, context.workspaceId(), taskId, false);
         record(c, context, null, UUID.randomUUID(), "plan_task", taskId, "restore_task", before, after, "从回收站恢复", source, null, after.get("version").getAsInt());
@@ -312,7 +371,7 @@ public final class PlanExecutionService {
     }
     JsonObject after = schedule(c, context.workspaceId(), scheduleId, false);
     if (status != null && after.has("taskId") && !after.get("taskId").isJsonNull()) {
-      syncLinkedTask(c, context.workspaceId(), UUID.fromString(after.get("taskId").getAsString()), "done".equals(status));
+      syncLinkedTask(c, context.workspaceId(), UUID.fromString(after.get("taskId").getAsString()));
     }
     String action = string(fields, "actionType", status == null ? "update_schedule" : status + "_schedule");
     record(c, context, draftId, changeSetId, "schedule", scheduleId, action, before, after,
@@ -331,18 +390,85 @@ public final class PlanExecutionService {
     }
   }
 
-  private void syncLinkedTask(Connection c, UUID workspaceId, UUID taskId, boolean done) throws SQLException {
-    String status = done ? "done" : "pending";
-    try (PreparedStatement p = c.prepareStatement(
-        "UPDATE plan_tasks t JOIN plans p ON p.id=t.plan_id SET t.status=?, "
-            + "t.completed_at=CASE WHEN ?='done' THEN COALESCE(t.completed_at,NOW()) ELSE NULL END, "
-            + "t.version=t.version+1 WHERE t.id=? AND p.workspace_id=? AND t.deleted_at IS NULL")) {
-      p.setString(1, status); p.setString(2, status); p.setBytes(3, Database.uuidBytes(taskId)); p.setBytes(4, Database.uuidBytes(workspaceId));
-      if (p.executeUpdate() > 0) {
-        try (PreparedStatement plan = c.prepareStatement("SELECT plan_id FROM plan_tasks WHERE id=?")) {
-          plan.setBytes(1, Database.uuidBytes(taskId));
-          try (ResultSet rs = plan.executeQuery()) { if (rs.next()) recomputeProgress(c, Database.bytesUuid(rs.getBytes(1))); }
+  /** 恢复阶段时保留其原有任务，并重新计算所属计划的真实任务进度。 */
+  public JsonObject restoreStage(Database.Context context, UUID stageId, String source) throws SQLException {
+    try (Connection c = database.connection()) {
+      c.setAutoCommit(false);
+      try {
+        JsonObject before = stage(c, context.workspaceId(), stageId, true);
+        UUID planId = UUID.fromString(before.get("planId").getAsString());
+        try (PreparedStatement p = c.prepareStatement(
+            "UPDATE plan_stages s JOIN plans p ON p.id=s.plan_id "
+                + "SET s.deleted_at=NULL,s.purge_after=NULL,s.version=s.version+1 "
+                + "WHERE s.id=? AND s.deleted_at IS NOT NULL AND p.workspace_id=? AND p.deleted_at IS NULL")) {
+          p.setBytes(1, Database.uuidBytes(stageId));
+          p.setBytes(2, Database.uuidBytes(context.workspaceId()));
+          if (p.executeUpdate() == 0) throw new IllegalArgumentException("stage_not_in_trash");
         }
+        JsonObject after = stage(c, context.workspaceId(), stageId, false);
+        record(c, context, null, UUID.randomUUID(), "plan_stage", stageId, "restore_stage",
+            before, after, "从回收站恢复", source, null, after.get("version").getAsInt());
+        recomputeProgress(c, planId);
+        c.commit();
+        return after;
+      } catch (Exception error) {
+        c.rollback();
+        throw error;
+      } finally {
+        c.setAutoCommit(true);
+      }
+    }
+  }
+
+  /** 已完成安排保留为事实记录，只替换尚未执行的自动安排。 */
+  private void replacePendingTaskSchedules(Connection c, Database.Context context, UUID taskId, UUID planId,
+                                           UUID stageId, String title, int durationMinutes, String recurrenceType,
+                                           LocalDate scheduleStart, LocalDate recurrenceEnd, LocalTime scheduledTime,
+                                           UUID draftId, UUID changeSetId) throws SQLException {
+    List<LocalDate> dates = TaskRecurrence.dates(recurrenceType, scheduleStart, recurrenceEnd);
+    Set<LocalDate> completedDates = new HashSet<>();
+    try (PreparedStatement p = c.prepareStatement(
+        "SELECT DATE(start_at) completed_date FROM schedule_items WHERE task_id=? "
+            + "AND source_type='task_recurrence' AND status='done' AND deleted_at IS NULL")) {
+      p.setBytes(1, Database.uuidBytes(taskId));
+      try (ResultSet rs = p.executeQuery()) {
+        while (rs.next()) completedDates.add(rs.getDate("completed_date").toLocalDate());
+      }
+    }
+    try (PreparedStatement p = c.prepareStatement(
+        "DELETE FROM schedule_items WHERE task_id=? AND source_type='task_recurrence' AND status<>'done'")) {
+      p.setBytes(1, Database.uuidBytes(taskId)); p.executeUpdate();
+    }
+    for (LocalDate date : dates) {
+      if (completedDates.contains(date)) continue;
+      JsonObject schedule = new JsonObject();
+      schedule.addProperty("title", title);
+      schedule.addProperty("startAt", date.atTime(scheduledTime).toString());
+      schedule.addProperty("durationMinutes", Math.max(1, durationMinutes));
+      schedule.addProperty("planId", planId.toString());
+      schedule.addProperty("stageId", stageId.toString());
+      schedule.addProperty("taskId", taskId.toString());
+      schedule.addProperty("reason", "按任务频率自动排期");
+      createSchedule(c, context, schedule, draftId, changeSetId, "task_recurrence", false);
+    }
+  }
+
+  private void syncLinkedTask(Connection c, UUID workspaceId, UUID taskId) throws SQLException {
+    String summarySql = "SELECT t.plan_id,COUNT(s.id) total_count,COALESCE(SUM(s.status='done'),0) done_count "
+        + "FROM plan_tasks t JOIN plans p ON p.id=t.plan_id LEFT JOIN schedule_items s ON s.task_id=t.id "
+        + "AND s.source_type='task_recurrence' AND s.deleted_at IS NULL AND s.status<>'cancelled' "
+        + "WHERE t.id=? AND p.workspace_id=? AND t.deleted_at IS NULL GROUP BY t.plan_id";
+    try (PreparedStatement summary = c.prepareStatement(summarySql)) {
+      summary.setBytes(1, Database.uuidBytes(taskId)); summary.setBytes(2, Database.uuidBytes(workspaceId));
+      try (ResultSet rs = summary.executeQuery()) {
+        if (!rs.next() || rs.getInt("total_count") == 0) return;
+        int total = rs.getInt("total_count"), done = rs.getInt("done_count");
+        String status = done == total ? "done" : done > 0 ? "in_progress" : "pending";
+        try (PreparedStatement update = c.prepareStatement(
+            "UPDATE plan_tasks SET status=?,completed_at=CASE WHEN ?='done' THEN COALESCE(completed_at,NOW()) ELSE NULL END,version=version+1 WHERE id=?")) {
+          update.setString(1, status); update.setString(2, status); update.setBytes(3, Database.uuidBytes(taskId)); update.executeUpdate();
+        }
+        recomputeProgress(c, Database.bytesUuid(rs.getBytes("plan_id")));
       }
     }
   }
@@ -402,18 +528,27 @@ public final class PlanExecutionService {
   }
 
   public void recomputeProgress(Connection c, UUID planId) throws SQLException {
+    String occurrenceJoin = " LEFT JOIN (SELECT task_id,COUNT(*) total_count,SUM(status='done') done_count FROM schedule_items "
+        + "WHERE deleted_at IS NULL AND source_type='task_recurrence' AND status<>'cancelled' GROUP BY task_id) occ ON occ.task_id=t.id ";
+    String completedUnits = "CASE WHEN t.status='done' THEN IF(COALESCE(occ.total_count,0)>0,occ.total_count,1) "
+        + "WHEN COALESCE(occ.total_count,0)>0 THEN occ.done_count ELSE 0 END";
+    String totalUnits = "CASE WHEN COALESCE(occ.total_count,0)>0 THEN occ.total_count ELSE 1 END";
     String stageSql = "UPDATE plan_stages s LEFT JOIN (SELECT t.stage_id, "
-        + "100 * SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) task_pct, "
-        + "100 * SUM(CASE WHEN t.status = 'done' THEN COALESCE(t.estimated_minutes,0) ELSE 0 END) / NULLIF(SUM(COALESCE(t.estimated_minutes,0)), 0) effort_pct "
+        + "100 * SUM(" + completedUnits + ") / NULLIF(SUM(" + totalUnits + "), 0) task_pct, "
+        + "100 * SUM((" + completedUnits + ") * COALESCE(t.estimated_minutes,0)) "
+        + "/ NULLIF(SUM((" + totalUnits + ") * COALESCE(t.estimated_minutes,0)), 0) effort_pct "
         + "FROM plan_tasks t JOIN plan_stages active_stage ON active_stage.id=t.stage_id AND active_stage.deleted_at IS NULL "
+        + occurrenceJoin
         + "WHERE t.plan_id = ? AND t.deleted_at IS NULL AND t.status <> 'cancelled' GROUP BY t.stage_id) x ON x.stage_id = s.id "
         + "SET s.task_progress = COALESCE(x.task_pct, 0), s.effort_progress = COALESCE(x.effort_pct, 0), s.progress = COALESCE(x.task_pct, 0) "
         + "WHERE s.plan_id = ? AND s.deleted_at IS NULL AND EXISTS (SELECT 1 FROM plan_tasks history WHERE history.stage_id=s.id)";
     try (PreparedStatement p = c.prepareStatement(stageSql)) { p.setBytes(1, Database.uuidBytes(planId)); p.setBytes(2, Database.uuidBytes(planId)); p.executeUpdate(); }
     String planSql = "UPDATE plans p LEFT JOIN (SELECT t.plan_id, "
-        + "100 * SUM(CASE WHEN t.status = 'done' THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0) task_pct, "
-        + "100 * SUM(CASE WHEN t.status = 'done' THEN COALESCE(t.estimated_minutes,0) ELSE 0 END) / NULLIF(SUM(COALESCE(t.estimated_minutes,0)), 0) effort_pct "
+        + "100 * SUM(" + completedUnits + ") / NULLIF(SUM(" + totalUnits + "), 0) task_pct, "
+        + "100 * SUM((" + completedUnits + ") * COALESCE(t.estimated_minutes,0)) "
+        + "/ NULLIF(SUM((" + totalUnits + ") * COALESCE(t.estimated_minutes,0)), 0) effort_pct "
         + "FROM plan_tasks t JOIN plan_stages active_stage ON active_stage.id=t.stage_id AND active_stage.deleted_at IS NULL "
+        + occurrenceJoin
         + "WHERE t.plan_id = ? AND t.deleted_at IS NULL AND t.status <> 'cancelled' GROUP BY t.plan_id) x ON x.plan_id = p.id "
         + "SET p.task_progress = COALESCE(x.task_pct, 0), p.effort_progress = COALESCE(x.effort_pct, 0), p.progress = COALESCE(x.task_pct, 0) "
         + "WHERE p.id = ? AND p.deleted_at IS NULL AND EXISTS (SELECT 1 FROM plan_tasks history WHERE history.plan_id=p.id)";
@@ -421,7 +556,11 @@ public final class PlanExecutionService {
   }
 
   private JsonObject task(Connection c, UUID workspaceId, UUID taskId, boolean includeDeleted) throws SQLException {
-    String sql = "SELECT t.* FROM plan_tasks t JOIN plans p ON p.id = t.plan_id WHERE t.id = ? AND p.workspace_id = ?" + (includeDeleted ? "" : " AND t.deleted_at IS NULL AND p.deleted_at IS NULL");
+    String sql = "SELECT t.*,COALESCE(occ.total_count,0) schedule_count,COALESCE(occ.done_count,0) completed_schedule_count "
+        + "FROM plan_tasks t JOIN plans p ON p.id=t.plan_id "
+        + "LEFT JOIN (SELECT task_id,COUNT(*) total_count,SUM(status='done') done_count FROM schedule_items "
+        + "WHERE deleted_at IS NULL AND source_type='task_recurrence' AND status<>'cancelled' GROUP BY task_id) occ ON occ.task_id=t.id "
+        + "WHERE t.id = ? AND p.workspace_id = ?" + (includeDeleted ? "" : " AND t.deleted_at IS NULL AND p.deleted_at IS NULL");
     try (PreparedStatement p = c.prepareStatement(sql)) {
       p.setBytes(1, Database.uuidBytes(taskId)); p.setBytes(2, Database.uuidBytes(workspaceId));
       try (ResultSet rs = p.executeQuery()) { if (!rs.next()) throw new IllegalArgumentException("task_not_found"); return taskRow(rs); }
@@ -468,8 +607,16 @@ public final class PlanExecutionService {
   private JsonObject taskRow(ResultSet rs) throws SQLException {
     JsonObject row = new JsonObject(); row.addProperty("id", Database.id(rs, "id")); row.addProperty("planId", Database.id(rs, "plan_id")); row.addProperty("stageId", Database.id(rs, "stage_id"));
     row.addProperty("title", rs.getString("title")); row.addProperty("description", rs.getString("description")); row.addProperty("status", rs.getString("status")); row.addProperty("priority", rs.getString("priority"));
-    row.addProperty("estimatedMinutes", (Integer) rs.getObject("estimated_minutes")); row.addProperty("actualMinutes", (Integer) rs.getObject("actual_minutes"));
+    row.addProperty("estimatedMinutes", (Number) rs.getObject("estimated_minutes")); row.addProperty("actualMinutes", (Number) rs.getObject("actual_minutes"));
     row.addProperty("dueAt", rs.getTimestamp("due_at") == null ? null : rs.getTimestamp("due_at").toLocalDateTime().toString());
+    row.addProperty("recurrenceType", rs.getString("recurrence_type"));
+    row.addProperty("scheduleStartDate", rs.getDate("schedule_start_date") == null ? null : rs.getDate("schedule_start_date").toString());
+    row.addProperty("recurrenceEndDate", rs.getDate("recurrence_end_date") == null ? null : rs.getDate("recurrence_end_date").toString());
+    row.addProperty("scheduledTime", rs.getTime("scheduled_time") == null ? null : rs.getTime("scheduled_time").toLocalTime().toString());
+    int scheduleCount = rs.getInt("schedule_count"), completedScheduleCount = rs.getInt("completed_schedule_count");
+    row.addProperty("scheduleCount", scheduleCount); row.addProperty("completedScheduleCount", completedScheduleCount);
+    row.addProperty("scheduleProgress", scheduleCount == 0 ? ("done".equals(rs.getString("status")) ? 100 : 0)
+        : Math.round(100.0 * completedScheduleCount / scheduleCount));
     row.addProperty("completedAt", rs.getTimestamp("completed_at") == null ? null : rs.getTimestamp("completed_at").toLocalDateTime().toString());
     row.addProperty("reason", rs.getString("blocked_reason")); row.addProperty("sortOrder", rs.getInt("sort_order")); row.addProperty("version", rs.getInt("version"));
     row.addProperty("deletedAt", rs.getTimestamp("deleted_at") == null ? null : rs.getTimestamp("deleted_at").toLocalDateTime().toString()); return row;
@@ -547,6 +694,17 @@ public final class PlanExecutionService {
   }
 
   private String dayKey(DayOfWeek day) { return day.name().toLowerCase(Locale.ROOT); }
+  private boolean hasSchedulingFields(JsonObject value) {
+    return value.has("recurrenceType") || value.has("scheduleStartDate")
+        || value.has("recurrenceEndDate") || value.has("scheduledTime");
+  }
+  private LocalDate localDate(JsonObject value, String name) {
+    String text = nullable(value, name); return text == null || text.isBlank() ? null : LocalDate.parse(text);
+  }
+  private LocalTime localTime(JsonObject value, String name) {
+    String text = nullable(value, name); return text == null || text.isBlank() ? null : LocalTime.parse(text);
+  }
+  private java.sql.Date sqlDate(LocalDate value) { return value == null ? null : java.sql.Date.valueOf(value); }
   private java.sql.Date date(JsonObject value, String name) { String text = nullable(value, name); return text == null || text.isBlank() ? null : java.sql.Date.valueOf(text); }
   private UUID uuid(JsonObject value, String name) { String text = nullable(value, name); return text == null || text.isBlank() ? null : UUID.fromString(text); }
   private byte[] bytes(UUID value) { return value == null ? null : Database.uuidBytes(value); }

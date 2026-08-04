@@ -1,10 +1,8 @@
-import type { CalendarItem, Note, Plan, PlanItem, PlanTask, ScheduleMaterialsResponse, TodoItem } from '../types/planner'
+import type { CalendarItem, Note, Plan, PlanItem, PlanTask, ScheduleMaterialsResponse, TaskRecurrenceType, TodoItem } from '../types/planner'
 
 const DEV_PORTS = new Set(['4173', '5173'])
 const API_BASE = import.meta.env.VITE_API_BASE_URL
-  ?? (DEV_PORTS.has(window.location.port)
-    ? `${window.location.protocol}//${window.location.hostname}:8081/api`
-    : `${window.location.origin}/api`)
+  ?? (DEV_PORTS.has(window.location.port) ? '/api' : `${window.location.origin}/api`)
 
 interface ApiPlan {
   id: string
@@ -53,6 +51,13 @@ interface ApiTask {
   estimatedMinutes?: number | null
   actualMinutes?: number | null
   dueAt?: string | null
+  recurrenceType: TaskRecurrenceType
+  scheduleStartDate?: string | null
+  recurrenceEndDate?: string | null
+  scheduledTime?: string | null
+  scheduleCount: number
+  completedScheduleCount: number
+  scheduleProgress: number
   reason?: string | null
   version: number
 }
@@ -136,13 +141,32 @@ export interface AiCommandResponse {
   draft?: AiDraft
 }
 
-export interface AgentRunResponse extends AiCommandResponse {
+export type AgentRunStatus = 'RUNNING' | 'WAITING_USER' | 'WAITING_CONFIRMATION' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+
+export interface AgentRunResponse {
   runId: string
-  status: 'RUNNING' | 'WAITING_USER' | 'WAITING_CONFIRMATION' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
+  conversationId: string
+  status: AgentRunStatus
   iteration: number
-  executorType: 'tool' | 'subagent'
-  executorName: string
+  reply?: string
+  questions?: string[]
+  actions?: AiDraftAction[]
+  draft?: AiDraft
+  executorType?: 'tool' | 'subagent'
+  executorName?: string
+  lastError?: string
   report?: ReviewReport
+}
+
+export interface AgentDocument {
+  id: string
+  fileName: string
+  extension: string
+  extractedChars: number
+  chunkCount: number
+  vectorIndexed: boolean
+  duplicate: boolean
+  preview: string
 }
 
 export interface AiSession {
@@ -151,6 +175,37 @@ export interface AiSession {
   runStatus?: AgentRunResponse['status']
   messages: Array<{ role: 'user' | 'assistant'; content: string; createdAt: string }>
   draft?: AiDraft
+}
+
+export interface AiConversation {
+  id: string
+  title: string
+  sourceChannel: string
+  lastMessage?: string | null
+  messageCount: number
+  hasPendingDraft: boolean
+  runId?: string
+  runStatus?: AgentRunStatus
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AiConversationDetail extends AiSession {
+  conversationId: string
+  title: string
+  sourceChannel: string
+  contextSummary?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AiMemory {
+  id: string
+  key: string
+  category: 'preference' | 'personality' | 'communication_style' | 'long_term_goal' | 'constraint' | 'personal_fact'
+  content: string
+  createdAt: string
+  updatedAt: string
 }
 
 export interface PlanningPreference {
@@ -181,6 +236,7 @@ export interface ReviewReport {
   risks: string[]
   nextActions: string[]
   generatedAt: string
+  aiGenerated: boolean
 }
 
 export interface UserProfile {
@@ -188,12 +244,26 @@ export interface UserProfile {
   avatarUrl: string
 }
 
+export interface TrashItem {
+  id: string
+  type: 'plan' | 'stage' | 'task' | 'todo' | 'schedule'
+  title: string
+  deletedAt: string
+  purgeAfter?: string | null
+}
+
 /** 所有 JSON 请求统一经过这里，避免各功能页面重复处理状态码和请求头。 */
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(API_BASE + path, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
-  })
+  let response: Response
+  try {
+    response = await fetch(API_BASE + path, {
+      ...init,
+      headers: { 'Content-Type': 'application/json', ...init?.headers },
+    })
+  } catch (cause) {
+    const detail = cause instanceof Error && cause.message !== 'Failed to fetch' ? `（${cause.message}）` : ''
+    throw new Error(`无法连接后端服务，请确认服务已启动${detail}`)
+  }
   if (!response.ok) {
     let payload: { message?: string; error?: string } | undefined
     try { payload = await response.json() as { message?: string; error?: string } }
@@ -242,22 +312,25 @@ function reminderFromMinutes(value: ApiTodo['reminderMinutes']): TodoItem['remin
 }
 
 function todoDueAt(item: TodoItem) {
-  return item.date && item.time ? `${item.date}T${item.time}:00` : null
+  const time = item.time === '未安排' ? '' : item.time
+  return item.date && time ? `${item.date}T${time}:00` : null
 }
 
 export const plannerApi = {
   async load() {
-    const [plansValue, schedulesValue, todosValue, notesValue, stats] = await Promise.all([
+    const [plansValue, schedulesValue, todosValue, notesValue, trashValue, stats] = await Promise.all([
       request<unknown>('/plans'),
       request<unknown>('/schedules'),
       request<unknown>('/todos'),
       request<unknown>('/notes'),
+      request<unknown>('/trash'),
       request<PlannerStats>('/stats'),
     ])
     const rawPlans = requireArray<ApiPlan>(plansValue, '/plans')
     const rawSchedules = requireArray<ApiSchedule>(schedulesValue, '/schedules')
     const rawTodos = requireArray<ApiTodo>(todosValue, '/todos')
     const rawNotes = requireArray<ApiNote>(notesValue, '/notes')
+    const trash = requireArray<TrashItem>(trashValue, '/trash')
     const [stages, tasks] = await Promise.all([
       Promise.all(rawPlans.map(async (item) => requireArray<ApiStage>(await request<unknown>(`/plans/${item.id}/stages`), `/plans/${item.id}/stages`))),
       Promise.all(rawPlans.map(async (item) => requireArray<ApiTask>(await request<unknown>(`/plans/${item.id}/tasks`), `/plans/${item.id}/tasks`))),
@@ -279,7 +352,17 @@ export const plannerApi = {
       items: stages[index].map((stage) => ({
         id: stage.id, title: stage.title, progress: Math.round(stage.progress), taskProgress: Math.round(stage.taskProgress),
         effortProgress: Math.round(stage.effortProgress), dueLabel: stage.dueLabel, version: stage.version,
-        tasks: tasks[index].filter((task) => task.stageId === stage.id).map((task) => ({ ...task, description: task.description ?? undefined, estimatedMinutes: task.estimatedMinutes ?? undefined, actualMinutes: task.actualMinutes ?? undefined, dueAt: task.dueAt ?? undefined, reason: task.reason ?? undefined })),
+        tasks: tasks[index].filter((task) => task.stageId === stage.id).map((task) => ({
+          ...task,
+          description: task.description ?? undefined,
+          estimatedMinutes: task.estimatedMinutes ?? undefined,
+          actualMinutes: task.actualMinutes ?? undefined,
+          dueAt: task.dueAt ?? undefined,
+          scheduleStartDate: task.scheduleStartDate ?? undefined,
+          recurrenceEndDate: task.recurrenceEndDate ?? undefined,
+          scheduledTime: task.scheduledTime?.slice(0, 5) ?? undefined,
+          reason: task.reason ?? undefined,
+        })),
       })),
     }))
     const schedules: CalendarItem[] = rawSchedules.map((item) => {
@@ -291,7 +374,7 @@ export const plannerApi = {
       return { id: item.id, title: item.title, date: when.date, time: when.time, priority: priorityFromApi(item.priority), done: item.status === 'done', reminder: reminderFromMinutes(item.reminderMinutes), version: item.version }
     })
     const notes: Note[] = rawNotes.map((item, index) => ({ id: item.id, title: item.title, category: item.category || '未分类', excerpt: item.excerpt || item.content, content: item.content || item.excerpt, updatedAt: '刚刚', color: '#d39a24', relatedIds: relations[index].map((relation) => relation.id), source: item.sourceType === 'manual' ? '个人创建' : item.sourceType }))
-    return { plans, schedules, todos, notes, stats }
+    return { plans, schedules, todos, notes, trash, stats }
   },
 
   loadDueReminders: () => request<TodoReminder[]>('/reminders/due'),
@@ -313,10 +396,27 @@ export const plannerApi = {
   updatePlanStage: (planId: string, item: PlanItem) => request<ApiStage>(`/plans/${planId}/stages/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, dueLabel: item.dueLabel, expectedVersion: item.version }) }),
   deletePlanStage: (planId: string, id: string, expectedVersion: number) => request<void>(`/plans/${planId}/stages/${id}`, { method: 'DELETE', body: JSON.stringify({ expectedVersion }) }),
 
-  createTask: (item: Omit<PlanTask, 'id' | 'version' | 'status'>) => request<ApiTask>('/tasks', { method: 'POST', body: JSON.stringify(item) }),
-  updateTask: (item: PlanTask) => request<ApiTask>(`/tasks/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, description: item.description, priority: item.priority, estimatedMinutes: item.estimatedMinutes, actualMinutes: item.actualMinutes, dueAt: item.dueAt, reason: item.reason, expectedVersion: item.version }) }),
+  createTask: (item: Omit<PlanTask, 'id' | 'version' | 'status' | 'scheduleCount' | 'completedScheduleCount' | 'scheduleProgress'>) => request<ApiTask>('/tasks', { method: 'POST', body: JSON.stringify(item) }),
+  updateTask: (item: PlanTask) => request<ApiTask>(`/tasks/${item.id}`, { method: 'PUT', body: JSON.stringify({
+    title: item.title,
+    description: item.description,
+    priority: item.priority,
+    estimatedMinutes: item.estimatedMinutes,
+    actualMinutes: item.actualMinutes,
+    dueAt: item.dueAt,
+    recurrenceType: item.recurrenceType,
+    scheduleStartDate: item.scheduleStartDate,
+    recurrenceEndDate: item.recurrenceEndDate,
+    scheduledTime: item.scheduledTime,
+    reason: item.reason,
+    expectedVersion: item.version,
+  }) }),
   taskAction: (item: PlanTask, action: 'complete' | 'delay' | 'block' | 'skip' | 'cancel' | 'reopen', fields: Record<string, unknown> = {}) => request<ApiTask>(`/tasks/${item.id}/${action}`, { method: 'POST', body: JSON.stringify({ ...fields, expectedVersion: item.version }) }),
   deleteTask: (item: PlanTask) => request<void>(`/tasks/${item.id}`, { method: 'DELETE', body: JSON.stringify({ expectedVersion: item.version }) }),
+
+  loadTrash: () => request<TrashItem[]>('/trash'),
+  restoreTrashItem: (item: TrashItem) => request<unknown>(`/trash/${item.type}/${item.id}/restore`, { method: 'POST' }),
+  purgeTrashItem: (item: TrashItem) => request<void>(`/trash/${item.type}/${item.id}`, { method: 'DELETE' }),
 
   createNote: (item: Note) => request<ApiNote>('/notes', { method: 'POST', body: JSON.stringify({ title: item.title, category: item.category, excerpt: item.excerpt, content: item.content ?? item.excerpt, sourceType: 'manual' }) }),
   updateNote: (item: Note) => request<ApiNote>(`/notes/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, category: item.category, excerpt: item.excerpt, content: item.content ?? item.excerpt }) }),
@@ -339,20 +439,49 @@ export const plannerApi = {
     method: 'POST',
     body: JSON.stringify({ message, conversationId }),
   }),
-  startAgent: (message: string, conversationId?: string) => request<AgentRunResponse>('/agent/runs', {
+  startAgent: (message: string, conversationId?: string, documentIds: string[] = []) => request<AgentRunResponse>('/agent/runs', {
     method: 'POST',
-    body: JSON.stringify({ message, conversationId }),
+    body: JSON.stringify({ message, conversationId, documentIds }),
   }),
-  resumeAgent: (runId: string, message: string) => request<AgentRunResponse>(`/agent/runs/${runId}/resume`, {
+  resumeAgent: (runId: string, message: string, documentIds: string[] = []) => request<AgentRunResponse>(`/agent/runs/${runId}/resume`, {
     method: 'POST',
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, documentIds }),
   }),
+  uploadAgentFile: async (file: File) => {
+    const response = await fetch(API_BASE + '/agent/files', {
+      method: 'POST',
+      headers: {
+        'Content-Type': file.type || 'application/octet-stream',
+        'X-File-Name': encodeURIComponent(file.name),
+      },
+      body: file,
+    })
+    if (!response.ok) {
+      let payload: { message?: string; error?: string } | undefined
+      try { payload = await response.json() as { message?: string; error?: string } }
+      catch { payload = undefined }
+      throw new Error(payload?.message || payload?.error || `文件上传失败（${response.status}）`)
+    }
+    return response.json() as Promise<AgentDocument>
+  },
   loadAgentRun: (runId: string) => request<AgentRunResponse>(`/agent/runs/${runId}`),
   confirmAgentDraft: (id: string) => request<{ id: string; changeSetId: string; status: string; runId?: string; runStatus?: string; executed: AiDraftAction[] }>(`/agent/drafts/${id}/confirm`, { method: 'POST' }),
   cancelAgentDraft: (id: string) => request<{ id: string; status: string; runId?: string; runStatus?: string }>(`/agent/drafts/${id}/cancel`, { method: 'POST' }),
   confirmAiDraft: (id: string) => request<{ id: string; changeSetId: string; status: string; executed: AiDraftAction[] }>(`/ai/drafts/${id}/confirm`, { method: 'POST' }),
   cancelAiDraft: (id: string) => request<{ id: string; status: string }>(`/ai/drafts/${id}/cancel`, { method: 'POST' }),
   loadAiSession: () => request<AiSession>('/ai/session'),
+  loadAiConversations: () => request<AiConversation[]>('/ai/conversations'),
+  createAiConversation: () => request<AiConversationDetail>('/ai/conversations', { method: 'POST' }),
+  loadAiConversation: (id: string) => request<AiConversationDetail>(`/ai/conversations/${id}`),
+  renameAiConversation: (id: string, title: string) => request<{ id: string; title: string }>(`/ai/conversations/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ title }),
+  }),
+  deleteAiConversation: (id: string) => request<void>(`/ai/conversations/${id}`, { method: 'DELETE' }),
+  loadAiMemories: () => request<AiMemory[]>('/ai/memories'),
+  updateAiMemory: (id: string, content: string) => request<AiMemory>(`/ai/memories/${id}`, {
+    method: 'PATCH', body: JSON.stringify({ content }),
+  }),
+  deleteAiMemory: (id: string) => request<void>(`/ai/memories/${id}`, { method: 'DELETE' }),
   undoChangeSet: (id: string) => request<{ status: string; restored: number }>(`/ai/change-sets/${id}/undo`, { method: 'POST' }),
   loadPreference: () => request<PlanningPreference>('/planning/preferences'),
   savePreference: (value: PlanningPreference) => request<PlanningPreference>('/planning/preferences', { method: 'PUT', body: JSON.stringify(value) }),

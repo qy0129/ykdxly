@@ -2,6 +2,7 @@
 export type PlanStatus = 'active' | 'paused' | 'completed'
 export type ItemStatus = 'pending' | 'done' | 'delayed'
 export type PlanTaskStatus = 'pending' | 'in_progress' | 'done' | 'blocked' | 'skipped' | 'cancelled'
+export type TaskRecurrenceType = 'once' | 'daily' | 'every_other_day' | 'weekdays' | 'weekly'
 
 export interface PlanTask {
   id: string
@@ -14,6 +15,13 @@ export interface PlanTask {
   estimatedMinutes?: number
   actualMinutes?: number
   dueAt?: string
+  recurrenceType: TaskRecurrenceType
+  scheduleStartDate?: string
+  recurrenceEndDate?: string
+  scheduledTime?: string
+  scheduleCount: number
+  completedScheduleCount: number
+  scheduleProgress: number
   reason?: string
   version: number
 }

@@ -23,10 +23,10 @@ export function ReviewPage() {
   const summary = report?.summary.split(/\n+/).filter(Boolean) ?? []
 
   return (
-    <div className="review-page content-page">
+    <div className={`review-page content-page${busy ? ' is-refreshing' : ''}`}>
       <section className="review-date-row">
-        <div><span className="eyebrow">今日复盘</span><h2>{report?.date ?? '正在读取'}</h2><p>{report ? `生成于 ${report.generatedAt.replace('T', ' ').slice(0, 16)}` : '基于已确认的真实执行记录'}</p></div>
-        <button className="secondary-button" type="button" disabled={busy} onClick={() => void load(true)}><RefreshCw size={16} /> 重新生成</button>
+        <div><span className="eyebrow">今日复盘</span><h2>{report?.date ?? '正在读取'}</h2><p>{report ? `生成于 ${report.generatedAt.replace('T', ' ').slice(0, 19)}` : '基于已确认的真实执行记录'}</p>{report?.aiGenerated === false && <span className="review-generation-note">AI 暂时不可用，当前显示本地复盘</span>}</div>
+        <button className="secondary-button" type="button" disabled={busy} onClick={() => void load(true)}><RefreshCw className={busy ? 'spin' : ''} size={16} /> {busy ? '生成中' : '重新生成'}</button>
       </section>
 
       <section className="review-facts">
