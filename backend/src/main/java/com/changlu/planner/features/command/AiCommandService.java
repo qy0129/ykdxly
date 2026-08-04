@@ -213,7 +213,8 @@ public final class AiCommandService {
     JsonArray result = new JsonArray();
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
         "SELECT c.id,c.title,c.source_channel,c.created_at,c.updated_at,"
-            + "(SELECT m.content FROM ai_messages m WHERE m.conversation_id=c.id ORDER BY m.created_at DESC,m.id DESC LIMIT 1) last_message,"
+            + "(SELECT m.content FROM ai_messages m WHERE m.conversation_id=c.id "
+            + "ORDER BY m.created_at DESC,CASE WHEN m.role='assistant' THEN 0 ELSE 1 END,m.id DESC LIMIT 1) last_message,"
             + "(SELECT COUNT(*) FROM ai_messages m WHERE m.conversation_id=c.id) message_count,"
             + "EXISTS(SELECT 1 FROM ai_action_drafts d WHERE d.conversation_id=c.id AND d.status='pending' AND d.expires_at>NOW()) has_draft,"
             + "(SELECT r.id FROM agent_runs r WHERE r.conversation_id=c.id ORDER BY r.updated_at DESC,r.id DESC LIMIT 1) run_id,"
@@ -765,7 +766,8 @@ public final class AiCommandService {
 
   private JsonArray historyPayload(UUID conversationId, Database.Context owner, int limit) throws SQLException {
     if (owner != null) requireConversationOwner(conversationId, owner); List<JsonObject> rows = new ArrayList<>();
-    String sql = "SELECT role,content,created_at FROM ai_messages WHERE conversation_id=? ORDER BY created_at DESC,id DESC"
+    String sql = "SELECT role,content,created_at FROM ai_messages WHERE conversation_id=? "
+        + "ORDER BY created_at DESC,CASE WHEN role='assistant' THEN 0 ELSE 1 END,id DESC"
         + (limit > 0 ? " LIMIT ?" : "");
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
       p.setBytes(1, Database.uuidBytes(conversationId)); if (limit > 0) p.setInt(2, limit);

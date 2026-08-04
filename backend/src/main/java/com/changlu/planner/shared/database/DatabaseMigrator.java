@@ -29,7 +29,8 @@ final class DatabaseMigrator {
       "008_agent_runtime.sql",
       "009_agent_documents.sql",
       "010_ai_conversations_memory.sql",
-      "011_task_recurrence.sql"
+      "011_task_recurrence.sql",
+      "012_ai_message_order.sql"
   );
 
   private DatabaseMigrator() {}

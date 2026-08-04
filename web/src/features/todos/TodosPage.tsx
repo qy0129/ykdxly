@@ -73,7 +73,6 @@ export function TodosPage({
           ))}
         </div>
         <div className="batch-actions">
-          {visibleItems.length > 0 && <label className="batch-select"><input className="batch-checkbox" type="checkbox" checked={allVisibleSelected} onChange={() => setSelectedIds(allVisibleSelected ? selectedIds.filter((id) => !visibleIds.includes(id)) : Array.from(new Set([...selectedIds, ...visibleIds])))} />全选当前</label>}
           {selectedIds.length > 0 && <button className="secondary-button danger-text" type="button" onClick={() => void deleteSelected()}><Trash2 size={15} /> 删除已选（{selectedIds.length}）</button>}
           <span className="batch-summary">待完成 {todoItems.filter((item) => !item.done).length} 项</span>
         </div>
@@ -81,7 +80,7 @@ export function TodosPage({
 
       <section className="todo-list">
         <div className="todo-list-head">
-          <span><input className="batch-checkbox" type="checkbox" checked={allVisibleSelected} onChange={() => setSelectedIds(allVisibleSelected ? selectedIds.filter((id) => !visibleIds.includes(id)) : Array.from(new Set([...selectedIds, ...visibleIds])))} aria-label="全选当前待办" /></span><span>状态</span><span>待办事项</span><span>日期与时间</span><span>提醒</span><span>优先级</span><span />
+          <span><input className="batch-checkbox" type="checkbox" checked={allVisibleSelected} onChange={() => setSelectedIds(allVisibleSelected ? selectedIds.filter((id) => !visibleIds.includes(id)) : Array.from(new Set([...selectedIds, ...visibleIds])))} aria-label="全选待办" title="全选待办" /></span><span>状态</span><span>待办事项</span><span>日期与时间</span><span>提醒</span><span>优先级</span><span />
         </div>
         {visibleItems.map((item) => (
             <article className={'todo-row ' + (item.done ? 'done ' : '') + (editingId === item.id ? 'editing' : '')} key={item.id}>
