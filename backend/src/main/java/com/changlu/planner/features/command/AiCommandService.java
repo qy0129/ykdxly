@@ -56,8 +56,6 @@ public final class AiCommandService {
     if (!modelClient.configured()) throw new IllegalStateException("PLANNER_AI_API_KEY 未配置");
     String text = required(input, "message");
     UUID conversationId = conversation(input, context, channel);
-    LOG.info("[AI输入] 渠道={} 会话={} 用户={} 工作区={} 内容={}",
-        channel, conversationId, context.userId(), context.workspaceId(), text);
     String modelContext = loadContext(context);
     if (input.has("knowledgeContext") && !input.get("knowledgeContext").isJsonNull()
         && !input.get("knowledgeContext").getAsString().isBlank()) {
@@ -96,12 +94,9 @@ public final class AiCommandService {
     result.addProperty("reply", reply);
     result.add("questions", questions);
     result.add("actions", actions);
-    LOG.info("[AI输出] 渠道={} 会话={} 回复={} 追问={} 动作数量={} 动作={}",
-        channel, conversationId, reply, questions, actions.size(), actions);
     saveMessage(conversationId, "user", text, null);
     saveMessage(conversationId, "assistant", reply, actions);
     if (actions.isEmpty()) {
-      LOG.info("[AI反馈] 会话={} 结果=仅回复，无待确认操作", conversationId);
       return result;
     }
 
@@ -109,15 +104,11 @@ public final class AiCommandService {
     UUID changeSetId = UUID.randomUUID();
     saveDraft(draftId, changeSetId, context, conversationId, channel, text, reply, actions);
     result.add("draft", draft(draftId, context));
-    LOG.info("[AI草案] 会话={} 草案={} 变更集={} 动作数量={} 状态=待确认",
-        conversationId, draftId, changeSetId, actions.size());
     return result;
   }
 
   public JsonObject confirm(String draftReference, Database.Context context) throws Exception {
     UUID draftId = draftId(draftReference, context);
-    LOG.info("[AI草案确认] 草案编号={} 草案={} 用户={} 工作区={}",
-        draftReference, draftId, context.userId(), context.workspaceId());
     try (Connection c = database.connection()) {
       c.setAutoCommit(false);
       try {
@@ -151,8 +142,6 @@ public final class AiCommandService {
         } catch (SQLException error) {
           LOG.warn("[AI反馈写入会话失败] 草案={} 原因={}", draftId, error.getMessage());
         }
-        LOG.info("[AI执行反馈] 草案={} 变更集={} 执行数量={} 执行结果={}",
-            draftId, draft.changeSetId(), executed.size(), executed);
         return result;
       } catch (Exception error) {
         c.rollback();
@@ -166,8 +155,6 @@ public final class AiCommandService {
   public JsonObject cancel(String draftReference, Database.Context context) throws Exception {
     UUID id = draftId(draftReference, context);
     UUID conversationId = conversationIdForDraft(id, context);
-    LOG.info("[AI草案取消] 草案编号={} 草案={} 用户={} 工作区={}",
-        draftReference, id, context.userId(), context.workspaceId());
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
         "UPDATE ai_action_drafts SET status = 'cancelled', cancelled_at = NOW() "
             + "WHERE id = ? AND workspace_id = ? AND user_id = ? AND status = 'pending'")) {
@@ -181,7 +168,6 @@ public final class AiCommandService {
     } catch (SQLException error) {
       LOG.warn("[AI反馈写入会话失败] 草案={} 原因={}", id, error.getMessage());
     }
-    LOG.info("[AI草案反馈] 草案={} 状态=已取消", id);
     return result;
   }
 
@@ -321,8 +307,6 @@ public final class AiCommandService {
   /** 仅当变更集中的实体都没有再次修改时，才允许整组撤销。 */
   public JsonObject undo(String changeSetReference, Database.Context context) throws SQLException {
     UUID changeSetId = UUID.fromString(changeSetReference);
-    LOG.info("[AI变更撤销] 变更集={} 用户={} 工作区={}",
-        changeSetId, context.userId(), context.workspaceId());
     try (Connection c = database.connection()) {
       c.setAutoCommit(false);
       try {
@@ -346,7 +330,6 @@ public final class AiCommandService {
         }
         c.commit(); JsonObject result = new JsonObject(); result.addProperty("changeSetId", changeSetId.toString());
         result.addProperty("status", "undone"); result.addProperty("restored", records.size());
-        LOG.info("[AI撤销反馈] 变更集={} 恢复数量={} 状态=已撤销", changeSetId, records.size());
         return result;
       } catch (Exception error) {
         c.rollback();
@@ -388,7 +371,6 @@ public final class AiCommandService {
                          String purpose, int maxTokens, int timeoutSeconds, int maxAttempts) throws Exception {
     JsonArray messages = new JsonArray(); messages.add(message("system", systemPrompt(context)));
     messages.addAll(historyForModel(conversationId, owner)); messages.add(message("user", userText));
-    LOG.info("[AI规划调用] 会话={} 消息数量={} 上下文长度={}", conversationId, messages.size(), context.length());
     return modelClient.completeJson(purpose, messages, 0.1, maxTokens, timeoutSeconds, maxAttempts);
   }
 

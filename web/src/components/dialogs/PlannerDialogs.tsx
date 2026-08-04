@@ -121,19 +121,23 @@ export function NoteDialog({ initialCategory, categories, onClose, onSubmit }: {
   )
 }
 
-export function CategoryDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: (category: string) => void }) {
+export function CategoryDialog({ onClose, onSubmit }: { onClose: () => void; onSubmit: (category: string, color: string) => void }) {
   const [category, setCategory] = useState('')
+  const [color, setColor] = useState('#7c647d')
 
   const submit = () => {
     if (!category.trim()) return
-    onSubmit(category.trim())
+    onSubmit(category.trim(), color)
   }
 
   return (
     <div className="modal-scrim" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className="editor-modal" role="dialog" aria-modal="true" aria-label="新建笔记分类">
         <div className="modal-heading"><div><span className="eyebrow">知识库</span><h2>新建分类</h2></div><button className="icon-button" type="button" onClick={onClose} title="关闭"><X size={18} /></button></div>
-        <div className="modal-fields"><label>分类名称<input autoFocus value={category} onChange={(event) => setCategory(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && submit()} placeholder="例如：项目复盘" /></label></div>
+        <div className="modal-fields">
+          <label>分类名称<input autoFocus value={category} onChange={(event) => setCategory(event.target.value)} onKeyDown={(event) => event.key === 'Enter' && submit()} placeholder="例如：项目复盘" /></label>
+          <label>节点颜色<input className="category-dialog-color" type="color" value={color} onChange={(event) => setColor(event.target.value)} /></label>
+        </div>
         <div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="button" onClick={submit}><Plus size={16} /> 创建分类</button></div>
       </section>
     </div>

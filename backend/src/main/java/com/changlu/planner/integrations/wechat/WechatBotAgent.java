@@ -150,8 +150,7 @@ public final class WechatBotAgent implements AutoCloseable {
     String text = textOf(message);
     if (userId == null || userId.isBlank() || text.isBlank()) return;
     schedulePendingGreeting(current, userId);
-    long startedAt = System.nanoTime();
-    LOG.info("[微信用户输入] 用户={} 内容={}", userId, logText(text));
+    LOG.info("[工作流] 收到消息｜用户消息｜待判断｜{}", logText(text));
     try {
       String reply;
       String route;
@@ -159,21 +158,20 @@ public final class WechatBotAgent implements AutoCloseable {
       else if (isReadOnlyCommand(text)) { route = "只读查询"; reply = planner.command(userId, text); }
       else if (text.contains("计划网页") || text.contains("工作台") || text.equals("打开计划")) { route = "网页链接"; reply = webLinkMessage(); }
       else { route = "AI对话"; reply = planner.aiChat(userId, text); }
+      LOG.info("[工作流] 路由完成｜路由决策｜{}｜进入{}处理", route, route);
       current.sendText(userId, reply);
-      long durationMs = (System.nanoTime() - startedAt) / 1_000_000;
-      LOG.info("[微信输出反馈] 用户={} 处理方式={} 耗时={}毫秒 内容={}",
-          userId, route, durationMs, logText(reply));
+      LOG.info("[工作流] 返回消息｜Agent消息｜{}｜{}", route, logText(reply));
     } catch (Exception error) {
       String detail = rootMessage(error);
-      LOG.error("[微信消息处理失败] 用户={} 内容={} 原因={}", userId, logText(text), detail, error);
+      LOG.error("[工作流] 执行失败｜错误消息｜AI对话｜{}", detail);
       try {
         String fallback = detail.toLowerCase().contains("timed out")
             ? "AI 响应超时了，请稍后再试一次。"
             : "这条消息暂时处理失败，请稍后再试。";
         current.sendText(userId, fallback);
-        LOG.warn("[微信错误反馈] 用户={} 内容={}", userId, fallback);
+        LOG.warn("[工作流] 返回消息｜Agent消息｜错误处理｜{}", fallback);
       } catch (Exception sendError) {
-        LOG.error("[微信错误反馈发送失败] 用户={} 原因={}", userId, rootMessage(sendError), sendError);
+        LOG.error("[工作流] 错误反馈失败｜错误消息｜错误处理｜{}", rootMessage(sendError));
       }
     }
   }

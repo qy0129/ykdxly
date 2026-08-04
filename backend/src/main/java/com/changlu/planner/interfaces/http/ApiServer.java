@@ -123,20 +123,13 @@ public final class ApiServer {
       long startedAt = System.nanoTime();
       MDC.put("requestId", requestId);
       exchange.getResponseHeaders().set("X-Request-Id", requestId);
-      LOG.info("[用户操作] 开始 请求方式={} 路径={} 用户={} 工作区={} 来源={}",
-          exchange.getRequestMethod(), exchange.getRequestURI(), requestUser(exchange),
-          requestWorkspace(exchange), exchange.getRemoteAddress());
       try {
         handler.handle(exchange);
       } catch (IOException | RuntimeException error) {
-        LOG.error("[用户操作] 未捕获异常 请求方式={} 路径={} 原因={}",
-            exchange.getRequestMethod(), exchange.getRequestURI(), error.getMessage(), error);
+        LOG.error("[请求失败] {} {} 原因={}", exchange.getRequestMethod(), exchange.getRequestURI(), error.getMessage());
         throw error;
       } finally {
-        long durationMs = (System.nanoTime() - startedAt) / 1_000_000;
-        Object status = exchange.getAttribute(RESPONSE_STATUS_ATTRIBUTE);
-        LOG.info("[用户操作] 完成 请求方式={} 路径={} 状态={} 耗时={}毫秒",
-            exchange.getRequestMethod(), exchange.getRequestURI(), status == null ? "未知" : status, durationMs);
+        // 常规请求不再逐条输出，工作流日志只记录 Agent 的关键节点。
         MDC.remove("requestId");
       }
     };
@@ -999,7 +992,6 @@ public final class ApiServer {
     try (InputStream in = e.getRequestBody()) {
       String raw = new String(in.readAllBytes(), StandardCharsets.UTF_8);
       JsonObject body = raw.isBlank() ? new JsonObject() : gson.fromJson(raw, JsonObject.class);
-      if (!body.isEmpty()) LOG.info("[用户操作] 请求参数 body={}", safeBody(body));
       return body;
     }
   }

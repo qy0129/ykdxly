@@ -3293,6 +3293,18 @@ button,
   font-size: 12px;
 }
 
+.note-category-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 4px;
+}
+
+.note-category-row.all-notes {
+  grid-template-columns: 1fr;
+}
+
+.note-category-row > button,
 .note-categories > button {
   width: 100%;
   min-height: 38px;
@@ -3310,15 +3322,37 @@ button,
   font-size: 11px;
 }
 
+.note-category-row > button:hover,
+.note-category-row > button.active,
 .note-categories > button:hover,
 .note-categories > button.active {
   color: var(--ink);
   background: #eee2cf;
 }
 
+.note-category-row > button b,
 .note-categories > button b {
   color: #a08d77;
   font-size: 9px;
+}
+
+.note-category-color {
+  width: 28px;
+  height: 28px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.note-category-color::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.note-category-color::-webkit-color-swatch {
+  border: 0;
+  border-radius: 3px;
 }
 
 .note-categories > .new-category {
@@ -4329,6 +4363,11 @@ button,
   resize: vertical;
 }
 
+.modal-fields input[type='color'] {
+  padding: 3px;
+  cursor: pointer;
+}
+
 .inline-editor input[type='color'] {
   padding: 3px;
 }
@@ -4743,6 +4782,22 @@ button,
     width: auto;
     min-width: max-content;
     grid-template-columns: 18px auto auto;
+  }
+
+  .note-category-row {
+    width: max-content;
+    min-width: max-content;
+  }
+
+  .note-category-row > button {
+    width: auto;
+    min-width: max-content;
+    grid-template-columns: 18px auto auto;
+  }
+
+  .note-category-color {
+    width: 28px;
+    flex: 0 0 28px;
   }
 
   .notes-layout {

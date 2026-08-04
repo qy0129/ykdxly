@@ -111,12 +111,15 @@ public final class AgentRuntime implements AutoCloseable {
   public JsonObject confirm(String draftReference, Database.Context identity) throws Exception {
     JsonObject result = commands.confirm(draftReference, identity);
     finishDraft(UUID.fromString(result.get("id").getAsString()), identity, "COMPLETED", result);
+    workflow("确认执行", "用户操作", "计划变更", "用户确认执行待处理草案");
+    workflow("变更完成", "Agent消息", "计划变更", "已执行 " + result.getAsJsonArray("executed").size() + " 项操作");
     return result;
   }
 
   public JsonObject cancel(String draftReference, Database.Context identity) throws Exception {
     JsonObject result = commands.cancel(draftReference, identity);
     finishDraft(UUID.fromString(result.get("id").getAsString()), identity, "CANCELLED", result);
+    workflow("取消执行", "用户操作", "计划变更", "用户取消待处理草案");
     return result;
   }
 
@@ -163,7 +166,10 @@ public final class AgentRuntime implements AutoCloseable {
     int iteration = currentIteration + 1;
     updateRunning(runId, iteration);
     String message = required(input, "message");
+    workflow("收到消息", "用户消息", "待判断", message);
     AgentRouter.Decision decision = router.route(message, documents.hasAttachments(input), tools, subagents);
+    String route = routeName(decision.executorName());
+    workflow("路由完成", "路由决策", route, "进入" + route + " Agent");
     String toolCallId = runId + ":" + iteration;
     JsonObject arguments = new JsonObject();
     arguments.addProperty("message", message);
@@ -187,12 +193,49 @@ public final class AgentRuntime implements AutoCloseable {
           string(result, "reply", ""), identity);
       finishCall(toolCallId, "COMPLETED", result, null);
       recordProposedTools(runId, iteration, result);
-      return finishRun(runId, iteration, input, decision, result, identity);
+      JsonObject response = finishRun(runId, iteration, input, decision, result, identity);
+      workflow("返回消息", "Agent消息", route, string(response, "reply", "已完成处理"));
+      workflow("工作流结束", "系统状态", route, statusName(string(response, "status", "COMPLETED")));
+      return response;
     } catch (Exception error) {
       finishCall(toolCallId, "FAILED", null, error.getMessage());
       failRun(runId, error.getMessage());
+      workflow("执行失败", "错误消息", route, error.getMessage());
       throw error;
     }
+  }
+
+  private void workflow(String step, String type, String route, String content) {
+    LOG.info("[工作流] {}｜{}｜{}｜{}", step, type, route, compact(content));
+  }
+
+  private String routeName(String executorName) {
+    return switch (executorName) {
+      case "planning.assistant" -> "计划管理";
+      case "review" -> "每日复盘";
+      case "briefing" -> "今日简报";
+      case "research" -> "资料搜索";
+      case "scheduling" -> "日程检查";
+      case "document" -> "文档分析";
+      case "memory" -> "长期记忆";
+      default -> "其他任务";
+    };
+  }
+
+  private String statusName(String status) {
+    return switch (status) {
+      case "WAITING_CONFIRMATION" -> "等待用户确认";
+      case "WAITING_USER" -> "等待用户补充";
+      case "FAILED" -> "执行失败";
+      case "CANCELLED" -> "已取消";
+      default -> "已完成";
+    };
+  }
+
+  private String compact(String value) {
+    if (value == null || value.isBlank()) return "无内容";
+    String normalized = value.replaceAll("\\s+", " ").trim();
+    return normalized.length() <= 180 ? normalized : normalized.substring(0, 177) + "...";
   }
 
   private JsonObject finishRun(UUID runId, int iteration, JsonObject input, AgentRouter.Decision decision,
@@ -292,7 +335,7 @@ public final class AgentRuntime implements AutoCloseable {
       try {
         work.execute();
       } catch (Exception error) {
-        LOG.error("[Agent后台运行失败] runId={} 原因={}", runId, error.getMessage(), error);
+        LOG.error("[工作流] 后台执行失败｜错误消息｜其他任务｜{}", compact(error.getMessage()));
       }
     });
   }

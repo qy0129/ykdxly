@@ -42,7 +42,7 @@ public final class ModelClient {
       } catch (Exception error) {
         lastError = error;
         if (attempt == maxAttempts || !retryable(error)) throw error;
-        LOG.warn("[模型重试] 用途={} 次数={} 原因={}", purpose, attempt, error.getMessage());
+        LOG.warn("[模型重试] 第{}次，原因={}", attempt, error.getMessage());
         Thread.sleep(300L * attempt);
       }
     }
@@ -66,8 +66,7 @@ public final class ModelClient {
     long startedAt = System.nanoTime();
     HttpResponse<String> response = client.send(request, HttpResponse.BodyHandlers.ofString());
     long durationMs = (System.nanoTime() - startedAt) / 1_000_000;
-    LOG.info("[模型调用] 用途={} 模型={} 次数={} 状态={} 耗时={}毫秒", purpose, model, attempt,
-        response.statusCode(), durationMs);
+    LOG.debug("[模型调用] 用途={} 状态={} 耗时={}毫秒", purpose, response.statusCode(), durationMs);
     if (response.statusCode() / 100 != 2) {
       throw new ModelHttpException(response.statusCode(), "AI 服务返回 " + response.statusCode());
     }

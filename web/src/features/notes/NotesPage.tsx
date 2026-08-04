@@ -27,6 +27,26 @@ function graphLegendItems(noteItems: Note[]) {
   return Array.from(colors, ([category, color]) => ({ category, color }))
 }
 
+const CATEGORY_COLOR_STORAGE_KEY = 'changlu-note-category-colors'
+const CATEGORY_COLOR_PALETTE = ['#d39a24', '#7c647d', '#b85f42', '#72806a', '#4d7c8a', '#9a6b4f', '#716b9e', '#aa6572']
+const DEFAULT_CATEGORY_COLORS: Record<string, string> = {
+  学习笔记: '#7c647d',
+  计划方法: '#d39a24',
+  产品设计: '#b85f42',
+  产品与收藏: '#b85f42',
+  灵感收藏: '#b85f42',
+  复盘记录: '#72806a',
+}
+
+function loadCategoryColors() {
+  try {
+    const saved = window.localStorage.getItem(CATEGORY_COLOR_STORAGE_KEY)
+    return saved ? { ...DEFAULT_CATEGORY_COLORS, ...JSON.parse(saved) as Record<string, string> } : DEFAULT_CATEGORY_COLORS
+  } catch {
+    return DEFAULT_CATEGORY_COLORS
+  }
+}
+
 export function NoteGraph({ noteItems, activeId, onSelect }: { noteItems: Note[]; activeId: string; onSelect: (id: string) => void }) {
   const initialPositions = Object.fromEntries(noteItems.map((note, index) => {
     const fallback = {
@@ -214,7 +234,7 @@ function createElasticPositions(noteItems: Note[], current: Record<string, Elast
   })) as Record<string, ElasticGraphPoint>
 }
 
-function ElasticNoteGraph({ noteItems, activeId, onSelect }: { noteItems: Note[]; activeId: string; onSelect: (id: string) => void }) {
+function ElasticNoteGraph({ noteItems, activeId, categoryColors, onSelect }: { noteItems: Note[]; activeId: string; categoryColors: Record<string, string>; onSelect: (id: string) => void }) {
   const [positions, setPositions] = useState<Record<string, ElasticGraphPoint>>(() => createElasticPositions(noteItems))
   const positionsRef = useRef(positions)
   const [viewport, setViewport] = useState({ x: 0, y: 0, scale: 1 })
@@ -485,7 +505,7 @@ function ElasticNoteGraph({ noteItems, activeId, onSelect }: { noteItems: Note[]
                 >
                   <title>{`${graphWordCount(note)} 字 · ${model.degree[note.id]} 条关系`}</title>
                   <circle className="graph-node-halo" cx={position.x} cy={position.y} r={radius + 14} />
-                  <circle className="graph-node-core" cx={position.x} cy={position.y} r={radius} fill={note.color} />
+                  <circle className="graph-node-core" cx={position.x} cy={position.y} r={radius} fill={categoryColors[note.category] ?? note.color} />
                   <line className="graph-focus-mark" x1={position.x - 8} x2={position.x + 8} y1={position.y - radius - 13} y2={position.y - radius - 13} />
                   <text className="graph-node-title" x={position.x} y={position.y + radius + 18} textAnchor="middle">{note.title.slice(0, 10)}</text>
                   <text className="graph-node-meta" x={position.x} y={position.y + radius + 32} textAnchor="middle">{note.category}</text>
@@ -810,10 +830,9 @@ function ElasticNoteGraph({ noteItems, activeId, onSelect }: { noteItems: Note[]
         </g>
       </svg>
       <div className="graph-legend">
-        <span><i style={{ backgroundColor: '#7c647d' }} />学习笔记</span>
-        <span><i style={{ backgroundColor: '#d39a24' }} />计划方法</span>
-        <span><i style={{ backgroundColor: '#b85f42' }} />产品与收藏</span>
-        <span><i style={{ backgroundColor: '#72806a' }} />复盘记录</span>
+        {Array.from(new Set(noteItems.map((note) => note.category))).map((category) => (
+          <span key={category}><i style={{ backgroundColor: categoryColors[category] }} />{category}</span>
+        ))}
       </div>
     </div>
   )
@@ -842,6 +861,7 @@ export function NotesPage({
   const [noteDialogOpen, setNoteDialogOpen] = useState(false)
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
+  const [categoryColorOverrides, setCategoryColorOverrides] = useState<Record<string, string>>(loadCategoryColors)
 
   useEffect(() => {
     if (selectedNoteId) {
@@ -855,7 +875,12 @@ export function NotesPage({
     setSelectedIds((current) => current.filter((id) => ids.has(id)))
   }, [noteItems])
 
-  const categories = ['全部笔记', ...Array.from(new Set(noteItems.map((note) => note.category)))]
+  const categories = useMemo(() => ['全部笔记', ...Array.from(new Set(noteItems.map((note) => note.category)))], [noteItems])
+  const categoryColors = useMemo(() => Object.fromEntries(categories.slice(1).map((category, index) => [
+    category,
+    categoryColorOverrides[category] ?? CATEGORY_COLOR_PALETTE[index % CATEGORY_COLOR_PALETTE.length],
+  ])) as Record<string, string>, [categories, categoryColorOverrides])
+  const displayNotes = useMemo(() => noteItems.map((note) => ({ ...note, color: categoryColors[note.category] ?? note.color })), [categoryColors, noteItems])
   const visibleNotes = noteItems.filter((note) => {
     const categoryMatch = activeCategory === '全部笔记' || note.category === activeCategory
     const queryMatch = !query.trim() || (note.title + note.excerpt + (note.content ?? '')).toLowerCase().includes(query.toLowerCase())
@@ -891,17 +916,27 @@ export function NotesPage({
     setNoteDialogOpen(false)
   }
 
-  const createCategory = (category: string) => {
+  const updateCategoryColor = (category: string, color: string) => {
+    setCategoryColorOverrides((current) => {
+      const next = { ...current, [category]: color }
+      try { window.localStorage.setItem(CATEGORY_COLOR_STORAGE_KEY, JSON.stringify(next)) }
+      catch { /* Keep the current session working when storage is unavailable. */ }
+      return next
+    })
+  }
+
+  const createCategory = (category: string, color: string) => {
     const next: Note = {
       id: 'n-' + Date.now(),
       title: '未命名笔记',
       category,
       excerpt: '',
       updatedAt: '刚刚',
-      color: '#72806a',
+      color,
       relatedIds: [],
       source: '个人创建',
     }
+    updateCategoryColor(category, color)
     onChange([next, ...noteItems])
     setActiveCategory(category)
     setActiveId(next.id)
@@ -927,16 +962,27 @@ export function NotesPage({
           <strong>{noteItems.length} 篇长期笔记</strong>
         </div>
         {categories.map((category) => (
-          <button
-            type="button"
-            className={activeCategory === category ? 'active' : ''}
-            onClick={() => { setActiveCategory(category); setSelectedIds([]); setMode('列表') }}
-            key={category}
-          >
-            <FolderOpen size={16} />
-            <span>{category}</span>
-            <b>{category === '全部笔记' ? noteItems.length : noteItems.filter((note) => note.category === category).length}</b>
-          </button>
+          <div className={`note-category-row ${category === '全部笔记' ? 'all-notes' : ''}`} key={category}>
+            <button
+              type="button"
+              className={activeCategory === category ? 'active' : ''}
+              onClick={() => { setActiveCategory(category); setSelectedIds([]); setMode('列表') }}
+            >
+              <FolderOpen size={16} style={category === '全部笔记' ? undefined : { color: categoryColors[category] }} />
+              <span>{category}</span>
+              <b>{category === '全部笔记' ? noteItems.length : noteItems.filter((note) => note.category === category).length}</b>
+            </button>
+            {category !== '全部笔记' && (
+              <input
+                className="note-category-color"
+                type="color"
+                value={categoryColors[category]}
+                onChange={(event) => updateCategoryColor(category, event.target.value)}
+                aria-label={`设置${category}的节点颜色`}
+                title={`设置${category}的节点颜色`}
+              />
+            )}
+          </div>
         ))}
         <button className="new-category" type="button" onClick={() => setCategoryDialogOpen(true)}><Plus size={15} /> 新建分类</button>
       </aside>
@@ -964,22 +1010,25 @@ export function NotesPage({
               <div><span className="eyebrow">知识关系</span><h3>笔记关系图谱</h3></div>
               <span className="section-note">拖动节点整理图谱，点击节点打开笔记</span>
             </div>
-            <ElasticNoteGraph noteItems={noteItems} activeId={activeId} onSelect={(id) => { setActiveId(id); setMode('列表') }} />
+            <ElasticNoteGraph noteItems={displayNotes} activeId={activeId} categoryColors={categoryColors} onSelect={(id) => { setActiveId(id); setMode('列表') }} />
           </div>
         ) : (
           <div className="notes-layout">
             <div className="note-list">
-              {visibleNotes.map((note) => (
+              {visibleNotes.map((note) => {
+                const noteColor = categoryColors[note.category] ?? note.color
+                return (
                 <div className={`note-list-item ${activeId === note.id ? 'active' : ''}`} key={note.id}>
                   <input className="batch-checkbox" type="checkbox" checked={selectedIds.includes(note.id)} onChange={() => toggleSelection(note.id)} aria-label={`选择笔记：${note.title}`} />
                   <button className="note-list-open" type="button" onClick={() => setActiveId(note.id)}>
-                    <span className="note-list-top"><i style={{ backgroundColor: note.color }} />{note.category}<small>{note.updatedAt}</small></span>
+                    <span className="note-list-top"><i style={{ backgroundColor: noteColor }} />{note.category}<small>{note.updatedAt}</small></span>
                     <strong>{note.title}</strong>
                     <p>{note.excerpt || '开始记录你的想法……'}</p>
                     <span className="note-source"><Link2 size={12} />{note.source}</span>
                   </button>
                 </div>
-              ))}
+                )
+              })}
             </div>
             <article className="note-editor">
               <div className="note-editor-meta">
@@ -1006,7 +1055,7 @@ export function NotesPage({
                 <div>
                   {activeNote.relatedIds.map((id) => {
                     const related = noteItems.find((note) => note.id === id)
-                    return related ? <button type="button" onClick={() => setActiveId(related.id)} key={id}><i style={{ backgroundColor: related.color }} />{related.title}</button> : null
+                    return related ? <button type="button" onClick={() => setActiveId(related.id)} key={id}><i style={{ backgroundColor: categoryColors[related.category] ?? related.color }} />{related.title}</button> : null
                   })}
                   <select className="relation-select" value="" onChange={(event) => {
                     const relatedId = event.target.value
