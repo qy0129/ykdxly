@@ -77,7 +77,8 @@ public final class ModelClient {
     body.addProperty("temperature", temperature);
     body.addProperty("max_tokens", maxTokens);
     body.addProperty("enable_thinking", false);
-    body.add("messages", messages);
+    // SiliconFlow 只接受单条 system 消息且必须位于开头：合并所有 system，避免 400。
+    body.add("messages", normalizeMessages(messages));
     HttpRequest request = HttpRequest.newBuilder(URI.create(apiUrl))
         .timeout(Duration.ofSeconds(timeoutSeconds))
         .header("Authorization", "Bearer " + apiKey)
@@ -89,7 +90,21 @@ public final class ModelClient {
     long durationMs = (System.nanoTime() - startedAt) / 1_000_000;
     LOG.debug("[模型调用] 用途={} 状态={} 耗时={}毫秒", purpose, response.statusCode(), durationMs);
     if (response.statusCode() / 100 != 2) {
-      throw new ModelHttpException(response.statusCode(), "AI 服务返回 " + response.statusCode());
+      // 带上响应体便于诊断（如 400 的 model/max_tokens/内容校验原因）。
+      StringBuilder structure = new StringBuilder();
+      for (JsonElement element : messages) {
+        JsonObject m = element.isJsonObject() ? element.getAsJsonObject() : new JsonObject();
+        String role = m.has("role") ? m.get("role").getAsString() : "?";
+        String content = m.has("content") ? m.get("content").getAsString() : "";
+        structure.append(role).append('[').append(content.length()).append("字]");
+        if (role.equals("system") && content.length() > 8) {
+          structure.append('(').append(content.substring(0, Math.min(8, content.length()))).append("…)");
+        }
+        structure.append(' ');
+      }
+      LOG.warn("[模型调用失败] 用途={} 状态={} 消息结构={}", purpose, response.statusCode(), structure);
+      throw new ModelHttpException(response.statusCode(),
+          "AI 服务返回 " + response.statusCode() + "：" + preview(response.body()));
     }
     JsonObject choice = JsonParser.parseString(response.body()).getAsJsonObject()
         .getAsJsonArray("choices").get(0).getAsJsonObject();
@@ -99,6 +114,30 @@ public final class ModelClient {
     if (reasoning.isBlank()) reasoning = messageContent(choice.get("reasoning_content"));
     if (reasoning.isBlank()) reasoning = messageContent(choice.get("text"));
     return new RawReply(content, reasoning);
+  }
+
+  /** 合并所有 system 消息为一条并置于开头（SiliconFlow 要求单条 system 且位于消息最前）。 */
+  private JsonArray normalizeMessages(JsonArray messages) {
+    StringBuilder system = new StringBuilder();
+    JsonArray rest = new JsonArray();
+    for (JsonElement element : messages) {
+      if (element.isJsonObject() && "system".equals(element.getAsJsonObject().get("role").getAsString())) {
+        JsonObject message = element.getAsJsonObject();
+        String content = message.has("content") && !message.get("content").isJsonNull()
+            ? message.get("content").getAsString() : "";
+        if (!content.isBlank()) {
+          if (system.length() > 0) system.append("\n\n");
+          system.append(content);
+        }
+      } else {
+        rest.add(element);
+      }
+    }
+    if (system.length() == 0) return messages;
+    JsonArray result = new JsonArray();
+    result.add(ModelClient.message("system", system.toString()));
+    for (JsonElement element : rest) result.add(element);
+    return result;
   }
 
   private JsonObject requestJson(String purpose, JsonArray messages, double temperature, int maxTokens,

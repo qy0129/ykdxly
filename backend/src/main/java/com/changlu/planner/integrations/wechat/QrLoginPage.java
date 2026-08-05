@@ -16,10 +16,11 @@ import java.util.Map;
 
 /** 将 SDK 返回的二维码转换为可在浏览器中扫码的本地页面。 */
 public final class QrLoginPage {
-  private final Path file = Path.of(System.getProperty("java.io.tmpdir"), "changlu-planner-login.html");
-
   public Path render(String code) throws Exception {
     String dataUri = toDataUri(code);
+    // 每次生成独立文件名：同一 URL 会被浏览器缓存成上一张（已过期）二维码，扫码永远没反应。
+    String name = "changlu-planner-login-" + System.currentTimeMillis() + ".html";
+    Path file = Path.of(System.getProperty("java.io.tmpdir"), name);
     String html = """
         <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>长路计划 · 微信登录</title>
         <style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f3eadb;color:#4b3725;font-family:system-ui,'Microsoft YaHei',sans-serif}.panel{width:min(420px,calc(100vw - 40px));padding:36px 28px;text-align:center;background:#fffaf2;border:1px solid #ddcdb5;box-shadow:0 18px 50px #8d6b3d22}.qr{width:300px;max-width:100%;border:10px solid #fff;margin:22px auto 14px}.muted{color:#92795d;font-size:14px;line-height:1.7}h1{margin:0;font-size:26px}</style></head>

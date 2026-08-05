@@ -2697,6 +2697,13 @@ button,
     min-width: 0;
   }
 
+  .ai-chat-link {
+    color: var(--gold-deep);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    overflow-wrap: anywhere;
+  }
+
   .ai-generated-image-link {
     display: block;
     margin-top: 8px;
@@ -2897,6 +2904,154 @@ button,
   font-style: normal;
 }
 
+.ai-diet-plan-preview {
+  width: min(820px, 100%);
+  align-self: center;
+  display: grid;
+  gap: 9px;
+  max-height: 440px;
+  overflow-y: auto;
+  margin: 0 4px 8px;
+  padding: 11px;
+  border: 1px solid var(--sage);
+  border-radius: 6px;
+  background: var(--warm-white);
+}
+
+.ai-diet-heading,
+.ai-diet-day-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ai-diet-heading {
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+
+.ai-diet-heading div {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.ai-diet-heading strong,
+.ai-diet-day-heading strong,
+.ai-diet-extra strong,
+.ai-diet-risks strong {
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.ai-diet-heading span,
+.ai-diet-heading > small,
+.ai-diet-day-heading small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.ai-diet-targets {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.ai-diet-targets span {
+  display: grid;
+  gap: 2px;
+  padding: 6px 7px;
+  border: 1px solid var(--line);
+  background: var(--hover);
+}
+
+.ai-diet-targets b {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.ai-diet-targets strong {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.ai-diet-targets strong small {
+  margin-left: 2px;
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 500;
+}
+
+.ai-diet-days {
+  display: grid;
+  gap: 6px;
+}
+
+.ai-diet-day {
+  padding: 7px 8px;
+  border-left: 2px solid var(--sage);
+  background: var(--hover);
+}
+
+.ai-diet-meals {
+  display: grid;
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.ai-diet-meal {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: start;
+}
+
+.ai-diet-meal > span {
+  color: var(--sage);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.ai-diet-meal b {
+  color: var(--ink-soft);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.ai-diet-meal p,
+.ai-diet-extra p,
+.ai-diet-risks p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 9px;
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.ai-diet-meal > small {
+  color: var(--muted);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.ai-diet-extra {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+}
+
+.ai-diet-risks {
+  padding: 7px 8px;
+  border-left: 2px solid var(--gold);
+  background: var(--hover);
+}
+
 .ai-draft-stage {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2973,6 +3128,14 @@ button,
   .ai-draft-actions button {
     flex: 1;
     min-width: 0;
+  }
+
+  .ai-diet-targets {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ai-diet-extra {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -5795,3 +5958,82 @@ button,
     padding: 16px;
   }
 }
+
+/* ============ 学习目标页 ============ */
+.learning-header {
+  min-height: 42px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 0 16px;
+}
+.learning-header > div { display: grid; gap: 3px; }
+.learning-header h2 { font-size: 22px; line-height: 1.25; margin: 0; }
+.learning-header p { margin: 0; color: var(--text-muted, #8a8f98); font-size: 13px; }
+.learning-empty {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  padding: 56px 16px;
+  color: var(--text-muted, #8a8f98);
+  text-align: center;
+}
+.learning-empty p { margin: 0; }
+.learning-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+.learning-card {
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 12px;
+  padding: 16px;
+  display: grid;
+  gap: 10px;
+  background: var(--surface, #fff);
+}
+.learning-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.learning-card-head strong { font-size: 15px; line-height: 1.4; }
+.learning-domain { margin: 0; color: var(--text-muted, #8a8f98); font-size: 12px; }
+.learning-status {
+  flex: none;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(120, 130, 145, 0.14);
+  color: #6b7280;
+}
+.learning-status-active { background: rgba(46, 160, 88, 0.14); color: #1a7f37; }
+.learning-status-completed { background: rgba(70, 120, 220, 0.14); color: #2f6fd6; }
+.learning-status-paused { background: rgba(210, 150, 40, 0.16); color: #b07a12; }
+.learning-status-abandoned { background: rgba(210, 80, 80, 0.12); color: #b3382c; }
+.learning-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin: 0;
+}
+.learning-meta div { display: flex; gap: 5px; font-size: 12px; }
+.learning-meta dt { color: var(--text-muted, #8a8f98); }
+.learning-meta dd { margin: 0; color: #333; }
+.learning-progress { display: flex; align-items: center; gap: 8px; }
+.learning-progress-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(120, 130, 145, 0.16);
+  overflow: hidden;
+}
+.learning-progress-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent, #d39a24);
+  transition: width 0.3s ease;
+}
+.learning-progress span { font-size: 12px; color: var(--text-muted, #8a8f98); min-width: 34px; text-align: right; }

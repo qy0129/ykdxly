@@ -111,6 +111,12 @@ public final class AgentRouter {
                             com.changlu.planner.agent.core.contract.AgentLoopState state,
                             Exception error) {
     String normalized = request.replaceAll("\\s", "");
+    if (normalized.contains("健康饮食") || normalized.contains("饮食计划") || normalized.contains("减脂餐")
+        || normalized.contains("减肥餐") || normalized.contains("增肌餐") || normalized.contains("健身餐")
+        || normalized.contains("一周食谱") || normalized.contains("每日菜单") || normalized.contains("控糖饮食")
+        || normalized.contains("营养搭配") || normalized.contains("食谱推荐") || normalized.contains("食物热量")) {
+      return Decision.execute("subagent", "diet", "模型路由失败，按明确健康饮食意图回退");
+    }
     if (hasDocuments && planningIntent(normalized)) {
       return Decision.execute("tool", "planning.assistant", "请求基于附件创建或调整计划数据");
     }
@@ -141,7 +147,9 @@ public final class AgentRouter {
     }
     if (normalized.contains("学习") || normalized.contains("课程")
         || normalized.contains("知识") || normalized.contains("掌握程度")
-        || normalized.contains("学习计划") || normalized.contains("学习进度")) {
+        || normalized.contains("学习计划") || normalized.contains("学习进度")
+        || normalized.contains("学习目标") || normalized.contains("目标日期")
+        || normalized.contains("目标")) {
       return Decision.execute("subagent", "learning", "模型路由失败，按明确学习规划意图回退");
     }
     var match = subagents.bestMatch(hasDocuments ? request + " 附件" : request);

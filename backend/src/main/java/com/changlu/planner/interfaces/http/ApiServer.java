@@ -6,6 +6,7 @@ import com.changlu.planner.agent.subagents.briefing.BriefingResult;
 import com.changlu.planner.agent.subagents.document.DocumentResult;
 import com.changlu.planner.features.briefing.ScheduleMaterialService;
 import com.changlu.planner.features.export.StatsPdfGenerator;
+import com.changlu.planner.features.learning.LearningService;
 import com.changlu.planner.features.notes.NotePrompt;
 import com.changlu.planner.features.plan.PlanExecutionService;
 import com.changlu.planner.features.reminder.ReminderService;
@@ -67,12 +68,13 @@ public final class ApiServer {
   private final PlanExecutionService planExecution;
   private final ReminderService reminders;
   private final ScheduleMaterialService scheduleMaterials;
+  private final LearningService learningService;
   private final StaticFileHandler staticFiles = new StaticFileHandler();
   private final HttpClient imageClient = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(15)).build();
   private HttpServer server;
   private ExecutorService httpExecutor;
 
-  public ApiServer(Database database, int port) { this.database = database; this.port = port; this.agent = new AgentFacade(database); this.model = new ModelClient(); this.planExecution = new PlanExecutionService(database); this.reminders = new ReminderService(database); this.scheduleMaterials = new ScheduleMaterialService(database); }
+  public ApiServer(Database database, int port) { this.database = database; this.port = port; this.agent = new AgentFacade(database); this.model = new ModelClient(); this.planExecution = new PlanExecutionService(database); this.reminders = new ReminderService(database); this.scheduleMaterials = new ScheduleMaterialService(database); this.learningService = new LearningService(database); }
   public int port() { return port; }
 
   public void start() throws IOException {
@@ -108,6 +110,7 @@ public final class ApiServer {
     server.createContext("/api/agent/files", logged(this::agentFiles));
     server.createContext("/api/review/facts", logged(this::reviewFacts));
     server.createContext("/api/review/today", logged(this::reviewToday));
+    server.createContext("/api/learning/goals", logged(this::learningGoals));
     server.createContext("/api/stats", logged(this::stats));
     server.createContext("/api/export/xlsx", logged(this::excelExport));
     server.createContext("/api/export/pdf", logged(this::pdfExport));
@@ -554,6 +557,19 @@ public final class ApiServer {
       json(e, 200, agent.reviewToday(context(e), regenerate));
     } catch (IllegalStateException ex) { error(e, 503, "review_unavailable", ex.getMessage(), true); }
       catch (Exception ex) { ex.printStackTrace(); error(e, 500, "review_error", ex.getMessage(), true); }
+  }
+
+  private void learningGoals(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if (!"GET".equals(e.getRequestMethod())) { error(e, 405, "method_not_allowed", "请求方法不支持", false); return; }
+      JsonArray rows = new JsonArray();
+      for (var goal : learningService.listGoals(context(e))) rows.add(goal.toJson());
+      JsonObject result = new JsonObject();
+      result.add("goals", rows);
+      json(e, 200, result);
+    } catch (SQLException ex) { error(e, 500, "learning_goals_error", ex.getMessage(), true); }
+      catch (Exception ex) { ex.printStackTrace(); error(e, 500, "learning_goals_error", ex.getMessage(), true); }
   }
 
   private void wechatAiCommand(HttpExchange e) throws IOException {

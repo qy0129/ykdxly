@@ -120,6 +120,10 @@ public final class LearningPrompt {
   // ── 学习目标草案提示 ──
   public static JsonArray goalDraftMessages(JsonObject context) {
     JsonArray messages = new JsonArray();
+    String today = context.has("currentDate") && !context.get("currentDate").isJsonNull()
+        ? context.get("currentDate").getAsString() : "";
+    String dateNote = today.isBlank() ? ""
+        : "今天是 " + today + "。用户说的“今年/明年/月底/三个月内”等相对时间一律以今天为准推算成具体日期。";
     messages.add(ModelClient.message("system", """
         你是学习目标规划师。帮用户将学习意图转化为结构化的学习目标草案。
         输入包含：用户的自然语言请求、现有目标（避免重复）、可用知识领域。
@@ -138,7 +142,7 @@ public final class LearningPrompt {
           "rationale": "为什么这样规划这个目标"
         }
         目标标题要具体、可衡量。如果用户请求模糊，在 conflicts 中追问澄清。
-        """));
+        """ + dateNote));
     messages.add(ModelClient.message("user", context.toString()));
     return messages;
   }
@@ -146,13 +150,17 @@ public final class LearningPrompt {
   // ── 学习目标修改提示 ──
   public static JsonArray goalUpdateMessages(JsonObject context) {
     JsonArray messages = new JsonArray();
+    String today = context.has("currentDate") && !context.get("currentDate").isJsonNull()
+        ? context.get("currentDate").getAsString() : "";
+    String dateNote = today.isBlank() ? ""
+        : "今天是 " + today + "。用户说的“明年/今年/月底”等相对时间以今天为准推算。";
     messages.add(ModelClient.message("system", """
         你是学习目标维护助手。根据用户的修改请求，从选中的学习目标中确定要修改的字段。
         输入：{"request":"用户的修改请求","targetGoal":"选中的学习目标"}。
         只输出要修改的字段，输出 JSON：
         {"fields":{"title":"...","description":"...","domain":"...","priority":"high|medium|low","targetDate":"YYYY-MM-DD 或 null","weeklyHours":数字,"status":"active|completed|archived"}}
         只包含用户明确要求修改的字段；没有要修改的字段时输出 {"fields":{}}。
-        """));
+        """ + dateNote));
     messages.add(ModelClient.message("user", context.toString()));
     return messages;
   }

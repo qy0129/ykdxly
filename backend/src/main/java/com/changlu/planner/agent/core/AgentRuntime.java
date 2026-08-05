@@ -280,6 +280,10 @@ public final class AgentRuntime implements AutoCloseable {
             }
             JsonObject runData = runResult.has("data") && runResult.get("data").isJsonObject()
                 ? runResult.getAsJsonObject("data") : runResult;
+            // 将最近一次 Agent 的结构化结果随会话返回，供饮食、旅行等领域卡片恢复显示。
+            if (runResult.has("data") && runResult.get("data").isJsonObject()) {
+              result.add("data", runResult.get("data").deepCopy());
+            }
             if (runData.has("inputRequirements")) result.add("inputRequirements", runData.get("inputRequirements").deepCopy());
             if (runData.has("formTitle")) result.add("formTitle", runData.get("formTitle").deepCopy());
           }

@@ -36,10 +36,10 @@ public final class ResumeContextStore {
     this.legacyFile = legacyFile;
   }
 
-  public synchronized void save(ResumeContext context) {
-    if (context == null || context.getLoginContext() == null) return;
+  public synchronized boolean save(ResumeContext context) {
+    if (context == null || context.getLoginContext() == null) return false;
     StoredResume stored = toStored(context);
-    if (blank(stored.userId())) return;
+    if (blank(stored.userId())) return false;
     String sql = """
         INSERT INTO wechat_login_sessions
           (wechat_user_id, bot_token, bot_id, base_url, updates_cursor, conversations_json)
@@ -56,9 +56,10 @@ public final class ResumeContextStore {
       statement.setString(5, stored.updatesCursor());
       statement.setString(6, gson.toJson(stored.conversations()));
       statement.executeUpdate();
+      return true;
     } catch (Exception error) {
       System.err.println("[微信登录态] 数据库保存失败，改存本地备用文件: " + error.getMessage());
-      saveLegacy(stored);
+      return saveLegacy(stored);
     }
   }
 
@@ -109,7 +110,7 @@ public final class ResumeContextStore {
     }
   }
 
-  private void saveLegacy(StoredResume stored) {
+  private boolean saveLegacy(StoredResume stored) {
     try {
       Path parent = legacyFile.toAbsolutePath().getParent();
       if (parent != null) Files.createDirectories(parent);
@@ -117,8 +118,10 @@ public final class ResumeContextStore {
       Files.writeString(temporary, gson.toJson(stored), StandardCharsets.UTF_8);
       try { Files.move(temporary, legacyFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE); }
       catch (IOException unsupportedAtomicMove) { Files.move(temporary, legacyFile, StandardCopyOption.REPLACE_EXISTING); }
+      return true;
     } catch (Exception error) {
       System.err.println("[微信登录态] 备用文件保存失败: " + error.getMessage());
+      return false;
     }
   }
 

@@ -99,6 +99,14 @@ function isImageUrl(url: string) {
   return /^https?:\/\//i.test(url) || url.startsWith('/api/ai/images/') || url.startsWith('/uploads/ai/')
 }
 
+/** 将 AI 回复中的普通网址转成可点击链接，兼容 B 站长链接和 b23.tv 短链接。 */
+function renderChatContent(content: string) {
+  const parts = content.split(/(https?:\/\/[^\s<>"'，。！？；：、）》】]+)/gi)
+  return parts.map((part, index) => /^https?:\/\//i.test(part)
+    ? <a className="ai-chat-link" href={part} target="_blank" rel="noreferrer" key={`${part}-${index}`}>{part}</a>
+    : <span key={`${index}-${part}`}>{part}</span>)
+}
+
 const draftActionLabels: Record<string, string> = {
   create_plan: '创建计划',
   create_stage: '创建阶段',
@@ -113,6 +121,10 @@ const draftActionLabels: Record<string, string> = {
   delete_task: '删除任务',
   delete_todo: '删除待办',
   delete_schedule: '删除日程',
+  create_learning_goal: '创建学习目标',
+  update_learning_goal: '调整学习目标',
+  delete_learning_goal: '删除学习目标',
+  create_learning_plan: '创建学习计划',
 }
 
 const draftFieldLabels: Record<string, string> = {
@@ -124,6 +136,9 @@ const draftFieldLabels: Record<string, string> = {
   durationMinutes: '时长',
   priority: '优先级',
   status: '状态',
+  domain: '领域',
+  targetDate: '目标日期',
+  weeklyHours: '每周时长',
 }
 
 function formatDraftValue(value: unknown) {
@@ -222,12 +237,94 @@ function travelPlanPreview(data: Record<string, unknown>) {
   )
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null
+}
+
+function arrayValue(value: unknown) {
+  return Array.isArray(value) ? value : []
+}
+
+function isDietData(value?: Record<string, unknown>) {
+  if (!value) return false
+  const targets = asRecord(value.dailyTargets)
+  return Boolean((targets && Object.keys(targets).length > 0)
+    || (Array.isArray(value.mealPlan) && value.mealPlan.length > 0)
+    || (Array.isArray(value.shoppingList) && value.shoppingList.length > 0))
+}
+
+const dietMealLabels: Record<string, string> = {
+  breakfast: '早餐',
+  lunch: '午餐',
+  dinner: '晚餐',
+  snack: '加餐',
+}
+
+function dietPlanPreview(data: Record<string, unknown>) {
+  const request = asRecord(data.request) ?? {}
+  const targets = asRecord(data.dailyTargets) ?? {}
+  const meals = arrayValue(data.mealPlan)
+  const shopping = arrayValue(data.shoppingList)
+  const recipes = arrayValue(data.recipes)
+  const risks = arrayValue(data.risks)
+  const targetItems = [
+    ['热量', targets.energyKcal, 'kcal'],
+    ['蛋白质', targets.proteinG, 'g'],
+    ['碳水', targets.carbsG, 'g'],
+    ['脂肪', targets.fatG, 'g'],
+  ] as Array<[string, unknown, string]>
+  const visibleTargets = targetItems.filter(([, value]) => value != null)
+  return (
+    <section className="ai-diet-plan-preview">
+      <div className="ai-diet-heading">
+        <div><strong>健康饮食方案</strong><span>{String(request.goal || '均衡饮食')}</span></div>
+        <small>一周菜单 · 估算目标</small>
+      </div>
+      {visibleTargets.length > 0 && <div className="ai-diet-targets">
+        {visibleTargets.map(([label, value, unit]) => <span key={String(label)}><b>{String(label)}</b><strong>{String(value)}<small>{unit}</small></strong></span>)}
+      </div>}
+      {meals.length > 0 && <div className="ai-diet-days">
+        {meals.map((day, index) => {
+          const item = asRecord(day) ?? {}
+          const dayMeals = arrayValue(item.meals)
+          return <article className="ai-diet-day" key={`${String(item.date ?? '')}-${index}`}>
+            <div className="ai-diet-day-heading"><strong>第 {String(item.day ?? index + 1)} 天</strong><small>{String(item.date ?? '')}</small></div>
+            <div className="ai-diet-meals">
+              {dayMeals.map((meal, mealIndex) => {
+                const value = asRecord(meal) ?? {}
+                const foods = arrayValue(value.foodItems).filter((food): food is string => typeof food === 'string')
+                return <div className="ai-diet-meal" key={`${String(value.type ?? '')}-${mealIndex}`}>
+                  <span>{dietMealLabels[String(value.type ?? '')] ?? String(value.type ?? '餐次')}</span>
+                  <div><b>{String(value.title ?? '营养搭配')}</b><p>{foods.join(' · ') || '按方案准备食材'}</p></div>
+                  {value.estimatedKcal != null && <small>{String(value.estimatedKcal)} kcal</small>}
+                </div>
+              })}
+            </div>
+          </article>
+        })}
+      </div>}
+      {(shopping.length > 0 || recipes.length > 0) && <div className="ai-diet-extra">
+        {shopping.length > 0 && <div><strong>购物清单</strong><p>{shopping.slice(0, 12).map((item, index) => {
+          const value = asRecord(item) ?? {}
+          return <span key={index}>{String(value.item ?? value.name ?? '食材')}{value.estimatedQuantity ? ` · ${String(value.estimatedQuantity)}` : ''}</span>
+        })}</p></div>}
+        {recipes.length > 0 && <div><strong>推荐做法</strong><p>{recipes.slice(0, 4).map((item, index) => <span key={index}>{String((asRecord(item) ?? {}).title ?? '食谱')}</span>)}</p></div>}
+      </div>}
+      {risks.length > 0 && <div className="ai-diet-risks"><strong>注意事项</strong><p>{risks.slice(0, 3).map((risk, index) => {
+        const value = asRecord(risk)
+        return <span key={index}>{String(value?.message ?? risk)}</span>
+      })}</p></div>}
+    </section>
+  )
+}
+
 export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChanged: () => void }) {
   const [messages, setMessages] = useState<ChatMessage[]>(welcomeMessages)
   const [conversations, setConversations] = useState<AiConversation[]>([])
   const [selectedConversationIds, setSelectedConversationIds] = useState<string[]>([])
   const [draft, setDraft] = useState<AiDraft>()
   const [planReview, setPlanReview] = useState<Record<string, unknown>>()
+  const [dietData, setDietData] = useState<Record<string, unknown>>()
   const [inputRequirements, setInputRequirements] = useState<AgentInputRequirement[]>([])
   const [informationFormOpen, setInformationFormOpen] = useState(false)
   const [informationForm, setInformationForm] = useState<TravelInfoForm>(emptyTravelInfoForm)
@@ -306,6 +403,7 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
       : welcomeMessages())
     setDraft(session.draft)
     setPlanReview(session.planReview && session.travelData ? session.travelData : undefined)
+    setDietData(isDietData(session.data) ? session.data : undefined)
     showInformationForm(session.inputRequirements, session.travelData)
     setLastChangeSet(undefined)
     setAttachments([])
@@ -367,6 +465,7 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
         if (currentState?.steps?.length) setRunSteps(currentState.steps)
           const currentTravelData = currentState?.travelData ?? currentState?.data
           if (currentState?.planReview && currentTravelData) setPlanReview(currentTravelData)
+          if (currentState && isDietData(currentState.data)) setDietData(currentState.data)
           showInformationForm(currentState?.inputRequirements, currentTravelData)
         if (currentState?.status === 'RUNNING') setWaitSeconds((seconds) => seconds + 1)
         const completed = states.filter(({ state }) => state.status !== 'RUNNING')
@@ -386,6 +485,7 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
             if (currentResult?.state.steps?.length) setRunSteps(currentResult.state.steps)
               const completedTravelData = currentResult?.state.travelData ?? currentResult?.state.data
               if (currentResult?.state.planReview && completedTravelData) setPlanReview(completedTravelData)
+              if (currentResult && isDietData(currentResult.state.data)) setDietData(currentResult.state.data)
               showInformationForm(currentResult?.state.inputRequirements, completedTravelData)
             if (currentResult?.state.status === 'FAILED') setError(currentResult.state.lastError || 'Agent 执行失败')
             const generatedImages = imageUrlsFromRun(currentResult?.state)
@@ -553,6 +653,7 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
     const displayMessage = attachments.length
       ? `${message}\n\n附件：${attachments.map((item) => item.fileName).join('、')}` : message
     setMessages((current) => [...current, { role: 'user', content: displayMessage }])
+    setDietData(undefined)
     setInput('')
       setBusy(true)
     setError('')
@@ -751,9 +852,10 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
             </section>
           )}
           <div className="ai-chat-messages" ref={messageList} aria-live="polite">
-              {messages.map((message, index) => <article className={`ai-chat-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === 'assistant' ? 'AI' : '你'}</span><div className="ai-chat-message-body"><p>{message.content}</p>{message.imageUrls?.map((url) => <a className="ai-generated-image-link" href={url} target="_blank" rel="noreferrer" key={url}><img className="ai-generated-image" src={url} alt="AI 生成图片" loading="lazy" /></a>)}</div></article>)}
+              {messages.map((message, index) => <article className={`ai-chat-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === 'assistant' ? 'AI' : '你'}</span><div className="ai-chat-message-body"><p>{renderChatContent(message.content)}</p>{message.imageUrls?.map((url) => <a className="ai-generated-image-link" href={url} target="_blank" rel="noreferrer" key={url}><img className="ai-generated-image" src={url} alt="AI 生成图片" loading="lazy" /></a>)}</div></article>)}
             {(currentConversationRunning || busy || loadingConversation) && <article className="ai-chat-message assistant loading"><span>AI</span><p><LoaderCircle className="spin" size={14} />{currentConversationRunning ? `后台处理中${pollFailureCount >= 4 ? '，连接后端暂时中断，正在自动重试' : waitSeconds >= 3 ? `，已等待 ${waitSeconds} 秒` : ''}${waitSeconds >= 190 ? '，超过预期时长仍未返回，可稍后刷新查看' : ''}，可切换其他对话` : busy ? '正在处理…' : '正在加载'}</p></article>}
           </div>
+          {dietData && !planReview && !draft && dietPlanPreview(dietData)}
           {planReview && !draft && (
             <section className="ai-travel-plan-review">
               <div className="ai-change-heading"><div><strong>旅行计划（待确认）</strong><span>先确认行程，再生成写入草案</span></div><span>可以直接在下方输入修改意见</span></div>

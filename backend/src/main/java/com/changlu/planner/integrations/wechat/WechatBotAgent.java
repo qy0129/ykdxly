@@ -38,7 +38,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /** 长路计划的微信入口：扫码、免扫码恢复、收发文本和计划提醒。 */
-public final class WechatBotAgent implements AutoCloseable {
+public final class
+WechatBotAgent implements AutoCloseable {
   private static final Logger LOG = LoggerFactory.getLogger(WechatBotAgent.class);
   private static final long LOGIN_STATUS_INTERVAL_MS = 2000L;
   private static final HttpClient IMAGE_HTTP = HttpClient.newBuilder()
@@ -57,6 +58,11 @@ public final class WechatBotAgent implements AutoCloseable {
   private final AtomicBoolean briefingInProgress = new AtomicBoolean();
   private final ScheduledExecutorService reminderExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
     Thread thread = new Thread(runnable, "wechat-reminder-dispatcher");
+    thread.setDaemon(true);
+    return thread;
+  });
+  private final ExecutorService resumeSaver = Executors.newSingleThreadExecutor(runnable -> {
+    Thread thread = new Thread(runnable, "wechat-resume-saver");
     thread.setDaemon(true);
     return thread;
   });
@@ -88,8 +94,23 @@ public final class WechatBotAgent implements AutoCloseable {
         client = current;
         boolean loggedIn = saved != null && current.isLoggedIn();
         if (loggedIn) {
-          try { current.getUpdates(); resumeStore.save(current.exportResumeContext()); LOG.info("[微信登录] 已恢复上次会话，无需重新扫码"); }
-          catch (Exception error) { LOG.warn("[微信登录] 会话已失效，重新扫码，原因={}", rootMessage(error)); resumeStore.clear(); closeClient(current); loggedIn = false; }
+          try {
+            current.getUpdates();
+            if (resumeStore.save(current.exportResumeContext())) {
+              LOG.info("[微信登录] 已恢复上次会话并更新登录态，无需重新扫码");
+            } else {
+              LOG.warn("[微信登录] 已恢复会话但登录态不完整，尝试补存");
+              scheduleResumeSave(current);
+            }
+          } catch (Exception error) {
+            LOG.warn("[微信登录] 会话已失效，重新扫码，原因={}", rootMessage(error));
+            resumeStore.clear();
+            closeClient(current);
+            // 恢复失败的客户端已被关闭/状态损坏，必须新建干净客户端再扫码，否则 executeLogin 不生效。
+            current = createClient(null);
+            client = current;
+            loggedIn = false;
+          }
         }
         if (!loggedIn) {
           LOG.info("[微信登录] 正在获取二维码");
@@ -113,7 +134,8 @@ public final class WechatBotAgent implements AutoCloseable {
     ILinkClientBuilder builder = ILinkClient.builder().config(config)
         .onLogin(new OnLoginListener() {
           @Override public void onLoginSuccess(com.github.wechat.ilink.sdk.core.login.LoginContext context) {
-            if (client != null) resumeStore.save(client.exportResumeContext());
+            // SDK 在登录成功瞬间登录上下文可能尚未就绪，异步重试直到拿到完整上下文再保存，保证下次可免扫码。
+            if (client != null) scheduleResumeSave(client);
           }
           @Override public void onLoginFailure(Throwable error) { LOG.error("[微信登录] 失败，原因={}", rootMessage(error), error); }
         })
@@ -123,6 +145,25 @@ public final class WechatBotAgent implements AutoCloseable {
         });
     if (resume != null) builder.resumeContext(resume);
     return builder.build();
+  }
+
+  /** 登录成功后异步重试保存登录态：SDK 的登录上下文可能延迟就绪，间隔重试直到保存成功，保证下次可免扫码。 */
+  private void scheduleResumeSave(ILinkClient current) {
+    resumeSaver.submit(() -> {
+      for (int attempt = 1; attempt <= 8; attempt++) {
+        try {
+          ResumeContext context = current.exportResumeContext();
+          if (resumeStore.save(context)) {
+            LOG.info("[微信登录] 登录态已保存，后续重启可免扫码恢复");
+            return;
+          }
+        } catch (Exception ignored) {
+          // 客户端可能仍在初始化，忽略继续重试
+        }
+        try { Thread.sleep(1000L * attempt); } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); return; }
+      }
+      LOG.warn("[微信登录] 登录态保存失败：多次尝试仍未拿到完整登录上下文，下一条消息到达时会再保存");
+    });
   }
 
   private boolean waitForLogin(ILinkClient current) throws InterruptedException {
@@ -325,5 +366,5 @@ public final class WechatBotAgent implements AutoCloseable {
   }
   private String rootMessage(Throwable error) { Throwable current = error; while (current.getCause() != null && current.getCause() != current) current = current.getCause(); return current.getMessage() == null ? current.getClass().getSimpleName() : current.getMessage(); }
 
-  @Override public void close() { running.set(false); briefingExecutor.shutdownNow(); reminderExecutor.shutdownNow(); if (reminderTask != null) reminderTask.cancel(false); if (worker != null) worker.interrupt(); if (client != null) { try { resumeStore.save(client.exportResumeContext()); } catch (Exception ignored) { } closeClient(client); } }
+  @Override public void close() { running.set(false); briefingExecutor.shutdownNow(); reminderExecutor.shutdownNow(); resumeSaver.shutdownNow(); if (reminderTask != null) reminderTask.cancel(false); if (worker != null) worker.interrupt(); if (client != null) { try { resumeStore.save(client.exportResumeContext()); } catch (Exception ignored) { } closeClient(client); } }
 }

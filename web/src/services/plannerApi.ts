@@ -244,6 +244,7 @@ export interface AiSession {
   draft?: AiDraft
   planReview?: boolean
   travelData?: Record<string, unknown>
+  data?: Record<string, unknown>
   inputRequirements?: AgentInputRequirement[]
   formTitle?: string
 }
@@ -349,6 +350,24 @@ export interface TrashItem {
   title: string
   deletedAt: string
   purgeAfter?: string | null
+}
+
+export interface LearningGoal {
+  id: string
+  title: string
+  description?: string
+  domain?: string
+  priority?: string
+  targetDate?: string | null
+  weeklyHours?: number | null
+  status: string
+  progress: number
+  totalSessions: number
+  completedSessions: number
+  totalMinutes: number
+  version: number
+  createdAt: string
+  updatedAt: string
 }
 
 /** 所有 JSON 请求统一经过这里，避免各功能页面重复处理状态码和请求头。 */
@@ -617,6 +636,10 @@ export const plannerApi = {
   reviewFacts: () => request<ReviewFacts>('/review/facts'),
    loadTodayReview: async () => normalizeReviewReport(await request<ReviewReport>('/review/today')),
    regenerateTodayReview: async () => normalizeReviewReport(await request<ReviewReport>('/review/today/regenerate', { method: 'POST' })),
+  loadLearningGoals: async () => {
+    const value = await request<{ goals: LearningGoal[] }>('/learning/goals')
+    return Array.isArray(value?.goals) ? value.goals : []
+  },
   chatReview: (message: string, history: AiReviewMessage[], conversationId?: string) => request<AiReviewResponse>('/ai/review/chat', {
     method: 'POST',
     body: JSON.stringify({ message, history, conversationId }),

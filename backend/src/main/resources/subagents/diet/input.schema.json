@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://changlu.local/schemas/subagents/diet/input.schema.json",
+  "title": "Diet Subagent Input",
+  "type": "object",
+  "properties": {
+    "message": { "type": "string", "minLength": 1 },
+    "arguments": {
+      "type": "object",
+      "properties": {
+        "goal": { "type": "string" },
+        "profile": {
+          "type": "object",
+          "properties": {
+            "age": { "type": "integer", "minimum": 18, "maximum": 120 },
+            "sex": { "type": "string", "enum": ["male", "female"] },
+            "heightCm": { "type": "number", "minimum": 100, "maximum": 250 },
+            "weightKg": { "type": "number", "minimum": 30, "maximum": 300 },
+            "targetWeightKg": { "type": "number", "minimum": 30, "maximum": 300, "description": "目标体重（kg），可选；仅减脂目标下用于提示减重缺口与安全分阶段建议" },
+            "activityLevel": { "type": "string", "enum": ["sedentary", "light", "moderate", "active", "very_active"] }
+          }
+        },
+        "dietaryType": { "type": "string", "enum": ["balanced", "vegetarian", "vegan", "halal", "pescatarian", "none"] },
+        "allergies": { "type": "array", "items": { "type": "string" } },
+        "dislikes": { "type": "array", "items": { "type": "string" } },
+        "medicalConditions": { "type": "array", "items": { "type": "string" } },
+        "mealsPerDay": { "type": "integer", "minimum": 2, "maximum": 6 },
+        "cookTimeMinutes": { "type": "integer", "minimum": 0, "maximum": 180 },
+        "weeklyBudget": {
+          "type": "object",
+          "properties": {
+            "amount": { "type": "number", "minimum": 0 },
+            "currency": { "type": "string", "minLength": 3, "maxLength": 3 }
+          },
+          "required": ["amount", "currency"]
+        },
+        "preferences": { "type": "array", "items": { "type": "string" } },
+        "saveToPlanner": { "type": "boolean" }
+      }
+    },
+    "documentIds": { "type": "array", "items": { "type": "string", "format": "uuid" } }
+  },
+  "required": ["message", "arguments", "documentIds"]
+}

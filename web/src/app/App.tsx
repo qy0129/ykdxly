@@ -21,6 +21,7 @@ import { StatsPage } from '../features/stats/StatsPage'
 import { AgentPage } from '../features/agent/AgentPage'
 import { ReviewPage } from '../features/review/ReviewPage'
 import { TrashPage } from '../features/trash/TrashPage'
+import { LearningPage } from '../features/learning/LearningPage'
 const initialStats: PlannerStats = {
   daily: [],
   heatmap: [],
@@ -28,7 +29,7 @@ const initialStats: PlannerStats = {
   metrics: { completion: 0, completed: 0, planned: 0, focusHours: 0, streak: 0 },
 }
 
-const routeViews = new Set<View>(['calendar', 'plans', 'todos', 'notes', 'stats', 'agent', 'review', 'trash', 'schedule'])
+const routeViews = new Set<View>(['calendar', 'plans', 'todos', 'notes', 'stats', 'agent', 'review', 'trash', 'schedule', 'learning'])
 
 function readRoute() {
   const value = window.location.hash.replace(/^#\/?/, '')
@@ -186,6 +187,7 @@ function App() {
     review: { title: 'AI 复盘', subtitle: '基于真实完成记录' },
     trash: { title: '回收站', subtitle: '恢复 30 天内删除的数据' },
     schedule: { title: '安排详情', subtitle: '把资料、学习和笔记放在一起' },
+    learning: { title: '学习目标', subtitle: '管理学习目标与进度' },
   }
 
   const openPlan = (planId: string) => {
@@ -416,6 +418,7 @@ function App() {
           {activeView === 'agent' && <AgentPage seed={agentSeed} onDataChanged={() => setDataRevision((value) => value + 1)} />}
           {activeView === 'review' && <ReviewPage />}
           {activeView === 'trash' && <TrashPage items={trashItems} restoringId={restoringTrashId} onRestore={(item) => void restoreTrashItem(item)} onRestoreMany={(items) => runTrashBatch(items, 'restore')} onDeleteMany={(items) => runTrashBatch(items, 'purge')} />}
+          {activeView === 'learning' && <LearningPage />}
           {activeView === 'schedule' && openedSchedule && (
             <ScheduleDetailPage item={openedSchedule} plansData={plansData} noteItems={noteItems} onNotesChange={saveNotes} onDeleteNote={deleteNote} onOpenNote={(id) => { setSelectedNoteId(id); navigate('notes') }} onToggle={toggleCalendarItem} onEdit={(item) => setScheduleDialog({ item })} onDelete={deleteSchedule} onBack={() => changeView('calendar')} />
           )}

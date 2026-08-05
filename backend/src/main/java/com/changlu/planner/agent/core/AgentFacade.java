@@ -4,6 +4,7 @@ import com.changlu.planner.agent.subagents.briefing.BriefingResult;
 import com.changlu.planner.agent.subagents.briefing.BriefingSubagent;
 import com.changlu.planner.agent.subagents.document.DocumentResult;
 import com.changlu.planner.agent.subagents.document.DocumentSubagent;
+import com.changlu.planner.agent.subagents.diet.DietModule;
 import com.changlu.planner.agent.subagents.image.ImageModule;
 import com.changlu.planner.agent.subagents.memory.MemorySubagent;
 import com.changlu.planner.agent.subagents.research.ResearchSubagent;
@@ -55,6 +56,7 @@ public final class AgentFacade implements AutoCloseable {
 
     // New-contract module: registers the travel subagent and its tools into the standard tool registry.
     new TravelModule(model, commands, webSearch).register(subagents, standardTools);
+    new DietModule(model, commands, webSearch).register(subagents, standardTools);
     // 文生图与其他领域能力一样挂入统一注册表，网页和微信都会经过同一个 Agent 循环。
     new ImageModule(database).register(subagents, standardTools);
 

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://changlu.local/schemas/subagents/diet/output.schema.json",
+  "title": "Diet Subagent Output",
+  "type": "object",
+  "properties": {
+    "schemaVersion": { "type": "string" },
+    "status": {
+      "type": "string",
+      "enum": ["completed", "waiting_user", "waiting_confirmation", "failed", "cancelled"]
+    },
+    "message": { "type": "string" },
+    "data": {
+      "type": "object",
+      "properties": {
+        "request": { "type": "object" },
+        "dailyTargets": { "type": "object" },
+        "mealPlan": { "type": "array" },
+        "shoppingList": { "type": "array" },
+        "recipes": { "type": "array" },
+        "tips": { "type": "array" },
+        "sources": { "type": "array" },
+        "risks": { "type": "array" },
+        "questions": { "type": "array" },
+        "planningInstruction": { "type": "string" }
+      },
+      "required": ["request", "dailyTargets", "mealPlan", "shoppingList", "recipes", "tips", "sources", "risks", "questions", "planningInstruction"]
+    },
+    "errors": { "type": "array" },
+    "traceId": { "type": "string" },
+    "requiresConfirmation": { "type": "boolean" },
+    "draftId": { "type": ["string", "null"] }
+  },
+  "required": ["schemaVersion", "status", "message", "data", "errors", "traceId", "requiresConfirmation", "draftId"]
+}

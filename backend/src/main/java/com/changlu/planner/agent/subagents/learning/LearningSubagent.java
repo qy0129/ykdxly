@@ -151,12 +151,21 @@ public final class LearningSubagent implements Subagent {
    */
   private String classifyIntent(String request) {
     String normalized = request.replaceAll("\\s", "").toLowerCase();
+    // 写操作优先：请求里同时出现"创建/分析"（如"创建 Python 数据分析目标"）时不能被读意图抢走。
+    if (normalized.contains("创建") || normalized.contains("新建") || normalized.contains("添加目标")
+        || normalized.contains("设立")) {
+      return "create_goal";
+    }
+    if (normalized.contains("修改") || normalized.contains("更新") || normalized.contains("调整目标")
+        || normalized.contains("改到") || normalized.contains("改成") || normalized.contains("改一下")
+        || normalized.contains("提前") || normalized.contains("推迟") || normalized.contains("顺延")) {
+      return "update_goal";
+    }
+    if (normalized.contains("删除") || normalized.contains("移除") || normalized.contains("放弃")) {
+      return "delete_goal";
+    }
     if (normalized.contains("进度") || normalized.contains("进展") || normalized.contains("分析")) {
       return "analyze_progress";
-    }
-    if (normalized.contains("建议") || normalized.contains("计划") || normalized.contains("安排学习")
-        || normalized.contains("怎么学") || normalized.contains("学习方案")) {
-      return "suggest_plan";
     }
     if (normalized.contains("缺口") || normalized.contains("薄弱") || normalized.contains("知识体系")
         || normalized.contains("领域") || normalized.contains("检测")) {
@@ -165,15 +174,10 @@ public final class LearningSubagent implements Subagent {
     if (normalized.contains("统计") || normalized.contains("数据") || normalized.contains("总结")) {
       return "view_stats";
     }
-    if (normalized.contains("创建") || normalized.contains("新建") || normalized.contains("添加目标")
-        || normalized.contains("设立")) {
-      return "create_goal";
-    }
-    if (normalized.contains("修改") || normalized.contains("更新") || normalized.contains("调整目标")) {
-      return "update_goal";
-    }
-    if (normalized.contains("删除") || normalized.contains("移除") || normalized.contains("放弃")) {
-      return "delete_goal";
+    // 只有明确的"计划/方案/怎么学"才进学习计划，裸"建议/计划"不抢普通问题。
+    if (normalized.contains("学习计划") || normalized.contains("制定计划") || normalized.contains("安排学习")
+        || normalized.contains("怎么学") || normalized.contains("学习方案")) {
+      return "suggest_plan";
     }
     return "general";
   }
@@ -253,15 +257,15 @@ public final class LearningSubagent implements Subagent {
       JsonObject modelContext = goalDraftContext(requestText, context);
       JsonArray draftMessages = LearningPrompt.goalDraftMessages(modelContext);
       appendSharedContext(draftMessages, context);
+      // 默认 60s 超时 + 2 次重试，避免慢模型在 25s 内未返回被误判为失败。
       JsonObject aiResult = model.completeJson("learning-goal-draft",
-          draftMessages, 0.3, 1200, 25, 1);
+          draftMessages, 0.3, 1200);
       JsonObject goal = aiResult.has("draft") && aiResult.get("draft").isJsonObject()
           ? aiResult.getAsJsonObject("draft") : aiResult;
       String title = string(goal, "title", "");
       if (title.isBlank()) {
-        return LearningResult.waitingUser(
-            "请描述你想创建的学习目标，包括名称和学习领域，例如「创建学习目标：今年把英语四级考到 600 分」。",
-            new JsonObject());
+        return waitingQuestion(
+            "请描述你想创建的学习目标，包括名称和学习领域，例如「创建学习目标：今年把英语四级考到 600 分」。");
       }
       JsonObject fields = whitelistGoalFields(goal);
       if (!fields.has("title")) fields.addProperty("title", title);
@@ -284,7 +288,7 @@ public final class LearningSubagent implements Subagent {
     LearningService.LearningGoal target = resolveGoal(requestText, input, goals);
     if (target == null) {
       if (goals.isEmpty()) return LearningResult.success("当前没有可修改的学习目标，可以先创建一个。", new JsonObject());
-      return LearningResult.waitingUser("要修改哪个学习目标？" + numberedGoalList(goals), new JsonObject());
+      return waitingQuestion("要修改哪个学习目标？" + numberedGoalList(goals));
     }
     if (!model.configured()) {
       return LearningResult.error("AI 模型未配置，无法生成修改草案", "请配置 PLANNER_AI_API_KEY 后重试");
@@ -292,16 +296,16 @@ public final class LearningSubagent implements Subagent {
     try {
       JsonObject modelContext = new JsonObject();
       modelContext.addProperty("request", requestText);
+      modelContext.addProperty("currentDate", LocalDate.now().toString());
       modelContext.add("targetGoal", target.toJson());
       JsonArray draftMessages = LearningPrompt.goalUpdateMessages(modelContext);
       appendSharedContext(draftMessages, context);
-      JsonObject aiResult = model.completeJson("learning-goal-update", draftMessages, 0.3, 1200, 25, 1);
+      JsonObject aiResult = model.completeJson("learning-goal-update", draftMessages, 0.3, 1200);
       JsonObject fields = aiResult.has("fields") && aiResult.get("fields").isJsonObject()
           ? whitelistGoalFields(aiResult.getAsJsonObject("fields")) : new JsonObject();
       if (fields.size() == 0 || (fields.size() == 1 && fields.has("reason"))) {
-        return LearningResult.waitingUser(
-            "请告诉我要修改「" + target.title() + "」的哪些内容，例如目标日期、每周时长或优先级。",
-            new JsonObject());
+        return waitingQuestion(
+            "请告诉我要修改「" + target.title() + "」的哪些内容，例如目标日期、每周时长或优先级。");
       }
       JsonObject action = goalAction("update_learning_goal", "调整学习目标：" + target.title(), fields,
           target.id());
@@ -320,7 +324,7 @@ public final class LearningSubagent implements Subagent {
     LearningService.LearningGoal target = resolveGoal(requestText, input, goals);
     if (target == null) {
       if (goals.isEmpty()) return LearningResult.success("当前没有可删除的学习目标。", new JsonObject());
-      return LearningResult.waitingUser("要删除哪个学习目标？" + numberedGoalList(goals), new JsonObject());
+      return waitingQuestion("要删除哪个学习目标？" + numberedGoalList(goals));
     }
     JsonObject fields = new JsonObject();
     fields.addProperty("reason", "用户确认删除学习目标");
@@ -370,7 +374,7 @@ public final class LearningSubagent implements Subagent {
       appendSharedContext(messages, context);
       messages.add(ModelClient.message("user", modelContext.toString()));
 
-      JsonObject aiResult = model.completeJson("learning-general", messages, 0.3, 1000, 25, 1);
+      JsonObject aiResult = model.completeJson("learning-general", messages, 0.3, 1000);
       String reply = aiResult.has("reply") ? aiResult.get("reply").getAsString() : "分析完成";
 
       JsonObject data = new JsonObject();
@@ -415,6 +419,15 @@ public final class LearningSubagent implements Subagent {
     return item;
   }
 
+  /** 追问型等待：必须带 questions，否则 AgentRuntime 会把它当 COMPLETED 结束 run，无法继续同一条对话。 */
+  private LearningResult waitingQuestion(String message) {
+    JsonObject data = new JsonObject();
+    JsonArray questions = new JsonArray();
+    questions.add(message);
+    data.add("questions", questions);
+    return LearningResult.waitingUser(message, data);
+  }
+
   private LearningResult informationForm(JsonObject request, JsonArray requirements) {
     JsonObject data = new JsonObject(); data.add("request", request.deepCopy());
     data.addProperty("formTitle", "信息搜集表"); data.add("inputRequirements", requirements);
@@ -454,6 +467,8 @@ public final class LearningSubagent implements Subagent {
   private JsonObject goalDraftContext(String requestText, AgentContext context) throws Exception {
     JsonObject modelContext = new JsonObject();
     modelContext.addProperty("request", requestText);
+    // 让模型知道"今天"，避免把"今年/年底"等相对时间算成训练期年份。
+    modelContext.addProperty("currentDate", LocalDate.now().toString());
     JsonArray existing = new JsonArray();
     for (var goal : service.listGoals(context.identity())) {
       JsonObject g = new JsonObject();
@@ -487,19 +502,49 @@ public final class LearningSubagent implements Subagent {
       if (index >= 1 && index <= goals.size()) return goals.get(index - 1);
       return null;
     }
-    LearningService.LearningGoal matched = null;
+    // 最长公共子串打分：取与消息共享片段最长的目标；<3 字（如"目标/学习"）是泛词，不算唯一命中。
+    LearningService.LearningGoal best = null;
+    int bestLength = 0;
+    boolean ambiguous = false;
     for (var goal : goals) {
-      String title = goal.title() == null ? "" : goal.title().replaceAll("\\s", "").toLowerCase();
-      String domain = goal.domain() == null ? "" : goal.domain().replaceAll("\\s", "").toLowerCase();
-      boolean titleHit = !title.isBlank()
-          && (normalized.contains(title) || (title.length() >= 2 && normalized.contains(title.substring(0, 2))));
-      boolean domainHit = !domain.isBlank() && domain.length() >= 2 && normalized.contains(domain);
-      if (titleHit || domainHit) {
-        if (matched != null) return null; // 多个目标命中 → 交给调用方让用户明确选择
-        matched = goal;
+      String title = normalize(goal.title());
+      String domain = normalize(goal.domain());
+      int length = Math.max(longestShared(normalized, title), longestShared(normalized, domain));
+      if (length > bestLength) {
+        bestLength = length;
+        best = goal;
+        ambiguous = false;
+      } else if (length == bestLength && bestLength >= 3 && best != null) {
+        ambiguous = true; // 并列命中最长片段 → 交给调用方让用户明确选择
       }
     }
-    return matched;
+    if (ambiguous) return null;
+    if (bestLength >= 3) return best;
+    // 追问场景：resume 会把整段 goal（含追加的回答）作为 message 传入，
+    // 用户回答"1"时消息形如"删除学习目标\n1"，提取末尾数字作为序号。
+    Matcher numericTail = Pattern.compile("(\\d+|[一二三四五六七八九十①②③④⑤⑥⑦⑧⑨⑩]+)$").matcher(normalized);
+    if (numericTail.find()) {
+      int index = parseIndex(numericTail.group(1));
+      if (index >= 1 && index <= goals.size()) return goals.get(index - 1);
+    }
+    return null;
+  }
+
+  private String normalize(String value) {
+    return value == null ? "" : value.replaceAll("\\s", "").toLowerCase();
+  }
+
+  /** 两个短字符串的最长公共子串长度。 */
+  private int longestShared(String a, String b) {
+    int best = 0;
+    for (int i = 0; i < a.length(); i++) {
+      for (int j = 0; j < b.length(); j++) {
+        int k = 0;
+        while (i + k < a.length() && j + k < b.length() && a.charAt(i + k) == b.charAt(j + k)) k++;
+        if (k > best) best = k;
+      }
+    }
+    return best;
   }
 
   private int parseIndex(String value) {
@@ -562,11 +607,21 @@ public final class LearningSubagent implements Subagent {
     fields.add("stages", stages); return fields;
   }
 
-  /** 把长期记忆与最近对话注入模型消息，让 Subagent 在回答时也能结合上文。 */
+  /** 把长期记忆与最近对话合并进第一条 system 提示（SiliconFlow 只允许单条 system 且必须在开头）。 */
   private void appendSharedContext(JsonArray messages, AgentContext context) {
     String shared = context.sharedContext();
-    if (shared != null && !shared.isBlank()) {
-      messages.add(ModelClient.message("system", "已知的用户长期记忆与最近对话：\n" + shared));
+    if (shared == null || shared.isBlank()) return;
+    String suffix = "\n\n已知的用户长期记忆与最近对话：\n" + shared;
+    for (int index = 0; index < messages.size(); index++) {
+      JsonElement element = messages.get(index);
+      if (!element.isJsonObject()) continue;
+      JsonObject message = element.getAsJsonObject();
+      if (element.getAsJsonObject().has("role") && "system".equals(message.get("role").getAsString())) {
+        String content = message.has("content") && !message.get("content").isJsonNull()
+            ? message.get("content").getAsString() : "";
+        message.addProperty("content", content + suffix);
+        return;
+      }
     }
   }
 }
