@@ -1,8 +1,11 @@
 package com.changlu.planner.agent.subagents.memory;
 
-import com.changlu.planner.agent.core.AgentContext;
 import com.changlu.planner.agent.core.ModelClient;
-import com.changlu.planner.agent.core.Subagent;
+import com.changlu.planner.agent.core.contract.AgentContext;
+import com.changlu.planner.agent.core.contract.AgentResult;
+import com.changlu.planner.agent.core.contract.Subagent;
+import com.changlu.planner.agent.core.contract.SubagentDefinition;
+import com.changlu.planner.agent.core.contract.SubagentRequest;
 import com.changlu.planner.shared.database.Database;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -12,6 +15,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -30,16 +34,19 @@ public final class MemorySubagent implements Subagent {
   private final Database database;
   private final ModelClient model;
   private final Gson gson = new Gson();
+  private final SubagentDefinition definition = new SubagentDefinition(
+      "memory", "1.0.0", "读取用户长期偏好、个性和沟通风格，回答已记住的内容",
+      List.of("你记得我什么", "记住我的", "忘记我的", "长期偏好"), List.of(),
+      new JsonObject(), new JsonObject(), Set.of(), false, true, Duration.ofSeconds(90), 1);
 
   public MemorySubagent(Database database, ModelClient model) {
     this.database = database;
     this.model = model;
   }
 
-  @Override public String name() { return "memory"; }
-  @Override public String description() { return "读取用户长期偏好、个性和沟通风格，并回答 AI 已记住的内容"; }
+  @Override public SubagentDefinition definition() { return definition; }
 
-  @Override public JsonObject execute(String request, AgentContext context) throws Exception {
+  @Override public AgentResult execute(SubagentRequest request, AgentContext context) throws Exception {
     JsonArray memories = list(context.identity());
     JsonObject result = new JsonObject();
     if (memories.isEmpty()) {
@@ -52,7 +59,7 @@ public final class MemorySubagent implements Subagent {
       result.addProperty("reply", reply.toString().trim());
     }
     result.add("memories", memories);
-    return result;
+    return AgentResult.completed(result.get("reply").getAsString(), result, context.traceId());
   }
 
   /** 每轮对话完成后自动更新长期记忆并按需压缩短期上下文。 */

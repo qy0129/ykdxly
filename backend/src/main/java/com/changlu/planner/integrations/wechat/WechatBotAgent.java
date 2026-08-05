@@ -18,7 +18,11 @@ import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CancellationException;
@@ -37,6 +41,8 @@ import org.slf4j.LoggerFactory;
 public final class WechatBotAgent implements AutoCloseable {
   private static final Logger LOG = LoggerFactory.getLogger(WechatBotAgent.class);
   private static final long LOGIN_STATUS_INTERVAL_MS = 2000L;
+  private static final HttpClient IMAGE_HTTP = HttpClient.newBuilder()
+      .connectTimeout(Duration.ofSeconds(10)).build();
   private final AtomicBoolean running = new AtomicBoolean(true);
   private final Database database;
   private final ResumeContextStore resumeStore;
@@ -153,13 +159,20 @@ public final class WechatBotAgent implements AutoCloseable {
     LOG.info("[工作流] 收到消息｜用户消息｜待判断｜{}", logText(text));
     try {
       String reply;
+      List<String> imageUrls = List.of();
       String route;
       if (isNoteCapture(text)) { route = "笔记记录"; reply = planner.capture(userId, text); }
       else if (isReadOnlyCommand(text)) { route = "只读查询"; reply = planner.command(userId, text); }
       else if (text.contains("计划网页") || text.contains("工作台") || text.equals("打开计划")) { route = "网页链接"; reply = webLinkMessage(); }
-      else { route = "AI对话"; reply = planner.aiChat(userId, text); }
+      else {
+        route = "AI对话";
+        PlannerWechatClient.AiReply aiReply = planner.aiChat(userId, text);
+        reply = aiReply.text();
+        imageUrls = aiReply.imageUrls();
+      }
       LOG.info("[工作流] 路由完成｜路由决策｜{}｜进入{}处理", route, route);
       current.sendText(userId, reply);
+      for (String imageUrl : imageUrls) sendGeneratedImage(current, userId, imageUrl);
       LOG.info("[工作流] 返回消息｜Agent消息｜{}｜{}", route, logText(reply));
     } catch (Exception error) {
       String detail = rootMessage(error);
@@ -173,6 +186,32 @@ public final class WechatBotAgent implements AutoCloseable {
       } catch (Exception sendError) {
         LOG.error("[工作流] 错误反馈失败｜错误消息｜错误处理｜{}", rootMessage(sendError));
       }
+    }
+  }
+
+  /** 下载 Provider 返回的临时 URL，再交给微信 SDK 发送真正的图片消息。 */
+  private void sendGeneratedImage(ILinkClient current, String userId, String imageUrl) {
+    try {
+      URI uri = URI.create(imageUrl);
+      if (!("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))) {
+        current.sendText(userId, "图片链接：" + imageUrl);
+        return;
+      }
+      HttpRequest request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(45)).GET().build();
+      HttpResponse<byte[]> response = IMAGE_HTTP.send(request, HttpResponse.BodyHandlers.ofByteArray());
+      byte[] bytes = response.body();
+      if (response.statusCode() / 100 != 2 || bytes == null || bytes.length == 0 || bytes.length > 10 * 1024 * 1024) {
+        current.sendText(userId, "图片已生成，但微信无法直接下载，请打开链接：" + imageUrl);
+        return;
+      }
+      String mime = response.headers().firstValue("Content-Type").orElse("image/png").split(";", 2)[0];
+      String extension = mime.endsWith("jpeg") || mime.endsWith("jpg") ? "jpg"
+          : mime.endsWith("webp") ? "webp" : "png";
+      current.sendImage(userId, bytes, "ai-generated." + extension, mime);
+    } catch (Exception error) {
+      LOG.warn("[微信图片发送失败] URL={} 原因={}", imageUrl, rootMessage(error));
+      try { current.sendText(userId, "图片已生成，请打开链接：" + imageUrl); }
+      catch (Exception ignored) { }
     }
   }
 

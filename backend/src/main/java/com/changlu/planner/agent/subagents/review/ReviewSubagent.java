@@ -1,8 +1,11 @@
 package com.changlu.planner.agent.subagents.review;
 
-import com.changlu.planner.agent.core.AgentContext;
 import com.changlu.planner.agent.core.ModelClient;
-import com.changlu.planner.agent.core.Subagent;
+import com.changlu.planner.agent.core.contract.AgentContext;
+import com.changlu.planner.agent.core.contract.AgentResult;
+import com.changlu.planner.agent.core.contract.Subagent;
+import com.changlu.planner.agent.core.contract.SubagentDefinition;
+import com.changlu.planner.agent.core.contract.SubagentRequest;
 import com.changlu.planner.features.command.AiCommandService;
 import com.changlu.planner.shared.database.Database;
 import com.google.gson.Gson;
@@ -12,6 +15,9 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.time.LocalDateTime;
+import java.time.Duration;
+import java.util.List;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -22,6 +28,10 @@ public final class ReviewSubagent implements Subagent {
   private final AiCommandService commands;
   private final ModelClient model;
   private final Gson gson = new Gson();
+  private final SubagentDefinition definition = new SubagentDefinition(
+      "review", "1.0.0", "根据真实执行记录生成只读每日复盘",
+      List.of("复盘", "总结今天", "每日复盘"), List.of("直接修改计划"),
+      new JsonObject(), new JsonObject(), Set.of(), false, true, Duration.ofSeconds(120), 1);
 
   public ReviewSubagent(Database database, AiCommandService commands, ModelClient model) {
     this.database = database;
@@ -29,15 +39,14 @@ public final class ReviewSubagent implements Subagent {
     this.model = model;
   }
 
-  @Override public String name() { return "review"; }
-  @Override public String description() { return "根据今日真实完成、延期、阻塞和专注记录生成只读复盘"; }
+  @Override public SubagentDefinition definition() { return definition; }
 
-  @Override public JsonObject execute(String request, AgentContext context) throws Exception {
-    ReviewResult report = todayResult(context.identity(), request.contains("重新") || request.contains("刷新"));
+  @Override public AgentResult execute(SubagentRequest request, AgentContext context) throws Exception {
+    ReviewResult report = todayResult(context.identity(), request.message().contains("重新") || request.message().contains("刷新"));
     JsonObject result = new JsonObject();
     result.addProperty("reply", report.summary());
     result.add("report", report.toJson());
-    return result;
+    return AgentResult.completed(report.summary(), result, context.traceId());
   }
 
   public JsonObject today(Database.Context context, boolean force) throws Exception {

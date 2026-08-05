@@ -2,12 +2,17 @@ package com.changlu.planner.agent.subagents.learning;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.changlu.planner.agent.core.AgentContext;
 import com.changlu.planner.agent.core.ModelClient;
+import com.changlu.planner.agent.core.contract.AgentContext;
+import com.changlu.planner.agent.core.contract.AgentResult;
+import com.changlu.planner.agent.core.contract.SubagentRequest;
 import com.changlu.planner.shared.database.Database;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import java.util.UUID;
+import java.time.Instant;
+import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -41,9 +46,9 @@ class LearningSubagentTest {
   void executeWithAnalyzeProgressIntentReturnsGracefulError() throws Exception {
     // service=null → 工具失败 → execute 捕获异常返回 error 结果
     subagent = new LearningSubagent(null, model);
-    AgentContext context = new AgentContext(UUID.randomUUID(), DB_CTX, "web", new JsonObject());
+    AgentContext context = context();
 
-    JsonObject result = subagent.execute("帮我分析学习进度", context);
+    JsonObject result = execute("帮我分析学习进度", context);
     assertNotNull(result);
     // execute 的 catch 块将异常包装为 error 状态
     assertTrue(result.has("reply") || result.has("status"));
@@ -52,18 +57,18 @@ class LearningSubagentTest {
   @Test
   void executeWithDetectGapsIntentReturnsGracefulError() throws Exception {
     subagent = new LearningSubagent(null, model);
-    AgentContext context = new AgentContext(UUID.randomUUID(), DB_CTX, "web", new JsonObject());
+    AgentContext context = context();
 
-    JsonObject result = subagent.execute("检测知识缺口", context);
+    JsonObject result = execute("检测知识缺口", context);
     assertNotNull(result);
   }
 
   @Test
   void executeWithEmptyRequestHandledGracefully() throws Exception {
     subagent = new LearningSubagent(null, model);
-    AgentContext context = new AgentContext(UUID.randomUUID(), DB_CTX, "web", new JsonObject());
+    AgentContext context = context();
 
-    JsonObject result = subagent.execute("", context);
+    JsonObject result = execute("", context);
     assertNotNull(result);
   }
 
@@ -72,40 +77,41 @@ class LearningSubagentTest {
     UUID userId = UUID.randomUUID();
     UUID workspaceId = UUID.randomUUID();
     Database.Context dbContext = new Database.Context(userId, workspaceId);
-    AgentContext context = new AgentContext(UUID.randomUUID(), dbContext, "web", new JsonObject());
+    AgentContext context = new AgentContext(UUID.randomUUID(), UUID.randomUUID(), "test-trace", dbContext,
+        "web", Set.of(), Instant.now().plusSeconds(60), new JsonObject());
 
     assertEquals(userId, context.identity().userId());
     assertEquals(workspaceId, context.identity().workspaceId());
     assertEquals("web", context.channel());
     assertNotNull(context.runId());
-    assertNotNull(context.input());
+    assertNotNull(context.taskState());
   }
 
   @Test
   void createGoalWithModelUnavailableReturnsErrorResult() throws Exception {
     // model未配置且service=null → 工具链失败 → 优雅降级为错误结果
     subagent = new LearningSubagent(null, model);
-    AgentContext context = new AgentContext(UUID.randomUUID(), DB_CTX, "web", new JsonObject());
+    AgentContext context = context();
 
-    JsonObject result = subagent.execute("帮我创建一个学习目标", context);
+    JsonObject result = execute("帮我创建一个学习目标", context);
     assertNotNull(result);
   }
 
   @Test
   void suggestPlanIntentReturnsGracefulError() throws Exception {
     subagent = new LearningSubagent(null, model);
-    AgentContext context = new AgentContext(UUID.randomUUID(), DB_CTX, "web", new JsonObject());
+    AgentContext context = context();
 
-    JsonObject result = subagent.execute("给些学习建议", context);
+    JsonObject result = execute("给些学习建议", context);
     assertNotNull(result);
   }
 
   @Test
   void generalIntentReturnsGracefulError() throws Exception {
     subagent = new LearningSubagent(null, model);
-    AgentContext context = new AgentContext(UUID.randomUUID(), DB_CTX, "web", new JsonObject());
+    AgentContext context = context();
 
-    JsonObject result = subagent.execute("你好", context);
+    JsonObject result = execute("你好", context);
     assertNotNull(result);
   }
 
@@ -113,7 +119,7 @@ class LearningSubagentTest {
   void allIntentPathsReturnJsonObjectNotException() throws Exception {
     // 验证所有意图路径在异常时都返回 JsonObject 而不抛异常（优雅降级）
     subagent = new LearningSubagent(null, model);
-    AgentContext context = new AgentContext(UUID.randomUUID(), DB_CTX, "web", new JsonObject());
+    AgentContext context = context();
 
     String[] requests = {
         "分析学习进度",           // analyze_progress
@@ -127,7 +133,7 @@ class LearningSubagentTest {
     };
 
     for (String request : requests) {
-      JsonObject result = subagent.execute(request, context);
+      JsonObject result = execute(request, context);
       assertNotNull(result, "请求 '" + request + "' 应该返回 JsonObject 而非抛异常");
     }
   }
@@ -173,24 +179,32 @@ class LearningSubagentTest {
 
   @Test
   void learningToolsRegistryContainsAllSevenTools() {
-    var registry = LearningTools.registry();
-    assertEquals(7, registry.all().size());
-
-    assertFalse(registry.require(LearningTools.ANALYZE_PROGRESS).requiresConfirmation());
-    assertFalse(registry.require(LearningTools.SUGGEST_STUDY_PLAN).requiresConfirmation());
-    assertFalse(registry.require(LearningTools.DETECT_KNOWLEDGE_GAPS).requiresConfirmation());
-    assertFalse(registry.require(LearningTools.VIEW_STATS).requiresConfirmation());
-
-    assertTrue(registry.require(LearningTools.CREATE_GOAL).requiresConfirmation());
-    assertTrue(registry.require(LearningTools.UPDATE_GOAL).requiresConfirmation());
-    assertTrue(registry.require(LearningTools.DELETE_GOAL).requiresConfirmation());
+    var definitions = LearningTools.definitions();
+    assertEquals(7, definitions.size());
+    assertFalse(definitions.get(LearningTools.ANALYZE_PROGRESS).requiresConfirmation());
+    assertFalse(definitions.get(LearningTools.SUGGEST_STUDY_PLAN).requiresConfirmation());
+    assertFalse(definitions.get(LearningTools.DETECT_KNOWLEDGE_GAPS).requiresConfirmation());
+    assertFalse(definitions.get(LearningTools.VIEW_STATS).requiresConfirmation());
+    assertTrue(definitions.get(LearningTools.CREATE_GOAL).requiresConfirmation());
+    assertTrue(definitions.get(LearningTools.UPDATE_GOAL).requiresConfirmation());
+    assertTrue(definitions.get(LearningTools.DELETE_GOAL).requiresConfirmation());
   }
 
   @Test
   void toolRegistryRejectsDuplicateRegistration() {
-    var registry = LearningTools.registry();
+    var registry = new com.changlu.planner.agent.core.tool.ToolRegistry();
+    registry.register(LearningTools.handler(LearningTools.CREATE_GOAL));
     assertThrows(IllegalArgumentException.class,
-        () -> registry.register(new com.changlu.planner.agent.core.ToolDefinition(
-            LearningTools.CREATE_GOAL, "重复", "subagent", true)));
+        () -> registry.register(LearningTools.handler(LearningTools.CREATE_GOAL)));
+  }
+
+  private AgentContext context() {
+    return new AgentContext(UUID.randomUUID(), UUID.randomUUID(), "test-trace", DB_CTX,
+        "web", Set.of(), Instant.now().plusSeconds(60), new JsonObject());
+  }
+
+  private JsonObject execute(String message, AgentContext context) throws Exception {
+    AgentResult result = subagent.execute(new SubagentRequest(message, new JsonObject(), List.of()), context);
+    return result.toJson();
   }
 }

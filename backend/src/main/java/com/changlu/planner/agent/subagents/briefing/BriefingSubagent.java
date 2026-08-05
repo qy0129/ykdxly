@@ -1,7 +1,10 @@
 package com.changlu.planner.agent.subagents.briefing;
 
-import com.changlu.planner.agent.core.AgentContext;
-import com.changlu.planner.agent.core.Subagent;
+import com.changlu.planner.agent.core.contract.AgentContext;
+import com.changlu.planner.agent.core.contract.AgentResult;
+import com.changlu.planner.agent.core.contract.Subagent;
+import com.changlu.planner.agent.core.contract.SubagentDefinition;
+import com.changlu.planner.agent.core.contract.SubagentRequest;
 import com.changlu.planner.agent.subagents.research.WebSearchTool;
 import com.changlu.planner.shared.database.Database;
 import com.google.gson.JsonObject;
@@ -12,16 +15,22 @@ import java.sql.SQLException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CompletableFuture;
+import java.util.Set;
 
 /** 汇总计划数据、天气和新闻的每日简报 Subagent。 */
 public final class BriefingSubagent implements Subagent {
   private final Database database;
   private final WeatherTool weather;
   private final NewsTool news;
+  private final SubagentDefinition definition = new SubagentDefinition(
+      "briefing", "1.0.0", "Daily planning briefing with schedules, todos, weather and news",
+      List.of("简报", "今日安排", "每日摘要"), List.of(),
+      new JsonObject(), new JsonObject(), Set.of(), true, false, Duration.ofSeconds(90), 1);
 
   public BriefingSubagent(Database database, WebSearchTool search) {
     this.database = database;
@@ -29,11 +38,11 @@ public final class BriefingSubagent implements Subagent {
     this.news = new NewsTool(search);
   }
 
-  @Override public String name() { return "briefing"; }
-  @Override public String description() { return "汇总今日计划、日程、待办、天气和相关新闻"; }
+  @Override public SubagentDefinition definition() { return definition; }
 
-  @Override public JsonObject execute(String request, AgentContext context) throws Exception {
-    return build(context.identity()).toAgentJson();
+  @Override public AgentResult execute(SubagentRequest request, AgentContext context) throws Exception {
+    BriefingResult result = build(context.identity());
+    return AgentResult.completed(result.message(), result.toAgentJson(), context.traceId());
   }
 
   public BriefingResult build(String externalUserId) throws SQLException {

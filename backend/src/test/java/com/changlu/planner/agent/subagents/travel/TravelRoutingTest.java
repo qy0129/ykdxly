@@ -3,14 +3,19 @@ package com.changlu.planner.agent.subagents.travel;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import com.changlu.planner.agent.core.AgentRouter;
-import com.changlu.planner.agent.core.ToolDefinition;
-import com.changlu.planner.agent.core.ToolRegistry;
 import com.changlu.planner.agent.core.contract.AgentContext;
 import com.changlu.planner.agent.core.contract.AgentResult;
 import com.changlu.planner.agent.core.contract.Subagent;
 import com.changlu.planner.agent.core.contract.SubagentDefinition;
 import com.changlu.planner.agent.core.contract.SubagentRequest;
 import com.changlu.planner.agent.core.registry.SubagentRegistry;
+import com.changlu.planner.agent.core.tool.RetryPolicy;
+import com.changlu.planner.agent.core.tool.ToolCall;
+import com.changlu.planner.agent.core.tool.ToolDefinition;
+import com.changlu.planner.agent.core.tool.ToolHandler;
+import com.changlu.planner.agent.core.tool.ToolRegistry;
+import com.changlu.planner.agent.core.tool.ToolRiskLevel;
+import com.changlu.planner.agent.core.tool.ToolSideEffect;
 import com.google.gson.JsonObject;
 import java.time.Duration;
 import java.util.List;
@@ -58,7 +63,16 @@ final class TravelRoutingTest {
 
   private ToolRegistry planningTools() {
     ToolRegistry tools = new ToolRegistry();
-    tools.register(new ToolDefinition("planning.assistant", "核心计划能力", "tool", true));
+    tools.register(new ToolHandler() {
+      private final ToolDefinition definition = new ToolDefinition("planning.assistant", "1.0.0", "核心计划能力",
+          new JsonObject(), new JsonObject(), Set.of(), ToolRiskLevel.READ_ONLY, ToolSideEffect.NONE, false,
+          Duration.ofSeconds(30), RetryPolicy.none());
+
+      @Override public ToolDefinition definition() { return definition; }
+      @Override public AgentResult execute(ToolCall call, AgentContext context) {
+        return AgentResult.completed("ok", new JsonObject(), context.traceId());
+      }
+    });
     return tools;
   }
 }

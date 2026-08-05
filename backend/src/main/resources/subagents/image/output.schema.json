@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Image Generation Subagent Output",
+  "type": "object",
+  "required": ["status", "error", "reply"],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["SUCCESS", "WAITING_CONFIRMATION", "WAITING_USER", "FAILED", "CANCELLED", "RUNNING"]
+    },
+    "error": {
+      "type": "string",
+      "enum": [
+        "NONE", "INVALID_ARGUMENT", "MISSING_PERMISSION", "NOT_FOUND", "CONFLICT",
+        "EXTERNAL_SERVICE_UNAVAILABLE", "RATE_LIMITED", "TOOL_FAILED", "TIMEOUT", "INTERNAL"
+      ]
+    },
+    "reply": {
+      "type": "string",
+      "description": "面向用户的回复文本。"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "requestId": { "type": "string" },
+        "status": { "type": "string" },
+        "imageUrl": { "type": "string", "format": "uri" },
+        "size": { "type": "string" },
+        "style": { "type": "string" },
+        "durationMillis": { "type": "integer" },
+        "error": { "type": "string" }
+      },
+      "required": ["requestId", "status"]
+    },
+    "draft": {
+      "type": "object",
+      "description": "批量生成或删除时返回的确认草案。",
+      "properties": {
+        "type": { "type": "string" },
+        "action": { "type": "string" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "prompt": { "type": "string" },
+              "size": { "type": "string" },
+              "style": { "type": "string" }
+            },
+            "required": ["prompt"]
+          }
+        },
+        "estimatedCost": { "type": "string" }
+      },
+      "required": ["type", "action", "items"]
+    }
+  },
+  "additionalProperties": true
+}

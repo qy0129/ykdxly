@@ -9,6 +9,7 @@ import com.changlu.planner.features.export.StatsPdfGenerator;
 import com.changlu.planner.features.notes.NotePrompt;
 import com.changlu.planner.features.plan.PlanExecutionService;
 import com.changlu.planner.features.reminder.ReminderService;
+import com.changlu.planner.agent.subagents.image.tools.ImageAssetStore;
 import com.changlu.planner.shared.database.Database;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -23,8 +24,14 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.ByteArrayOutputStream;
 import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -61,6 +68,7 @@ public final class ApiServer {
   private final ReminderService reminders;
   private final ScheduleMaterialService scheduleMaterials;
   private final StaticFileHandler staticFiles = new StaticFileHandler();
+  private final HttpClient imageClient = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(15)).build();
   private HttpServer server;
   private ExecutorService httpExecutor;
 
@@ -85,6 +93,7 @@ public final class ApiServer {
     server.createContext("/api/notes/generate", logged(this::noteGenerate));
     server.createContext("/api/notes/images", logged(this::noteImageUpload));
     server.createContext("/api/ai/review/chat", logged(this::aiReviewChat));
+    server.createContext("/api/ai/images/", logged(this::aiImage));
     server.createContext("/api/ai/commands", logged(this::aiCommand));
     server.createContext("/api/ai/drafts/", logged(this::aiDraft));
     server.createContext("/api/ai/session", logged(this::aiSession));
@@ -230,6 +239,118 @@ public final class ApiServer {
       json(e, 405, Map.of("error", "method_not_allowed"));
     } catch (IllegalArgumentException | IllegalStateException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
       catch (Exception ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "draft_error", "message", ex.getMessage())); }
+  }
+
+  /** 通过 requestId 提供稳定图片地址，避免把 SiliconFlow 的临时签名 URL 直接交给浏览器。 */
+  private void aiImage(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if (!"GET".equals(e.getRequestMethod())) { error(e, 405, "method_not_allowed", "请求方法不支持", false); return; }
+      String[] parts = e.getRequestURI().getPath().split("/");
+      String requestId = parts.length > 4 ? parts[4] : "";
+      if (!requestId.matches("[A-Za-z0-9-]{8,64}")) { error(e, 400, "invalid_image_id", "图片编号无效", false); return; }
+
+      String remoteUrl = null;
+      String assetPath = null;
+      Database.Context identity = context(e);
+      try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
+          "SELECT image_url,asset_path FROM ai_images WHERE request_id=? AND workspace_id=? AND user_id=? AND status='SUCCESS' ORDER BY created_at DESC LIMIT 1")) {
+        p.setString(1, requestId);
+        p.setBytes(2, Database.uuidBytes(identity.workspaceId()));
+        p.setBytes(3, Database.uuidBytes(identity.userId()));
+        try (ResultSet rs = p.executeQuery()) {
+          if (!rs.next()) { error(e, 404, "image_not_found", "图片不存在", false); return; }
+          remoteUrl = rs.getString(1);
+          assetPath = rs.getString(2);
+        }
+      }
+
+      byte[] content = null;
+      String contentType = null;
+      Path allowedRoot = ImageAssetStore.assetRoot();
+      if (assetPath != null && !assetPath.isBlank()) {
+        Path file = Path.of(assetPath).toAbsolutePath().normalize();
+        if (file.startsWith(allowedRoot) && Files.isRegularFile(file)) {
+          content = Files.readAllBytes(file);
+          contentType = mimeType(file.getFileName().toString());
+        }
+      }
+      if (content == null && remoteUrl != null && !remoteUrl.isBlank()) {
+        URI remote = URI.create(remoteUrl);
+        if (!"http".equalsIgnoreCase(remote.getScheme()) && !"https".equalsIgnoreCase(remote.getScheme())) {
+          error(e, 404, "image_unavailable", "图片地址无效", false); return;
+        }
+        HttpResponse<byte[]> response = imageClient.send(HttpRequest.newBuilder(remote)
+            .timeout(java.time.Duration.ofSeconds(90)).GET().build(), HttpResponse.BodyHandlers.ofByteArray());
+        if (response.statusCode() / 100 != 2 || response.body() == null || response.body().length == 0
+            || response.body().length > 20L * 1024 * 1024) {
+          error(e, 404, "image_expired", "图片链接已失效，请重新生成", false); return;
+        }
+        content = response.body();
+        contentType = detectImageContentType(content,
+            response.headers().firstValue("Content-Type").orElse(mimeType(remote.getPath())));
+        Path directory = allowedRoot;
+        Files.createDirectories(directory);
+        String extension = extensionFromContentType(contentType, remote.getPath());
+        Path cached = directory.resolve(requestId + extension).normalize();
+        if (cached.startsWith(directory)) {
+          Files.write(cached, content);
+          try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
+              "UPDATE ai_images SET asset_path=? WHERE request_id=? AND workspace_id=? AND user_id=?")) {
+            p.setString(1, cached.toAbsolutePath().toString()); p.setString(2, requestId);
+            p.setBytes(3, Database.uuidBytes(identity.workspaceId())); p.setBytes(4, Database.uuidBytes(identity.userId()));
+            p.executeUpdate();
+          }
+        }
+      }
+      if (content == null) { error(e, 404, "image_unavailable", "图片暂时无法读取，请重新生成", true); return; }
+      cors(e);
+      e.getResponseHeaders().set("Content-Type", contentType == null ? "application/octet-stream" : contentType);
+      e.getResponseHeaders().set("Cache-Control", "public, max-age=31536000, immutable");
+      e.sendResponseHeaders(200, content.length);
+      try (OutputStream out = e.getResponseBody()) { out.write(content); }
+    } catch (IllegalArgumentException ex) {
+      error(e, 400, "invalid_image_request", ex.getMessage(), false);
+    } catch (SQLException ex) {
+      LOG.error("[AI图片读取] 数据库异常", ex);
+      error(e, 500, "database_error", "图片读取失败，请稍后重试", true);
+    } catch (InterruptedException ex) {
+      Thread.currentThread().interrupt();
+      error(e, 503, "image_fetch_interrupted", "图片读取被中断", true);
+    }
+  }
+
+  private String extensionFromContentType(String contentType, String path) {
+    String type = contentType == null ? "" : contentType.toLowerCase();
+    if (type.contains("jpeg") || type.contains("jpg")) return ".jpg";
+    if (type.contains("webp")) return ".webp";
+    if (type.contains("gif")) return ".gif";
+    if (type.contains("svg")) return ".svg";
+    if (type.contains("png")) return ".png";
+    String lower = path == null ? "" : path.toLowerCase();
+    for (String suffix : new String[]{".jpg", ".jpeg", ".webp", ".gif", ".svg", ".png"}) if (lower.endsWith(suffix)) return suffix;
+    return ".png";
+  }
+
+  private String detectImageContentType(byte[] content, String fallback) {
+    if (content != null && content.length >= 8
+        && (content[0] & 0xff) == 0x89 && content[1] == 0x50 && content[2] == 0x4e && content[3] == 0x47) return "image/png";
+    if (content != null && content.length >= 3
+        && (content[0] & 0xff) == 0xff && (content[1] & 0xff) == 0xd8 && (content[2] & 0xff) == 0xff) return "image/jpeg";
+    if (content != null && content.length >= 12
+        && content[0] == 'R' && content[1] == 'I' && content[2] == 'F' && content[3] == 'F'
+        && content[8] == 'W' && content[9] == 'E' && content[10] == 'B' && content[11] == 'P') return "image/webp";
+    return fallback != null && fallback.toLowerCase().startsWith("image/") ? fallback : "image/png";
+  }
+
+  private String mimeType(String name) {
+    String lower = name == null ? "" : name.toLowerCase();
+    if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+    if (lower.endsWith(".webp")) return "image/webp";
+    if (lower.endsWith(".gif")) return "image/gif";
+    if (lower.endsWith(".svg")) return "image/svg+xml";
+    if (lower.endsWith(".png")) return "image/png";
+    return "application/octet-stream";
   }
 
   private void aiSession(HttpExchange e) throws IOException {

@@ -110,6 +110,68 @@ public final class LearningService {
   // ==================== 学习会话 ====================
 
   /** 列出近期的学习会话。 */
+  /** Create a learning goal. */
+  public JsonObject createGoal(Database.Context context, JsonObject input) throws SQLException {
+    UUID id = UUID.randomUUID();
+    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
+        "INSERT INTO learning_goals (id,workspace_id,user_id,plan_id,title,description,domain,priority,target_date,weekly_hours,status) VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
+      p.setBytes(1, Database.uuidBytes(id)); p.setBytes(2, Database.uuidBytes(context.workspaceId()));
+      p.setBytes(3, Database.uuidBytes(context.userId()));
+      p.setBytes(4, input.has("planId") && !input.get("planId").isJsonNull() ? Database.uuidBytes(UUID.fromString(input.get("planId").getAsString())) : null);
+      p.setString(5, required(input, "title")); p.setString(6, nullable(input, "description"));
+      p.setString(7, value(input, "domain", "general")); p.setString(8, value(input, "priority", "medium"));
+      p.setObject(9, date(input, "targetDate"));
+      p.setObject(10, input.has("weeklyHours") && !input.get("weeklyHours").isJsonNull() ? input.get("weeklyHours").getAsDouble() : null);
+      p.setString(11, value(input, "status", "active")); p.executeUpdate();
+    }
+    LearningGoal goal = getGoal(id.toString(), context);
+    return goal == null ? new JsonObject() : goal.toJson();
+  }
+
+  /** Update a learning goal with optimistic version checking. */
+  public JsonObject updateGoal(String goalId, Database.Context context, JsonObject input) throws SQLException {
+    LearningGoal before = getGoal(goalId, context);
+    if (before == null) throw new IllegalArgumentException("learning_goal_not_found");
+    int expected = input.has("expectedVersion") ? input.get("expectedVersion").getAsInt() : before.version();
+    String sql = "UPDATE learning_goals SET title=COALESCE(?,title),description=COALESCE(?,description),domain=COALESCE(?,domain),priority=COALESCE(?,priority),target_date=COALESCE(?,target_date),weekly_hours=COALESCE(?,weekly_hours),status=COALESCE(?,status),version=version+1 WHERE id=? AND workspace_id=? AND user_id=? AND version=? AND deleted_at IS NULL";
+    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
+      p.setString(1, nullable(input, "title")); p.setString(2, nullable(input, "description"));
+      p.setString(3, nullable(input, "domain")); p.setString(4, nullable(input, "priority")); p.setObject(5, date(input, "targetDate"));
+      p.setObject(6, input.has("weeklyHours") && !input.get("weeklyHours").isJsonNull() ? input.get("weeklyHours").getAsDouble() : null);
+      p.setString(7, nullable(input, "status")); p.setBytes(8, Database.uuidBytes(UUID.fromString(goalId)));
+      p.setBytes(9, Database.uuidBytes(context.workspaceId())); p.setBytes(10, Database.uuidBytes(context.userId())); p.setInt(11, expected);
+      if (p.executeUpdate() == 0) throw new IllegalStateException("learning_goal_version_conflict");
+    }
+    LearningGoal goal = getGoal(goalId, context);
+    return goal == null ? new JsonObject() : goal.toJson();
+  }
+
+  /** Soft delete a learning goal. */
+  public void deleteGoal(String goalId, Database.Context context, int expectedVersion) throws SQLException {
+    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
+        "UPDATE learning_goals SET deleted_at=NOW(),version=version+1 WHERE id=? AND workspace_id=? AND user_id=? AND version=? AND deleted_at IS NULL")) {
+      p.setBytes(1, Database.uuidBytes(UUID.fromString(goalId))); p.setBytes(2, Database.uuidBytes(context.workspaceId()));
+      p.setBytes(3, Database.uuidBytes(context.userId())); p.setInt(4, expectedVersion);
+      if (p.executeUpdate() == 0) throw new IllegalStateException("learning_goal_version_conflict");
+    }
+  }
+
+  private static String value(JsonObject input, String name, String fallback) {
+    return input.has(name) && !input.get(name).isJsonNull() ? input.get(name).getAsString() : fallback;
+  }
+  private static String nullable(JsonObject input, String name) {
+    return input.has(name) && !input.get(name).isJsonNull() ? input.get(name).getAsString() : null;
+  }
+  private static String required(JsonObject input, String name) {
+    String value = nullable(input, name);
+    if (value == null || value.isBlank()) throw new IllegalArgumentException(name + "_required");
+    return value.trim();
+  }
+  private static java.sql.Date date(JsonObject input, String name) {
+    String value = nullable(input, name);
+    return value == null || value.isBlank() ? null : java.sql.Date.valueOf(LocalDate.parse(value));
+  }
+
   public List<LearningSession> listSessions(Database.Context context, int days) throws SQLException {
     String sql = """
         SELECT ls.id, ls.title, ls.domain, ls.planned_minutes, ls.actual_minutes,

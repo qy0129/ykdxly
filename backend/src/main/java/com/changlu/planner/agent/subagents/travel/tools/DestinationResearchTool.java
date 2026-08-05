@@ -30,7 +30,7 @@ public final class DestinationResearchTool implements ToolHandler {
         """).getAsJsonObject();
     return new ToolDefinition(NAME, "1.0.0", "搜索目的地景点、交通、开放时间和旅行注意事项",
         input, output, Set.of("travel:read"), ToolRiskLevel.READ_ONLY, ToolSideEffect.NONE,
-        false, Duration.ofSeconds(20), RetryPolicy.readOnlyNetwork());
+        false, Duration.ofSeconds(12), RetryPolicy.none());
   }
 
   @Override public AgentResult execute(ToolCall call, AgentContext context) {

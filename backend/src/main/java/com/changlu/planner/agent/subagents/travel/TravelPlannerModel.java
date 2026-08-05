@@ -6,5 +6,5 @@ import com.google.gson.JsonObject;
 
 @FunctionalInterface
 public interface TravelPlannerModel {
-  JsonObject plan(SubagentRequest request, JsonArray sources) throws Exception;
+  JsonObject plan(SubagentRequest request, JsonArray sources, String sharedContext) throws Exception;
 }
