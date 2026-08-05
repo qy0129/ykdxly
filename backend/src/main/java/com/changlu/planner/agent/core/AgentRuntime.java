@@ -14,9 +14,17 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,23 +37,33 @@ public final class AgentRuntime implements AutoCloseable {
   private final AiCommandService commands;
   private final AgentRouter router;
   private final ToolRegistry tools;
-  private final SubagentRegistry subagents;
+  private final com.changlu.planner.agent.core.registry.SubagentRegistry subagents;
+  private final com.changlu.planner.agent.core.tool.ToolRegistry standardTools;
   private final DocumentSubagent documents;
   private final MemorySubagent memory;
   private final ToolExecutor executor = new ToolExecutor();
   private final ExecutorService workers = Executors.newFixedThreadPool(4);
+  private final ExecutorService subagentExecutions = Executors.newVirtualThreadPerTaskExecutor();
   private final Gson gson = new Gson();
+  private final com.changlu.planner.agent.core.runtime.TraceRecorder traces =
+      new com.changlu.planner.agent.core.runtime.TraceRecorder(LOG);
+  private final com.changlu.planner.agent.core.runtime.JsonSchemaValidator schemaValidator =
+      new com.changlu.planner.agent.core.runtime.JsonSchemaValidator();
 
   public AgentRuntime(Database database, AiCommandService commands, AgentRouter router,
-                      ToolRegistry tools, SubagentRegistry subagents, DocumentSubagent documents,
-                      MemorySubagent memory) {
+                      ToolRegistry tools,
+                      com.changlu.planner.agent.core.registry.SubagentRegistry subagents,
+                      com.changlu.planner.agent.core.tool.ToolRegistry standardTools,
+                      DocumentSubagent documents, MemorySubagent memory) {
     this.database = database;
     this.commands = commands;
     this.router = router;
     this.tools = tools;
     this.subagents = subagents;
+    this.standardTools = standardTools;
     this.documents = documents;
     this.memory = memory;
+    this.standardTools.setObserver(new StandardToolObserver());
   }
 
   public JsonObject start(JsonObject input, Database.Context identity, String channel) throws Exception {
@@ -176,10 +194,29 @@ public final class AgentRuntime implements AutoCloseable {
     startCall(runId, toolCallId, decision.executorType(), decision.executorName(), arguments,
         "tool".equals(decision.executorType()) && tools.require(decision.executorName()).requiresConfirmation());
     try {
-      AgentContext context = new AgentContext(runId, identity, channel, input.deepCopy());
       JsonObject result;
       if ("subagent".equals(decision.executorType())) {
-        result = executor.execute(() -> subagents.require(decision.executorName()).execute(message, context));
+        com.changlu.planner.agent.core.contract.Subagent subagent = subagents.require(decision.executorName());
+        UUID conversationId = UUID.fromString(input.get("conversationId").getAsString());
+        String traceId = runId.toString();
+        var context = new com.changlu.planner.agent.core.contract.AgentContext(runId, conversationId, traceId,
+            identity, channel, Set.of("travel:read", "planning:write"),
+            Instant.now().plus(subagent.definition().timeout()), input.deepCopy());
+        var request = new com.changlu.planner.agent.core.contract.SubagentRequest(message,
+            object(input, "arguments"), documentIds(input));
+        JsonObject schemaInput = new JsonObject();
+        schemaInput.addProperty("message", message);
+        schemaInput.add("arguments", request.arguments().deepCopy());
+        JsonArray schemaDocumentIds = new JsonArray();
+        request.documentIds().forEach(schemaDocumentIds::add);
+        schemaInput.add("documentIds", schemaDocumentIds);
+        schemaValidator.validate(schemaInput, subagent.definition().inputSchema());
+        long startedAt = System.nanoTime();
+        com.changlu.planner.agent.core.contract.AgentResult agentResult =
+            executeSubagent(subagent, request, context);
+        traces.event(traceId, runId.toString(), decision.executorName(), "completed",
+            (System.nanoTime() - startedAt) / 1_000_000, agentResult.status().jsonValue());
+        result = agentResult.toJson();
         commands.saveExchange(UUID.fromString(input.get("conversationId").getAsString()), message,
             string(result, "reply", "已完成。"));
       } else {
@@ -210,16 +247,8 @@ public final class AgentRuntime implements AutoCloseable {
   }
 
   private String routeName(String executorName) {
-    return switch (executorName) {
-      case "planning.assistant" -> "计划管理";
-      case "review" -> "每日复盘";
-      case "briefing" -> "今日简报";
-      case "research" -> "资料搜索";
-      case "scheduling" -> "日程检查";
-      case "document" -> "文档分析";
-      case "memory" -> "长期记忆";
-      default -> "其他任务";
-    };
+    if ("planning.assistant".equals(executorName)) return "计划管理";
+    return subagents.contains(executorName) ? subagents.require(executorName).definition().description() : executorName;
   }
 
   private String statusName(String status) {
@@ -241,6 +270,7 @@ public final class AgentRuntime implements AutoCloseable {
   private JsonObject finishRun(UUID runId, int iteration, JsonObject input, AgentRouter.Decision decision,
                                JsonObject toolResult, Database.Context identity) throws SQLException {
     JsonObject response = toolResult.deepCopy();
+    if (toolResult.has("schemaVersion")) response.add("agentResult", toolResult.deepCopy());
     if (!response.has("questions")) response.add("questions", new JsonArray());
     if (!response.has("actions")) response.add("actions", new JsonArray());
     response.addProperty("runId", runId.toString());
@@ -343,6 +373,86 @@ public final class AgentRuntime implements AutoCloseable {
   @Override
   public void close() {
     workers.shutdownNow();
+    subagentExecutions.shutdownNow();
+    standardTools.close();
+  }
+
+  private com.changlu.planner.agent.core.contract.AgentResult executeSubagent(
+      com.changlu.planner.agent.core.contract.Subagent subagent,
+      com.changlu.planner.agent.core.contract.SubagentRequest request,
+      com.changlu.planner.agent.core.contract.AgentContext context) throws Exception {
+    Future<com.changlu.planner.agent.core.contract.AgentResult> future =
+        subagentExecutions.submit(() -> subagent.execute(request, context));
+    long timeoutMs = Math.max(1, context.deadline().toEpochMilli() - Instant.now().toEpochMilli());
+    try {
+      return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+    } catch (TimeoutException error) {
+      future.cancel(true);
+      throw new IllegalStateException("SUBAGENT_TIMEOUT:" + subagent.definition().name(), error);
+    } catch (ExecutionException error) {
+      Throwable cause = error.getCause();
+      if (cause instanceof Exception exception) throw exception;
+      throw new IllegalStateException("subagent_execution_failed", cause);
+    } catch (InterruptedException error) {
+      future.cancel(true);
+      Thread.currentThread().interrupt();
+      throw error;
+    }
+  }
+
+  private JsonObject object(JsonObject input, String name) {
+    return input.has(name) && input.get(name).isJsonObject()
+        ? input.getAsJsonObject(name).deepCopy() : new JsonObject();
+  }
+
+  private List<String> documentIds(JsonObject input) {
+    if (!input.has("documentIds") || !input.get("documentIds").isJsonArray()) return List.of();
+    List<String> ids = new ArrayList<>();
+    for (JsonElement value : input.getAsJsonArray("documentIds")) {
+      if (value.isJsonPrimitive()) ids.add(value.getAsString());
+    }
+    return List.copyOf(ids);
+  }
+
+  private final class StandardToolObserver implements com.changlu.planner.agent.core.tool.ToolRegistry.Observer {
+    @Override public com.changlu.planner.agent.core.contract.AgentResult started(
+                                  com.changlu.planner.agent.core.tool.ToolCall call,
+                                  com.changlu.planner.agent.core.tool.ToolDefinition definition,
+                                  com.changlu.planner.agent.core.contract.AgentContext context,
+                                  int attempt) throws Exception {
+      if (call.idempotencyKey() != null && !call.idempotencyKey().isBlank()) {
+        try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
+            "SELECT result,status FROM agent_tool_calls WHERE run_id=? AND tool_call_id=? LIMIT 1")) {
+          p.setBytes(1, Database.uuidBytes(context.runId()));
+          p.setString(2, call.toolCallId());
+          try (ResultSet rs = p.executeQuery()) {
+            if (rs.next() && rs.getString("result") != null
+                && ("COMPLETED".equals(rs.getString("status"))
+                    || "WAITING_CONFIRMATION".equals(rs.getString("status")))) {
+              return com.changlu.planner.agent.core.contract.AgentResult.fromJson(
+                  JsonParser.parseString(rs.getString("result")).getAsJsonObject());
+            }
+          }
+        }
+      }
+      startCall(context.runId(), call.toolCallId(), "tool", definition.name(), call.arguments(),
+          definition.requiresConfirmation());
+      return null;
+    }
+
+    @Override public void finished(com.changlu.planner.agent.core.tool.ToolCall call,
+                                   com.changlu.planner.agent.core.tool.ToolDefinition definition,
+                                   com.changlu.planner.agent.core.contract.AgentContext context,
+                                   int attempt,
+                                   com.changlu.planner.agent.core.contract.AgentResult result,
+                                   Exception error, long durationMs) throws Exception {
+      String status = error != null ? "FAILED" : result.requiresConfirmation()
+          ? "WAITING_CONFIRMATION" : "COMPLETED";
+      finishCall(call.toolCallId(), status, result == null ? null : result.toJson(),
+          error == null ? null : error.getMessage());
+      traces.event(context.traceId(), context.runId().toString(), definition.name(), status.toLowerCase(),
+          durationMs, error == null ? result.message() : error.getMessage());
+    }
   }
 
   private void appendGoal(UUID id, String message) throws SQLException {
