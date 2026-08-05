@@ -24,7 +24,8 @@ public final class AgentRouter {
         research 负责搜索公开网页并提供来源链接。
         scheduling 负责检查日程冲突、可用时段和安排时长，不负责修改日程。
         document 负责分析上传文件、总结文件和基于文件内容问答；根据文件创建计划或任务仍交给 planning.assistant。
-        memory 负责回答“你记得我什么”、记住或忘记长期偏好；普通对话中的记忆提取由运行时自动完成。
+        memory 负责回答”你记得我什么”、记住或忘记长期偏好；普通对话中的记忆提取由运行时自动完成。
+        learning 负责学习目标管理、学习进度分析、学习计划建议和知识领域梳理；创建学习目标时先生成草案。
         当前请求是否附带文件：%s。
         只输出 JSON：{"executorType":"tool或subagent","executorName":"名称","reason":"简短原因"}。
         可用 Tools：%s
@@ -71,6 +72,11 @@ public final class AgentRouter {
     if (normalized.contains("你记得我") || normalized.contains("长期记忆")
         || normalized.contains("记住我的") || normalized.contains("忘记我的")) {
       return new Decision("subagent", "memory", "模型路由失败，按明确记忆意图回退");
+    }
+    if (normalized.contains("学习") || normalized.contains("课程")
+        || normalized.contains("知识") || normalized.contains("掌握程度")
+        || normalized.contains("学习计划") || normalized.contains("学习进度")) {
+      return new Decision("subagent", "learning", "模型路由失败，按明确学习规划意图回退");
     }
     return new Decision("tool", "planning.assistant", "模型路由失败，回退核心规划能力：" + error.getMessage());
   }

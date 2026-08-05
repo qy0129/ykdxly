@@ -10,6 +10,8 @@ export function ReviewPage() {
   const load = async (regenerate = false) => {
     setBusy(true)
     setError('')
+    // 重新生成失败时不能继续展示上一份旧报告，避免把旧内容误认为最新 AI 结果。
+    setReport(undefined)
     try {
       setReport(regenerate ? await plannerApi.regenerateTodayReview() : await plannerApi.loadTodayReview())
     } catch (cause) {
@@ -21,13 +23,37 @@ export function ReviewPage() {
 
   const facts = report?.facts
   const summary = report?.summary.split(/\n+/).filter(Boolean) ?? []
+  const activityGroups = [
+    {
+      label: '完成事项',
+      tone: 'complete',
+      logs: facts?.logs.filter((entry) => /complete|done/i.test(entry.action)) ?? [],
+    },
+    {
+      label: '新增安排',
+      tone: 'created',
+      logs: facts?.logs.filter((entry) => /create/i.test(entry.action)) ?? [],
+    },
+    {
+      label: '调整计划',
+      tone: 'adjusted',
+      logs: facts?.logs.filter((entry) => /update|delay|reschedule/i.test(entry.action)) ?? [],
+    },
+    {
+      label: '其他操作',
+      tone: 'other',
+      logs: facts?.logs.filter((entry) => !/complete|done|create|update|delay|reschedule/i.test(entry.action)) ?? [],
+    },
+  ]
+  const recentLogs = facts?.logs.slice(0, 5) ?? []
 
   return (
     <div className={`review-page content-page${busy ? ' is-refreshing' : ''}`}>
       <section className="review-date-row">
-        <div><span className="eyebrow">今日复盘</span><h2>{report?.date ?? '正在读取'}</h2><p>{report ? `生成于 ${report.generatedAt.replace('T', ' ').slice(0, 19)}` : '基于已确认的真实执行记录'}</p>{report?.aiGenerated === false && <span className="review-generation-note">AI 暂时不可用，当前显示本地复盘</span>}</div>
+        <div><span className="eyebrow">今日复盘</span><h2>{report?.date ?? '正在读取'}</h2><p>{report ? `生成于 ${report.generatedAt.replace('T', ' ').slice(0, 19)}` : '基于已确认的真实执行记录'}</p></div>
         <button className="secondary-button" type="button" disabled={busy} onClick={() => void load(true)}><RefreshCw className={busy ? 'spin' : ''} size={16} /> {busy ? '生成中' : '重新生成'}</button>
       </section>
+      {error && <p className="ai-chat-error" role="alert">{error}</p>}
 
       <section className="review-facts">
         <div><Check size={19} /><span>完成任务</span><strong>{facts?.completedTasks ?? '-'}</strong></div>
@@ -57,10 +83,25 @@ export function ReviewPage() {
       </section>
 
       <section className="review-log">
-        <div className="section-heading"><div><span className="eyebrow">执行记录</span><h3>今天发生的确认操作</h3></div></div>
-        {facts?.logs.length ? facts.logs.map((entry, index) => <article className="log-row" key={`${entry.occurredAt}-${index}`}><span>{entry.occurredAt.slice(11, 16)}</span><i className="product" /><strong>{entry.note || entry.action}</strong></article>) : <p className="section-note">今天还没有可记录的执行操作。</p>}
+        <div className="section-heading"><div><span className="eyebrow">今日活动</span><h3>执行概览</h3></div></div>
+        {facts?.logs.length ? <>
+          <div className="activity-summary-grid">
+            {activityGroups.map((group) => <article className={`activity-summary-item ${group.tone}`} key={group.label}>
+              <span>{group.label}</span>
+              <strong>{group.logs.length}</strong>
+              <small>{group.logs[0]?.occurredAt.slice(11, 16) ?? '—'}</small>
+            </article>)}
+          </div>
+          <details className="activity-details">
+            <summary>查看最近 5 条记录</summary>
+            <div className="activity-detail-list">
+              {recentLogs.map((entry, index) => <article className="log-row" key={`${entry.occurredAt}-${index}`}>
+                <span>{entry.occurredAt.slice(11, 16)}</span><i className="product" /><strong>{entry.note || entry.action}</strong>
+              </article>)}
+            </div>
+          </details>
+        </> : <p className="section-note">今天还没有可记录的执行活动。</p>}
       </section>
-      {error && <p className="ai-chat-error">{error}</p>}
     </div>
   )
 }

@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react'
-import { Eye, FileText, FolderOpen, Link2, Network, Pencil, Plus, Save, Search, Tag, Trash2, X } from 'lucide-react'
+import { Eye, FileText, FolderOpen, Image, Link2, Network, Pencil, Plus, Save, Search, Tag, Trash2, X } from 'lucide-react'
 import { notes as initialNotes } from '../../mocks/plannerData'
 import type { Note } from '../../types/planner'
 import { CategoryDialog, NoteDialog, type NoteDraftFields } from '../../components/dialogs/PlannerDialogs'
 import { MarkdownPreview } from './MarkdownPreview'
 import { markdownExcerpt } from './markdown'
+import { plannerApi } from '../../services/plannerApi'
 
 /** 笔记模块将图谱交互和笔记列表放在同一领域边界内。 */
 const graphPositions: Record<string, { x: number; y: number }> = {
@@ -194,6 +195,10 @@ export function NoteGraph({ noteItems, activeId, onSelect }: { noteItems: Note[]
   )
 }
 
+/*
+ * 下面曾残留一份旧版关系图组件实现。它与上面的增强版同名，导致前端无法编译；
+ * 保留在注释中便于后续查阅，实际页面统一使用上面的 ElasticNoteGraph。
+ */
 type ElasticGraphPoint = { x: number; y: number; vx: number; vy: number }
 type ElasticGraphInteraction = {
   kind: 'node' | 'pan'
@@ -522,6 +527,7 @@ function ElasticNoteGraph({ noteItems, activeId, categoryColors, onSelect }: { n
   )
 }
 
+/*
 type ElasticGraphPoint = { x: number; y: number; vx: number; vy: number }
 type ElasticGraphInteraction = {
   kind: 'node' | 'pan'
@@ -837,6 +843,7 @@ function ElasticNoteGraph({ noteItems, activeId, onSelect }: { noteItems: Note[]
     </div>
   )
 }
+*/
 
 export function NotesPage({
   noteItems,
@@ -906,7 +913,35 @@ export function NotesPage({
     onChange(noteItems.map((note) => note.id === activeNote.id ? { ...note, ...changes } : note))
   }
 
+  const [imageUploading, setImageUploading] = useState(false)
   const noteContent = activeNote.content ?? activeNote.excerpt
+
+  const handleImageUpload = () => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = 'image/*'
+    input.onchange = async () => {
+      const file = input.files?.[0]
+      if (!file) return
+      setImageUploading(true)
+      try {
+        const result = await plannerApi.uploadNoteImage(file)
+        const currentContent = activeNote.content ?? activeNote.excerpt
+        const imageMarkdown = `\n![${file.name}](${result.url})\n`
+        updateActiveNote({
+          content: currentContent + imageMarkdown,
+          excerpt: markdownExcerpt(currentContent + imageMarkdown),
+          updatedAt: '刚刚',
+        })
+      } catch (cause) {
+        alert('图片上传失败：' + (cause instanceof Error ? cause.message : '未知错误'))
+      } finally {
+        setImageUploading(false)
+      }
+    }
+    input.click()
+  }
+
   const updateMarkdown = (value: string) => updateActiveNote({ content: value, excerpt: markdownExcerpt(value), updatedAt: '刚刚' })
 
   const createNote = (fields: NoteDraftFields) => {
@@ -1038,6 +1073,7 @@ export function NotesPage({
                   <button type="button" className={editorMode === 'edit' ? 'active' : ''} onClick={() => setEditorMode('edit')} role="tab" aria-selected={editorMode === 'edit'}><Pencil size={13} /> 编辑</button>
                   <button type="button" className={editorMode === 'preview' ? 'active' : ''} onClick={() => setEditorMode('preview')} role="tab" aria-selected={editorMode === 'preview'}><Eye size={13} /> 预览</button>
                 </div>
+                <button className="secondary-button" type="button" onClick={handleImageUpload} disabled={imageUploading} title="上传图片"><Image size={14} /> {imageUploading ? '上传中' : '图片'}</button>
                 <button className="secondary-button" type="button"><Save size={15} /> 已保存</button>
                 <button className="icon-button danger-icon" type="button" onClick={() => { void onDelete(activeNote.id).then((deleted) => { if (deleted) setActiveId(noteItems.find((note) => note.id !== activeNote.id)?.id ?? '') }) }} title="删除笔记"><X size={15} /></button>
               </div>

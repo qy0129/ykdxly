@@ -360,7 +360,10 @@ public final class AiCommandService {
         row.addProperty("occurredAt", rs.getTimestamp(5).toLocalDateTime().toString()); logs.add(row);
       }}
     }
-    facts.add("logs", logs); saveReviewFacts(context, facts); return facts;
+    facts.add("logs", logs);
+    // 当天数据用于页面指标，最近 7 天执行记录用于识别连续延期、阻塞和估时偏差。
+    facts.add("recentExecution", recentExecution(context));
+    return facts;
   }
 
   private JsonObject ask(String userText, String context, UUID conversationId, Database.Context owner) throws Exception {
@@ -768,12 +771,6 @@ public final class AiCommandService {
   private void record(Connection c, Database.Context context, UUID draftId, UUID changeSetId, String entityType, UUID entityId, String action, JsonObject before, JsonObject after, String reason, String source, Integer minutes, Integer versionAfter) throws SQLException {
     try (PreparedStatement p = c.prepareStatement("INSERT INTO execution_records (id,workspace_id,user_id,draft_id,change_set_id,entity_type,entity_id,action_type,before_snapshot,after_snapshot,reason,source_channel,note,actual_minutes,version_after,occurred_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())")) {
       p.setBytes(1, Database.uuidBytes(UUID.randomUUID())); p.setBytes(2, Database.uuidBytes(context.workspaceId())); p.setBytes(3, Database.uuidBytes(context.userId())); p.setBytes(4, draftId == null ? null : Database.uuidBytes(draftId)); p.setBytes(5, changeSetId == null ? null : Database.uuidBytes(changeSetId)); p.setString(6, entityType); p.setBytes(7, Database.uuidBytes(entityId)); p.setString(8, action); p.setString(9, before == null ? null : gson.toJson(before)); p.setString(10, after == null ? null : gson.toJson(after)); p.setString(11, reason); p.setString(12, source); p.setString(13, reason); if (minutes == null) p.setObject(14, null); else p.setInt(14, minutes); if (versionAfter == null) p.setObject(15, null); else p.setInt(15, versionAfter); p.executeUpdate();
-    }
-  }
-
-  private void saveReviewFacts(Database.Context context, JsonObject facts) throws SQLException {
-    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("INSERT INTO review_entries (id,workspace_id,user_id,review_date,facts) VALUES (?,?,?,?,?) ON DUPLICATE KEY UPDATE facts=VALUES(facts)")) {
-      p.setBytes(1, Database.uuidBytes(UUID.randomUUID())); p.setBytes(2, Database.uuidBytes(context.workspaceId())); p.setBytes(3, Database.uuidBytes(context.userId())); p.setDate(4, java.sql.Date.valueOf(LocalDate.now())); p.setString(5, gson.toJson(facts)); p.executeUpdate();
     }
   }
 

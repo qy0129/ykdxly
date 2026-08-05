@@ -7,11 +7,13 @@ import com.changlu.planner.agent.subagents.document.DocumentSubagent;
 import com.changlu.planner.agent.subagents.memory.MemorySubagent;
 import com.changlu.planner.agent.subagents.research.ResearchSubagent;
 import com.changlu.planner.agent.subagents.research.WebSearchTool;
+import com.changlu.planner.agent.subagents.learning.LearningSubagent;
 import com.changlu.planner.agent.subagents.review.ReviewSubagent;
 import com.changlu.planner.agent.subagents.scheduling.ConflictTool;
 import com.changlu.planner.agent.subagents.scheduling.SchedulingSubagent;
 import com.changlu.planner.agent.tools.PlanningTools;
 import com.changlu.planner.features.command.AiCommandService;
+import com.changlu.planner.features.learning.LearningService;
 import com.changlu.planner.shared.database.Database;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonArray;
@@ -41,6 +43,8 @@ public final class AgentFacade implements AutoCloseable {
     subagents.register(new SchedulingSubagent(new ConflictTool(database)));
     subagents.register(documents);
     subagents.register(memory);
+    LearningService learningService = new LearningService(database);
+    subagents.register(new LearningSubagent(learningService, model));
     runtime = new AgentRuntime(database, commands, new AgentRouter(model), tools, subagents, documents, memory);
   }
 

@@ -1,10 +1,12 @@
 package com.changlu.planner.interfaces.http;
 
 import com.changlu.planner.agent.core.AgentFacade;
+import com.changlu.planner.agent.core.ModelClient;
 import com.changlu.planner.agent.subagents.briefing.BriefingResult;
 import com.changlu.planner.agent.subagents.document.DocumentResult;
 import com.changlu.planner.features.briefing.ScheduleMaterialService;
 import com.changlu.planner.features.export.StatsPdfGenerator;
+import com.changlu.planner.features.notes.NotePrompt;
 import com.changlu.planner.features.plan.PlanExecutionService;
 import com.changlu.planner.features.reminder.ReminderService;
 import com.changlu.planner.shared.database.Database;
@@ -54,6 +56,7 @@ public final class ApiServer {
   private final int port;
   private final Gson gson = new Gson();
   private final AgentFacade agent;
+  private final ModelClient model;
   private final PlanExecutionService planExecution;
   private final ReminderService reminders;
   private final ScheduleMaterialService scheduleMaterials;
@@ -61,7 +64,7 @@ public final class ApiServer {
   private HttpServer server;
   private ExecutorService httpExecutor;
 
-  public ApiServer(Database database, int port) { this.database = database; this.port = port; this.agent = new AgentFacade(database); this.planExecution = new PlanExecutionService(database); this.reminders = new ReminderService(database); this.scheduleMaterials = new ScheduleMaterialService(database); }
+  public ApiServer(Database database, int port) { this.database = database; this.port = port; this.agent = new AgentFacade(database); this.model = new ModelClient(); this.planExecution = new PlanExecutionService(database); this.reminders = new ReminderService(database); this.scheduleMaterials = new ScheduleMaterialService(database); }
   public int port() { return port; }
 
   public void start() throws IOException {
@@ -79,6 +82,8 @@ public final class ApiServer {
     server.createContext("/api/planning/preferences", logged(this::planningPreferences));
     server.createContext("/api/trash", logged(this::trash));
     server.createContext("/api/notes", logged(this::notes));
+    server.createContext("/api/notes/generate", logged(this::noteGenerate));
+    server.createContext("/api/notes/images", logged(this::noteImageUpload));
     server.createContext("/api/ai/review/chat", logged(this::aiReviewChat));
     server.createContext("/api/ai/commands", logged(this::aiCommand));
     server.createContext("/api/ai/drafts/", logged(this::aiDraft));
@@ -876,6 +881,73 @@ public final class ApiServer {
       catch (SQLException ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "database_error", "message", ex.getMessage())); }
   }
 
+  // ── AI 笔记对话生成 ──
+  private void noteGenerate(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if (!"POST".equals(e.getRequestMethod())) { json(e, 405, Map.of("error", "method_not_allowed")); return; }
+      if (!model.configured()) { json(e, 503, Map.of("error", "ai_unavailable", "message", "AI 模型未配置，请设置 api.key")); return; }
+      JsonObject body = body(e);
+      String title = string(body, "scheduleTitle", "学习笔记");
+      String message = string(body, "message", "").trim();
+      JsonArray messages = NotePrompt.messages(body);
+      String markdown;
+      String reply;
+      try {
+        JsonObject result = model.completeJson("note-generate", messages, 0.3, 4000, 90, 2);
+        markdown = firstString(result, "markdown", "content", "text");
+        reply = string(result, "reply", "");
+      } catch (ModelClient.InvalidJsonException invalid) {
+        // 模型直接输出了 Markdown 正文而非 JSON：把原文当作整篇笔记。
+        markdown = stripFence(invalid.content());
+        reply = "";
+      }
+      if (markdown.isBlank()) { json(e, 502, Map.of("error", "ai_generation_failed", "message", "AI 返回了空内容")); return; }
+      if (reply.isBlank()) reply = message.isBlank() ? "已根据学习资料生成笔记。" : "已根据你的要求调整笔记。";
+      JsonObject resp = new JsonObject();
+      resp.addProperty("markdown", markdown);
+      resp.addProperty("reply", reply);
+      resp.addProperty("title", title);
+      json(e, 200, resp);
+    } catch (Exception ex) {
+      LOG.warn("[AI笔记生成] 失败: {}", ex.getMessage());
+      json(e, 502, Map.of("error", "ai_generation_failed", "message", "AI 生成笔记失败：" + ex.getMessage()));
+    }
+  }
+
+  // ── 笔记图片上传 ──
+  private void noteImageUpload(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if (!"POST".equals(e.getRequestMethod())) { json(e, 405, Map.of("error", "method_not_allowed")); return; }
+      String contentType = e.getRequestHeaders().getFirst("Content-Type");
+      if (contentType == null || !contentType.startsWith("image/")) {
+        json(e, 400, Map.of("error", "invalid_content_type", "message", "请上传图片文件（image/*）"));
+        return;
+      }
+      int maxBytes = 10 * 1024 * 1024; // 10 MB
+      byte[] raw;
+      try (InputStream in = e.getRequestBody()) { raw = in.readAllBytes(); }
+      if (raw.length > maxBytes) { json(e, 413, Map.of("error", "file_too_large", "message", "图片不能超过 10 MB")); return; }
+
+      // 保存到 web/dist/uploads/notes/ 目录
+      String ext = contentType.contains("png") ? "png" : contentType.contains("gif") ? "gif"
+          : contentType.contains("webp") ? "webp" : contentType.contains("svg") ? "svg" : "jpg";
+      String filename = UUID.randomUUID() + "." + ext;
+      java.nio.file.Path uploadDir = java.nio.file.Path.of("web/dist/uploads/notes");
+      java.nio.file.Files.createDirectories(uploadDir);
+      java.nio.file.Files.write(uploadDir.resolve(filename), raw);
+
+      String url = "/uploads/notes/" + filename;
+      LOG.info("[笔记图片] 上传成功 {} ({} KB)", filename, raw.length / 1024);
+      JsonObject resp = new JsonObject();
+      resp.addProperty("url", url);
+      resp.addProperty("filename", filename);
+      resp.addProperty("size", raw.length);
+      json(e, 201, resp);
+    } catch (Exception ex) { LOG.error("[笔记图片] 上传失败: {}", ex.getMessage()); json(e, 500, Map.of("error", "upload_failed", "message", ex.getMessage())); }
+  }
+
   private void notes(HttpExchange e) throws IOException {
     try {
       if (options(e)) return;
@@ -1043,6 +1115,23 @@ public final class ApiServer {
   private String pathId(HttpExchange e) { String[] p = e.getRequestURI().getPath().split("/"); return p.length > 3 && !p[3].isBlank() ? p[3] : null; }
   private void requireId(String id) { if (id == null || id.isBlank()) throw new IllegalArgumentException("id_required"); UUID.fromString(id); }
   private String string(JsonObject o, String key, String fallback) { JsonElement v = o.get(key); return v == null || v.isJsonNull() ? fallback : v.getAsString(); }
+  /** 按序取第一个非空字符串字段，容忍模型把笔记塞进 content/text 等字段。 */
+  private String firstString(JsonObject o, String... keys) {
+    for (String key : keys) {
+      JsonElement v = o.get(key);
+      if (v != null && v.isJsonPrimitive() && !v.getAsString().isBlank()) return v.getAsString();
+    }
+    return "";
+  }
+  /** 去掉模型用 ``` 包裹的 Markdown 围栏。 */
+  private String stripFence(String value) {
+    String s = value.trim();
+    if (s.startsWith("```json")) s = s.substring("```json".length());
+    else if (s.startsWith("```markdown")) s = s.substring("```markdown".length());
+    else if (s.startsWith("```")) s = s.substring(3);
+    if (s.endsWith("```")) s = s.substring(0, s.length() - 3);
+    return s.trim();
+  }
   private String nullable(JsonObject o, String key) { return string(o, key, null); }
   private double number(JsonObject o, String key, double fallback) { String v = string(o, key, null); return v == null ? fallback : Double.parseDouble(v); }
   private Object value(JsonObject o, String key) { if (key.endsWith("At")) return nullableTimestamp(o, key); if (key.equals("dueDate")) return date(o, key); if (key.equals("progress")) return number(o, key, 0); if (key.equals("durationMinutes") || key.equals("reminderMinutes")) return integerOrNull(o, key); if (key.equals("planId") || key.equals("categoryId")) return bytesOrNull(o, key); return nullable(o, key); }

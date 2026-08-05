@@ -1,0 +1,330 @@
+package com.changlu.planner.features.learning;
+
+import com.changlu.planner.shared.database.Database;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * 学习规划应用服务层。
+ * Subagent 不直接操作数据库——所有学习数据的读写通过本服务完成，
+ * 自动携带用户、工作区上下文，并提供幂等和参数校验。
+ */
+public final class LearningService {
+  private static final Logger LOG = LoggerFactory.getLogger(LearningService.class);
+  private final Database database;
+
+  public LearningService(Database database) {
+    this.database = database;
+  }
+
+  // ==================== 学习目标 CRUD ====================
+
+  /** 列出用户的有效学习目标。 */
+  public List<LearningGoal> listGoals(Database.Context context) throws SQLException {
+    String sql = """
+        SELECT id, title, description, domain, priority, target_date,
+               weekly_hours, status, progress, total_sessions, completed_sessions,
+               total_minutes, version, created_at, updated_at
+        FROM learning_goals
+        WHERE workspace_id=? AND user_id=? AND deleted_at IS NULL
+        ORDER BY priority='high' DESC, priority, target_date IS NULL, target_date, created_at DESC
+        LIMIT 50""";
+    try (Connection c = database.connection();
+         PreparedStatement p = c.prepareStatement(sql)) {
+      p.setBytes(1, Database.uuidBytes(context.workspaceId()));
+      p.setBytes(2, Database.uuidBytes(context.userId()));
+      try (ResultSet rs = p.executeQuery()) {
+        List<LearningGoal> goals = new ArrayList<>();
+        while (rs.next()) {
+          goals.add(new LearningGoal(
+              Database.id(rs, "id"),
+              rs.getString("title"),
+              rs.getString("description"),
+              rs.getString("domain"),
+              rs.getString("priority"),
+              rs.getDate("target_date") != null ? rs.getDate("target_date").toLocalDate() : null,
+              rs.getObject("weekly_hours") != null ? rs.getDouble("weekly_hours") : null,
+              rs.getString("status"),
+              rs.getDouble("progress"),
+              rs.getInt("total_sessions"),
+              rs.getInt("completed_sessions"),
+              rs.getInt("total_minutes"),
+              rs.getInt("version"),
+              rs.getTimestamp("created_at").toLocalDateTime(),
+              rs.getTimestamp("updated_at").toLocalDateTime()
+          ));
+        }
+        return goals;
+      }
+    }
+  }
+
+  /** 获取单个学习目标。 */
+  public LearningGoal getGoal(String goalId, Database.Context context) throws SQLException {
+    String sql = """
+        SELECT id, title, description, domain, priority, target_date,
+               weekly_hours, status, progress, total_sessions, completed_sessions,
+               total_minutes, version, created_at, updated_at
+        FROM learning_goals
+        WHERE id=? AND workspace_id=? AND deleted_at IS NULL""";
+    try (Connection c = database.connection();
+         PreparedStatement p = c.prepareStatement(sql)) {
+      p.setBytes(1, Database.uuidBytes(UUID.fromString(goalId)));
+      p.setBytes(2, Database.uuidBytes(context.workspaceId()));
+      try (ResultSet rs = p.executeQuery()) {
+        if (!rs.next()) return null;
+        return new LearningGoal(
+            Database.id(rs, "id"),
+            rs.getString("title"),
+            rs.getString("description"),
+            rs.getString("domain"),
+            rs.getString("priority"),
+            rs.getDate("target_date") != null ? rs.getDate("target_date").toLocalDate() : null,
+            rs.getObject("weekly_hours") != null ? rs.getDouble("weekly_hours") : null,
+            rs.getString("status"),
+            rs.getDouble("progress"),
+            rs.getInt("total_sessions"),
+            rs.getInt("completed_sessions"),
+            rs.getInt("total_minutes"),
+            rs.getInt("version"),
+            rs.getTimestamp("created_at").toLocalDateTime(),
+            rs.getTimestamp("updated_at").toLocalDateTime()
+        );
+      }
+    }
+  }
+
+  // ==================== 学习会话 ====================
+
+  /** 列出近期的学习会话。 */
+  public List<LearningSession> listSessions(Database.Context context, int days) throws SQLException {
+    String sql = """
+        SELECT ls.id, ls.title, ls.domain, ls.planned_minutes, ls.actual_minutes,
+               ls.status, ls.focus_score, ls.notes, ls.completed_at, ls.created_at,
+               lg.title AS goal_title
+        FROM learning_sessions ls
+        LEFT JOIN learning_goals lg ON ls.goal_id = lg.id AND lg.deleted_at IS NULL
+        WHERE ls.workspace_id=? AND ls.user_id=?
+          AND ls.created_at >= DATE_SUB(NOW(), INTERVAL ? DAY)
+        ORDER BY ls.created_at DESC LIMIT 100""";
+    try (Connection c = database.connection();
+         PreparedStatement p = c.prepareStatement(sql)) {
+      p.setBytes(1, Database.uuidBytes(context.workspaceId()));
+      p.setBytes(2, Database.uuidBytes(context.userId()));
+      p.setInt(3, days);
+      try (ResultSet rs = p.executeQuery()) {
+        List<LearningSession> sessions = new ArrayList<>();
+        while (rs.next()) {
+          sessions.add(new LearningSession(
+              Database.id(rs, "id"),
+              rs.getString("title"),
+              rs.getString("domain"),
+              rs.getInt("planned_minutes"),
+              rs.getObject("actual_minutes") != null ? rs.getInt("actual_minutes") : null,
+              rs.getString("status"),
+              rs.getObject("focus_score") != null ? rs.getInt("focus_score") : null,
+              rs.getString("notes"),
+              rs.getTimestamp("completed_at") != null
+                  ? rs.getTimestamp("completed_at").toLocalDateTime() : null,
+              rs.getTimestamp("created_at").toLocalDateTime(),
+              rs.getString("goal_title")
+          ));
+        }
+        return sessions;
+      }
+    }
+  }
+
+  // ==================== 知识领域 ====================
+
+  /** 列出所有知识领域。 */
+  public List<KnowledgeArea> listKnowledgeAreas(Database.Context context) throws SQLException {
+    String sql = """
+        SELECT id, name, parent_id, description, mastery_level, last_studied_at
+        FROM knowledge_areas
+        WHERE workspace_id=?
+        ORDER BY parent_id IS NULL DESC, parent_id, name""";
+    try (Connection c = database.connection();
+         PreparedStatement p = c.prepareStatement(sql)) {
+      p.setBytes(1, Database.uuidBytes(context.workspaceId()));
+      try (ResultSet rs = p.executeQuery()) {
+        List<KnowledgeArea> areas = new ArrayList<>();
+        while (rs.next()) {
+          areas.add(new KnowledgeArea(
+              Database.id(rs, "id"),
+              rs.getString("name"),
+              rs.getString("parent_id") != null ? Database.id(rs, "parent_id") : null,
+              rs.getString("description"),
+              rs.getInt("mastery_level"),
+              rs.getTimestamp("last_studied_at") != null
+                  ? rs.getTimestamp("last_studied_at").toLocalDateTime() : null
+          ));
+        }
+        return areas;
+      }
+    }
+  }
+
+  // ==================== 学习统计 ====================
+
+  /** 获取学习统计摘要。 */
+  public LearningStats stats(Database.Context context) throws SQLException {
+    try (Connection c = database.connection()) {
+      int activeGoals = 0;
+      int totalSessions = 0;
+      int totalMinutes = 0;
+      double avgFocus = 0;
+      int currentStreak = 0;
+      int weeklyMinutes = 0;
+
+      try (PreparedStatement p = c.prepareStatement(
+          "SELECT COUNT(*) FROM learning_goals WHERE workspace_id=? AND user_id=? AND status='active' AND deleted_at IS NULL")) {
+        p.setBytes(1, Database.uuidBytes(context.workspaceId()));
+        p.setBytes(2, Database.uuidBytes(context.userId()));
+        try (ResultSet rs = p.executeQuery()) { if (rs.next()) activeGoals = rs.getInt(1); }
+      }
+
+      try (PreparedStatement p = c.prepareStatement(
+          "SELECT COUNT(*), COALESCE(SUM(actual_minutes),0), COALESCE(AVG(focus_score),0) FROM learning_sessions WHERE workspace_id=? AND user_id=? AND status='completed' AND completed_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)")) {
+        p.setBytes(1, Database.uuidBytes(context.workspaceId()));
+        p.setBytes(2, Database.uuidBytes(context.userId()));
+        try (ResultSet rs = p.executeQuery()) {
+          if (rs.next()) {
+            totalSessions = rs.getInt(1);
+            totalMinutes = rs.getInt(2);
+            avgFocus = rs.getDouble(3);
+          }
+        }
+      }
+
+      try (PreparedStatement p = c.prepareStatement(
+          "SELECT COALESCE(SUM(actual_minutes),0) FROM learning_sessions WHERE workspace_id=? AND user_id=? AND status='completed' AND completed_at >= DATE_SUB(NOW(), INTERVAL 7 DAY)")) {
+        p.setBytes(1, Database.uuidBytes(context.workspaceId()));
+        p.setBytes(2, Database.uuidBytes(context.userId()));
+        try (ResultSet rs = p.executeQuery()) { if (rs.next()) weeklyMinutes = rs.getInt(1); }
+      }
+
+      // 计算连续学习天数
+      currentStreak = calculateStreak(c, context);
+
+      return new LearningStats(activeGoals, totalSessions, totalMinutes,
+          Math.round(avgFocus * 10.0) / 10.0, currentStreak, weeklyMinutes);
+    }
+  }
+
+  private int calculateStreak(Connection c, Database.Context context) throws SQLException {
+    int streak = 0;
+    LocalDate check = LocalDate.now();
+    try (PreparedStatement p = c.prepareStatement(
+        "SELECT COUNT(*) FROM learning_sessions WHERE workspace_id=? AND user_id=? AND status='completed' AND DATE(completed_at)=?")) {
+      while (streak < 365) {
+        p.setBytes(1, Database.uuidBytes(context.workspaceId()));
+        p.setBytes(2, Database.uuidBytes(context.userId()));
+        p.setDate(3, java.sql.Date.valueOf(check));
+        try (ResultSet rs = p.executeQuery()) {
+          if (rs.next() && rs.getInt(1) > 0) { streak++; check = check.minusDays(1); }
+          else break;
+        }
+      }
+    }
+    return streak;
+  }
+
+  // ==================== 数据模型 ====================
+
+  public record LearningGoal(
+      String id, String title, String description, String domain,
+      String priority, LocalDate targetDate, Double weeklyHours,
+      String status, double progress, int totalSessions,
+      int completedSessions, int totalMinutes, int version,
+      LocalDateTime createdAt, LocalDateTime updatedAt
+  ) {
+    public JsonObject toJson() {
+      JsonObject obj = new JsonObject();
+      obj.addProperty("id", id);
+      obj.addProperty("title", title);
+      obj.addProperty("description", description != null ? description : "");
+      obj.addProperty("domain", domain);
+      obj.addProperty("priority", priority);
+      obj.addProperty("targetDate", targetDate != null ? targetDate.toString() : null);
+      obj.addProperty("weeklyHours", weeklyHours);
+      obj.addProperty("status", status);
+      obj.addProperty("progress", progress);
+      obj.addProperty("totalSessions", totalSessions);
+      obj.addProperty("completedSessions", completedSessions);
+      obj.addProperty("totalMinutes", totalMinutes);
+      obj.addProperty("version", version);
+      obj.addProperty("createdAt", createdAt.toString());
+      obj.addProperty("updatedAt", updatedAt.toString());
+      return obj;
+    }
+  }
+
+  public record LearningSession(
+      String id, String title, String domain, int plannedMinutes,
+      Integer actualMinutes, String status, Integer focusScore,
+      String notes, LocalDateTime completedAt, LocalDateTime createdAt,
+      String goalTitle
+  ) {
+    public JsonObject toJson() {
+      JsonObject obj = new JsonObject();
+      obj.addProperty("id", id);
+      obj.addProperty("title", title);
+      obj.addProperty("domain", domain);
+      obj.addProperty("plannedMinutes", plannedMinutes);
+      obj.addProperty("actualMinutes", actualMinutes);
+      obj.addProperty("status", status);
+      obj.addProperty("focusScore", focusScore);
+      obj.addProperty("notes", notes != null ? notes : "");
+      obj.addProperty("completedAt", completedAt != null ? completedAt.toString() : null);
+      obj.addProperty("createdAt", createdAt.toString());
+      obj.addProperty("goalTitle", goalTitle != null ? goalTitle : "");
+      return obj;
+    }
+  }
+
+  public record KnowledgeArea(
+      String id, String name, String parentId, String description,
+      int masteryLevel, LocalDateTime lastStudiedAt
+  ) {
+    public JsonObject toJson() {
+      JsonObject obj = new JsonObject();
+      obj.addProperty("id", id);
+      obj.addProperty("name", name);
+      obj.addProperty("parentId", parentId != null ? parentId : "");
+      obj.addProperty("description", description != null ? description : "");
+      obj.addProperty("masteryLevel", masteryLevel);
+      obj.addProperty("lastStudiedAt", lastStudiedAt != null ? lastStudiedAt.toString() : null);
+      return obj;
+    }
+  }
+
+  public record LearningStats(
+      int activeGoals, int totalSessions, int totalMinutes,
+      double avgFocusScore, int currentStreak, int weeklyMinutes
+  ) {
+    public JsonObject toJson() {
+      JsonObject obj = new JsonObject();
+      obj.addProperty("activeGoals", activeGoals);
+      obj.addProperty("totalSessions30d", totalSessions);
+      obj.addProperty("totalMinutes30d", totalMinutes);
+      obj.addProperty("avgFocusScore", avgFocusScore);
+      obj.addProperty("currentStreak", currentStreak);
+      obj.addProperty("weeklyMinutes", weeklyMinutes);
+      return obj;
+    }
+  }
+}
