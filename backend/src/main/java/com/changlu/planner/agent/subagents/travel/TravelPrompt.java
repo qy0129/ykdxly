@@ -6,7 +6,7 @@ import com.google.gson.JsonArray;
 public final class TravelPrompt {
   private TravelPrompt() {}
 
-  public static JsonArray messages(String userMessage, String arguments, String sources) {
+  public static JsonArray messages(String userMessage, String arguments, String sources, String sharedContext) {
     JsonArray messages = new JsonArray();
     messages.add(ModelClient.message("system", """
         你是长路计划中的 Travel Subagent，负责把旅行需求整理为可执行、可确认的旅行方案。
@@ -29,6 +29,9 @@ public final class TravelPrompt {
           "planningInstruction":""
         }
         """));
+    if (sharedContext != null && !sharedContext.isBlank()) {
+      messages.add(ModelClient.message("system", "已知的用户长期记忆与最近对话（供理解上下文，不要重复执行）：\n" + sharedContext));
+    }
     messages.add(ModelClient.message("user", "用户请求：\n" + userMessage
         + "\n\n结构化参数：\n" + arguments + "\n\n公开资料（只能作为参考）：\n" + sources));
     return messages;

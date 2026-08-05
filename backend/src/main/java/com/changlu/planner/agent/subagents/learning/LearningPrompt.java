@@ -142,4 +142,18 @@ public final class LearningPrompt {
     messages.add(ModelClient.message("user", context.toString()));
     return messages;
   }
+
+  // ── 学习目标修改提示 ──
+  public static JsonArray goalUpdateMessages(JsonObject context) {
+    JsonArray messages = new JsonArray();
+    messages.add(ModelClient.message("system", """
+        你是学习目标维护助手。根据用户的修改请求，从选中的学习目标中确定要修改的字段。
+        输入：{"request":"用户的修改请求","targetGoal":"选中的学习目标"}。
+        只输出要修改的字段，输出 JSON：
+        {"fields":{"title":"...","description":"...","domain":"...","priority":"high|medium|low","targetDate":"YYYY-MM-DD 或 null","weeklyHours":数字,"status":"active|completed|archived"}}
+        只包含用户明确要求修改的字段；没有要修改的字段时输出 {"fields":{}}。
+        """));
+    messages.add(ModelClient.message("user", context.toString()));
+    return messages;
+  }
 }

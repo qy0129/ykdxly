@@ -24,6 +24,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -31,6 +32,20 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 
 final class TravelSubagentTest {
+  @Test void normalizesRelativeDateAndPlannerIntent() {
+    TravelPolicy policy = new TravelPolicy();
+    SubagentRequest normalized = policy.normalizeRequest(new SubagentRequest(
+        "我要去山东青岛玩，帮我做一个旅游计划，明天出发，呆十天，就我一个人，节奏轻松",
+        new JsonObject(), List.of()));
+
+    assertEquals("山东青岛", normalized.arguments().get("destination").getAsString());
+    assertEquals(LocalDate.now().plusDays(1).toString(), normalized.arguments().get("startDate").getAsString());
+    assertEquals(LocalDate.now().plusDays(10).toString(), normalized.arguments().get("endDate").getAsString());
+    assertEquals(1, normalized.arguments().get("travelers").getAsInt());
+    assertEquals("relaxed", normalized.arguments().get("pace").getAsString());
+    assertTrue(normalized.arguments().get("saveToPlanner").getAsBoolean());
+  }
+
   @Test void returnsPreviewWithoutCreatingDraft() throws Exception {
     AtomicInteger drafts = new AtomicInteger();
     try (ToolRegistry tools = tools(drafts)) {
@@ -57,11 +72,25 @@ final class TravelSubagentTest {
     }
   }
 
-  @Test void writeRequestCreatesConfirmationDraftOnly() throws Exception {
+  @Test void writeRequestWaitsForPlanApprovalBeforeCreatingDraft() throws Exception {
     AtomicInteger drafts = new AtomicInteger();
     try (ToolRegistry tools = tools(drafts)) {
       AgentResult result = subagent(toPlan("[]"), tools).execute(
           new SubagentRequest("创建一个北京旅行计划", new JsonObject(), List.of()),
+          context(Set.of("travel:read", "planning:write")));
+
+      assertEquals(AgentStatus.WAITING_USER, result.status());
+      assertFalse(result.requiresConfirmation());
+      assertTrue(result.data().get("planReview").getAsBoolean());
+      assertEquals(0, drafts.get());
+    }
+  }
+
+  @Test void approvedPlanCreatesConfirmationDraft() throws Exception {
+    AtomicInteger drafts = new AtomicInteger();
+    try (ToolRegistry tools = tools(drafts)) {
+      AgentResult result = subagent(toPlan("[]"), tools).execute(
+          new SubagentRequest("确认行程，生成写入计划和日历草案", new JsonObject(), List.of()),
           context(Set.of("travel:read", "planning:write")));
 
       assertEquals(AgentStatus.WAITING_CONFIRMATION, result.status());
@@ -91,7 +120,7 @@ final class TravelSubagentTest {
   }
 
   private TravelSubagent subagent(JsonObject generated, ToolRegistry tools) {
-    return new TravelSubagent((request, sources) -> generated.deepCopy(), tools, new TravelPolicy(),
+    return new TravelSubagent((request, sources, sharedContext) -> generated.deepCopy(), tools, new TravelPolicy(),
         new JsonObject(), new JsonObject());
   }
 

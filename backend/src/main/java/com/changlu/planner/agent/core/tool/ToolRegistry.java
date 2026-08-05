@@ -44,6 +44,8 @@ public final class ToolRegistry implements AutoCloseable {
     return value;
   }
 
+  public boolean contains(String name) { return handlers.containsKey(name); }
+
   public AgentResult execute(ToolCall call, AgentContext context) throws Exception {
     ToolHandler handler = require(call.toolName());
     ToolDefinition definition = handler.definition();

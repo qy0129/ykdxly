@@ -527,7 +527,6 @@ function ElasticNoteGraph({ noteItems, activeId, categoryColors, onSelect }: { n
   )
 }
 
-/* The following older ElasticNoteGraph implementation was duplicated below and is intentionally removed. */
 /*
 type ElasticGraphPoint = { x: number; y: number; vx: number; vy: number }
 type ElasticGraphInteraction = {
@@ -870,6 +869,7 @@ export function NotesPage({
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [categoryColorOverrides, setCategoryColorOverrides] = useState<Record<string, string>>(loadCategoryColors)
+  const [imageUploading, setImageUploading] = useState(false)
 
   useEffect(() => {
     if (selectedNoteId) {
@@ -914,7 +914,6 @@ export function NotesPage({
     onChange(noteItems.map((note) => note.id === activeNote.id ? { ...note, ...changes } : note))
   }
 
-  const [imageUploading, setImageUploading] = useState(false)
   const noteContent = activeNote.content ?? activeNote.excerpt
 
   const handleImageUpload = () => {

@@ -10,11 +10,14 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /** Keeps WeChat transport concerns out of the planning command service. */
 final class PlannerWechatClient {
+  record AiReply(String text, List<String> imageUrls) {}
   private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(20);
   private static final Duration AI_TIMEOUT = Duration.ofSeconds(70);
   private static final Pattern DRAFT_ACTION = Pattern.compile("^(确认|取消)\\s*[:：]?\\s*([A-Za-z0-9-]{4,})$");
@@ -30,17 +33,20 @@ final class PlannerWechatClient {
     return result != null && result.has("message") ? result.get("message").getAsString() : "";
   }
 
-  String aiChat(String userId, String message) throws Exception {
+  AiReply aiChat(String userId, String message) throws Exception {
     Matcher confirmation = DRAFT_ACTION.matcher(message == null ? "" : message.trim());
-    if (confirmation.matches()) return draftAction(userId, confirmation.group(2), confirmation.group(1).equals("确认") ? "confirm" : "cancel");
+    if (confirmation.matches()) {
+      return new AiReply(draftAction(userId, confirmation.group(2), confirmation.group(1).equals("确认") ? "confirm" : "cancel"), List.of());
+    }
 
     JsonObject body = new JsonObject(); body.addProperty("message", message);
     HttpResponse<String> response = http.send(request("/integrations/wechat/ai", userId, AI_TIMEOUT)
         .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(body))).build(), HttpResponse.BodyHandlers.ofString());
-    if (response.statusCode() / 100 != 2) return "AI 暂时无法响应，请稍后再试。";
+    if (response.statusCode() / 100 != 2) return new AiReply("AI 暂时无法响应，请稍后再试。", List.of());
     JsonObject result = JsonParser.parseString(response.body()).getAsJsonObject();
     String reply = result.has("reply") ? result.get("reply").getAsString() : "我暂时没有生成回复。";
-    if (!result.has("draft") || !result.get("draft").isJsonObject()) return reply;
+    List<String> imageUrls = imageUrls(result);
+    if (!result.has("draft") || !result.get("draft").isJsonObject()) return new AiReply(reply, imageUrls);
 
     JsonObject draft = result.getAsJsonObject("draft");
     JsonArray actions = draft.getAsJsonArray("actions");
@@ -54,7 +60,35 @@ final class PlannerWechatClient {
         .append("\n回复“确认 ").append(code).append("”执行，回复“取消 ").append(code).append("”放弃。")
         .toString();
     if (actions.size() > 3) preview.append("\n\n[点击此链接](").append(webUrl()).append("#/agent)");
-    return preview.toString();
+    return new AiReply(preview.toString(), imageUrls);
+  }
+
+  /** 从统一 Agent 返回中提取单张或批量图片 URL，微信层只负责传输。 */
+  private List<String> imageUrls(JsonObject result) {
+    List<String> urls = new ArrayList<>();
+    addUrl(result, "imageUrl", urls);
+    if (result.has("images") && result.get("images").isJsonArray()) {
+      result.getAsJsonArray("images").forEach(item -> {
+        if (item.isJsonObject()) addUrl(item.getAsJsonObject(), "imageUrl", urls);
+      });
+    }
+    if (result.has("data") && result.get("data").isJsonObject()) {
+      JsonObject data = result.getAsJsonObject("data");
+      addUrl(data, "imageUrl", urls);
+      if (data.has("images") && data.get("images").isJsonArray()) {
+        data.getAsJsonArray("images").forEach(item -> {
+          if (item.isJsonObject()) addUrl(item.getAsJsonObject(), "imageUrl", urls);
+        });
+      }
+    }
+    return urls.stream().distinct().toList();
+  }
+
+  private void addUrl(JsonObject object, String key, List<String> urls) {
+    if (object.has(key) && !object.get(key).isJsonNull()) {
+      String value = object.get(key).getAsString().trim();
+      if (!value.isBlank()) urls.add(value);
+    }
   }
 
   private String draftAction(String userId, String code, String action) throws Exception {

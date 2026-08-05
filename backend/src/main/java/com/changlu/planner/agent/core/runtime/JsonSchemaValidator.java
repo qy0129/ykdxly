@@ -50,6 +50,8 @@ public final class JsonSchemaValidator {
   private void validateString(JsonElement value, JsonObject schema, String path) {
     String text = value.getAsString();
     if (schema.has("minLength") && text.length() < schema.get("minLength").getAsInt()) throw invalid(path);
+    // Optional form fields may be sent as an empty string while the UI is collecting them.
+    if (text.isBlank()) return;
     if (!schema.has("format")) return;
     try {
       switch (schema.get("format").getAsString()) {

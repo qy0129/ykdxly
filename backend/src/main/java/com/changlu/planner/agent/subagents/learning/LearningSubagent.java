@@ -1,12 +1,25 @@
 package com.changlu.planner.agent.subagents.learning;
 
-import com.changlu.planner.agent.core.AgentContext;
 import com.changlu.planner.agent.core.ModelClient;
-import com.changlu.planner.agent.core.Subagent;
+import com.changlu.planner.agent.core.contract.AgentContext;
+import com.changlu.planner.agent.core.contract.AgentResult;
+import com.changlu.planner.agent.core.contract.AgentStatus;
+import com.changlu.planner.agent.core.contract.Subagent;
+import com.changlu.planner.agent.core.contract.SubagentDefinition;
+import com.changlu.planner.agent.core.contract.SubagentRequest;
 import com.changlu.planner.features.learning.LearningService;
+import com.changlu.planner.features.command.AiCommandService;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import java.time.Duration;
+import java.time.LocalDate;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -41,11 +54,21 @@ public final class LearningSubagent implements Subagent {
   private final LearningProgressTool progressTool;
   private final StudyPlanSuggestionTool suggestionTool;
   private final KnowledgeGapTool gapTool;
+  private final AiCommandService commands;
   private final Gson gson = new Gson();
+  private final SubagentDefinition definition = new SubagentDefinition(
+      "learning", "1.0.0", "学习目标管理、学习进度分析、学习计划建议和知识领域梳理",
+      List.of("学习目标", "学习进度", "学习计划", "课程", "知识梳理"), List.of(),
+      new JsonObject(), new JsonObject(), Set.of(), false, true, Duration.ofSeconds(120), 2);
 
   public LearningSubagent(LearningService service, ModelClient model) {
+    this(service, model, null);
+  }
+
+  public LearningSubagent(LearningService service, ModelClient model, AiCommandService commands) {
     this.service = service;
     this.model = model;
+    this.commands = commands;
     this.progressTool = new LearningProgressTool(service);
     this.suggestionTool = new StudyPlanSuggestionTool(service, model);
     this.gapTool = new KnowledgeGapTool(service);
@@ -70,36 +93,54 @@ public final class LearningSubagent implements Subagent {
    * @return 统一格式的响应 {status, reply, data, errors?}
    */
   @Override
-  public JsonObject execute(String request, AgentContext context) throws Exception {
+  public SubagentDefinition definition() { return definition; }
+
+  @Override
+  public AgentResult execute(SubagentRequest request, AgentContext context) throws Exception {
+    String requestText = request.message();
     long startedAt = System.currentTimeMillis();
-    String intent = classifyIntent(request);
+    String intent = classifyIntent(requestText);
     LOG.info("[学习规划Subagent] 执行开始 意图={} 用户={} 工作区={} 请求预览={}",
         intent, context.identity().userId(), context.identity().workspaceId(),
-        request.length() > 100 ? request.substring(0, 100) + "..." : request);
+        requestText.length() > 100 ? requestText.substring(0, 100) + "..." : requestText);
 
     try {
       LearningResult result = switch (intent) {
         case "analyze_progress" -> handleAnalyzeProgress(context);
-        case "suggest_plan" -> handleSuggestPlan(context);
+        case "suggest_plan" -> handleSuggestPlan(request, context);
         case "detect_gaps" -> handleDetectGaps(context);
         case "view_stats" -> handleViewStats(context);
         case "create_goal" -> handleCreateGoal(request, context);
         case "update_goal" -> handleUpdateGoal(request, context);
         case "delete_goal" -> handleDeleteGoal(request, context);
-        default -> handleGeneral(request, context);
+        default -> handleGeneral(requestText, context);
       };
 
       long durationMs = System.currentTimeMillis() - startedAt;
       LOG.info("[学习规划Subagent] 执行完成 意图={} 状态={} 耗时={}毫秒",
           intent, result.status(), durationMs);
-      return result.toAgentResponse();
+      return toAgentResult(result, context.traceId());
     } catch (Exception e) {
       long durationMs = System.currentTimeMillis() - startedAt;
       LOG.error("[学习规划Subagent] 执行失败 意图={} 耗时={}毫秒 原因={}",
           intent, durationMs, e.getMessage(), e);
-      return LearningResult.error("学习规划处理失败：" + e.getMessage(), e.getMessage())
-          .toAgentResponse();
+      return AgentResult.failed("LEARNING_ERROR", "学习规划处理失败：" + e.getMessage(), false, context.traceId());
     }
+  }
+
+  private AgentResult toAgentResult(LearningResult result, String traceId) {
+    AgentStatus status = switch (result.status()) {
+      case "pending_confirmation" -> AgentStatus.WAITING_CONFIRMATION;
+      case "waiting_user" -> AgentStatus.WAITING_USER;
+      case "error" -> AgentStatus.FAILED;
+      default -> AgentStatus.COMPLETED;
+    };
+    JsonObject data = result.data() == null ? new JsonObject() : result.data().deepCopy();
+    boolean confirmation = status == AgentStatus.WAITING_CONFIRMATION;
+    String draftId = data.has("draft") && data.get("draft").isJsonObject()
+        && data.getAsJsonObject("draft").has("id")
+        ? data.getAsJsonObject("draft").get("id").getAsString() : null;
+    return new AgentResult("1.0", status, result.message(), data, List.of(), traceId, confirmation, draftId);
   }
 
   // ==================== 意图分类 ====================
@@ -145,7 +186,23 @@ public final class LearningSubagent implements Subagent {
     return LearningResult.success(message, data);
   }
 
-  private LearningResult handleSuggestPlan(AgentContext context) throws Exception {
+  private LearningResult handleSuggestPlan(SubagentRequest request, AgentContext context) throws Exception {
+    JsonObject input = request.arguments() == null ? new JsonObject() : request.arguments();
+    JsonArray requirements = new JsonArray();
+    addRequirement(requirements, input, "title", "学习目标", "text", true);
+    addRequirement(requirements, input, "domain", "学习领域", "text", true);
+    addRequirement(requirements, input, "targetDate", "目标日期", "date", true);
+    addRequirement(requirements, input, "weeklyHours", "每周学习时长（小时）", "number", true);
+    if (!requirements.isEmpty()) return informationForm(input, requirements);
+    if (commands != null) {
+      JsonObject fields = learningPlanFields(input);
+      JsonObject action = new JsonObject(); action.addProperty("type", "create_learning_plan");
+      action.addProperty("summary", "创建学习计划并拆解阶段、任务和日程"); action.add("fields", fields);
+      JsonArray actions = new JsonArray(); actions.add(action);
+      JsonObject draft = commands.createStructuredDraft(context.conversationId(), context.identity(), context.channel(), request.message(), "已生成学习计划草案，请确认后写入计划、任务和日程。", actions);
+      JsonObject data = new JsonObject(); data.add("draft", draft.get("draft")); data.add("actions", actions); data.addProperty("planReview", true);
+      return LearningResult.pendingConfirmation("已生成学习计划草案，请检查后确认。", data);
+    }
     JsonObject data = suggestionTool.suggest(context.identity());
     String message = "已根据你的学习目标生成学习计划建议，请查看详情。";
     return LearningResult.success(message, data);
@@ -173,83 +230,103 @@ public final class LearningSubagent implements Subagent {
 
   /**
    * 创建学习目标——生成待确认草案。
-   * 对参数做校验，检查重复，不直接写入数据库。
+   * 结构化参数已带 title 时直接建草案；否则走模型解析自然语言，再落库可确认草案。
    */
-  private LearningResult handleCreateGoal(String request, AgentContext context) throws Exception {
-    // 参数校验
-    JsonArray validationErrors = new JsonArray();
-    if (request == null || request.isBlank()) {
-      validationErrors.add(errorItem("request", "请求内容不能为空"));
-      return LearningResult.validationError("参数校验失败", validationErrors);
+  private LearningResult handleCreateGoal(SubagentRequest request, AgentContext context) throws Exception {
+    String requestText = request.message();
+    JsonObject input = request.arguments() == null ? new JsonObject() : request.arguments();
+    if (commands == null) {
+      return LearningResult.error("学习规划服务不可用", "LEARNING_SERVICE_UNAVAILABLE");
     }
-
-    // 加载现有目标和领域，避免重复创建
-    var goals = service.listGoals(context.identity());
-    var areas = service.listKnowledgeAreas(context.identity());
-
-    JsonObject modelContext = new JsonObject();
-    modelContext.addProperty("request", request);
-    JsonArray existing = new JsonArray();
-    for (var goal : goals) {
-      JsonObject g = new JsonObject();
-      g.addProperty("title", goal.title());
-      g.addProperty("domain", goal.domain());
-      g.addProperty("status", goal.status());
-      existing.add(g);
+    // 结构化输入已带 title → 直接建草案
+    if (input.has("title") && !input.get("title").isJsonNull()
+        && !input.get("title").getAsString().isBlank()) {
+      JsonObject action = goalAction("create_learning_goal",
+          "创建学习目标：" + input.get("title").getAsString(), whitelistGoalFields(input), null);
+      return createGoalDraft(context, requestText, "已生成学习目标草案，请确认后写入。", action);
     }
-    modelContext.add("existingGoals", existing);
-    JsonArray knownAreas = new JsonArray();
-    for (var area : areas) {
-      knownAreas.add(area.name());
-    }
-    modelContext.add("knownAreas", knownAreas);
-
-    // 使用模型生成草案
     if (!model.configured()) {
       return LearningResult.error("AI 模型未配置，无法生成学习目标草案",
           "请配置 PLANNER_AI_API_KEY 后重试");
     }
-
     try {
+      JsonObject modelContext = goalDraftContext(requestText, context);
+      JsonArray draftMessages = LearningPrompt.goalDraftMessages(modelContext);
+      appendSharedContext(draftMessages, context);
       JsonObject aiResult = model.completeJson("learning-goal-draft",
-          LearningPrompt.goalDraftMessages(modelContext), 0.3, 1200, 25, 1);
-
-      JsonObject data = new JsonObject();
-      data.addProperty("generatedAt", java.time.LocalDateTime.now().toString());
-      data.addProperty("requiresConfirmation", true);
-      data.addProperty("confirmationType", "create_learning_goal");
-      data.add("draft", aiResult.has("draft") ? aiResult.get("draft") : aiResult);
-
-      if (aiResult.has("conflicts")) {
-        data.add("conflicts", aiResult.get("conflicts"));
+          draftMessages, 0.3, 1200, 25, 1);
+      JsonObject goal = aiResult.has("draft") && aiResult.get("draft").isJsonObject()
+          ? aiResult.getAsJsonObject("draft") : aiResult;
+      String title = string(goal, "title", "");
+      if (title.isBlank()) {
+        return LearningResult.waitingUser(
+            "请描述你想创建的学习目标，包括名称和学习领域，例如「创建学习目标：今年把英语四级考到 600 分」。",
+            new JsonObject());
       }
-      if (aiResult.has("rationale")) {
-        data.addProperty("rationale", aiResult.get("rationale").getAsString());
+      JsonObject fields = whitelistGoalFields(goal);
+      if (!fields.has("title")) fields.addProperty("title", title);
+      if (aiResult.has("rationale") && !aiResult.get("rationale").isJsonNull()) {
+        fields.addProperty("reason", aiResult.get("rationale").getAsString());
       }
-
-      return LearningResult.pendingConfirmation(
-          "已生成学习目标草案：「"
-              + (aiResult.has("draft")
-                  ? aiResult.getAsJsonObject("draft").get("title").getAsString()
-                  : "未命名")
-              + "」，请确认后执行。",
-          data);
+      JsonObject action = goalAction("create_learning_goal", "创建学习目标：" + title, fields, null);
+      return createGoalDraft(context, requestText, "已生成学习目标草案：「" + title + "」，请确认后写入。", action);
     } catch (Exception e) {
       LOG.warn("[学习规划] AI草案生成失败 原因={}", e.getMessage());
       return LearningResult.error("生成学习目标草案失败，请重试", e.getMessage());
     }
   }
 
-  private LearningResult handleUpdateGoal(String request, AgentContext context) throws Exception {
-    return LearningResult.pendingConfirmation(
-        "更新学习目标需要先生成草案。请提供目标 ID 和需要修改的字段。",
-        new JsonObject());
+  private LearningResult handleUpdateGoal(SubagentRequest request, AgentContext context) throws Exception {
+    if (commands == null) return LearningResult.error("学习规划服务不可用", "LEARNING_SERVICE_UNAVAILABLE");
+    String requestText = request.message();
+    JsonObject input = request.arguments() == null ? new JsonObject() : request.arguments();
+    var goals = service.listGoals(context.identity());
+    LearningService.LearningGoal target = resolveGoal(requestText, input, goals);
+    if (target == null) {
+      if (goals.isEmpty()) return LearningResult.success("当前没有可修改的学习目标，可以先创建一个。", new JsonObject());
+      return LearningResult.waitingUser("要修改哪个学习目标？" + numberedGoalList(goals), new JsonObject());
+    }
+    if (!model.configured()) {
+      return LearningResult.error("AI 模型未配置，无法生成修改草案", "请配置 PLANNER_AI_API_KEY 后重试");
+    }
+    try {
+      JsonObject modelContext = new JsonObject();
+      modelContext.addProperty("request", requestText);
+      modelContext.add("targetGoal", target.toJson());
+      JsonArray draftMessages = LearningPrompt.goalUpdateMessages(modelContext);
+      appendSharedContext(draftMessages, context);
+      JsonObject aiResult = model.completeJson("learning-goal-update", draftMessages, 0.3, 1200, 25, 1);
+      JsonObject fields = aiResult.has("fields") && aiResult.get("fields").isJsonObject()
+          ? whitelistGoalFields(aiResult.getAsJsonObject("fields")) : new JsonObject();
+      if (fields.size() == 0 || (fields.size() == 1 && fields.has("reason"))) {
+        return LearningResult.waitingUser(
+            "请告诉我要修改「" + target.title() + "」的哪些内容，例如目标日期、每周时长或优先级。",
+            new JsonObject());
+      }
+      JsonObject action = goalAction("update_learning_goal", "调整学习目标：" + target.title(), fields,
+          target.id());
+      return createGoalDraft(context, requestText, "已生成学习目标修改草案，请确认后写入。", action);
+    } catch (Exception e) {
+      LOG.warn("[学习规划] 修改草案生成失败 原因={}", e.getMessage());
+      return LearningResult.error("生成学习目标修改草案失败，请重试", e.getMessage());
+    }
   }
 
-  private LearningResult handleDeleteGoal(String request, AgentContext context) throws Exception {
-    return LearningResult.pendingConfirmation(
-        "删除学习目标是不可逆操作。已为你生成待确认草案，请确认后执行。",
-        new JsonObject());
+  private LearningResult handleDeleteGoal(SubagentRequest request, AgentContext context) throws Exception {
+    if (commands == null) return LearningResult.error("学习规划服务不可用", "LEARNING_SERVICE_UNAVAILABLE");
+    String requestText = request.message();
+    JsonObject input = request.arguments() == null ? new JsonObject() : request.arguments();
+    var goals = service.listGoals(context.identity());
+    LearningService.LearningGoal target = resolveGoal(requestText, input, goals);
+    if (target == null) {
+      if (goals.isEmpty()) return LearningResult.success("当前没有可删除的学习目标。", new JsonObject());
+      return LearningResult.waitingUser("要删除哪个学习目标？" + numberedGoalList(goals), new JsonObject());
+    }
+    JsonObject fields = new JsonObject();
+    fields.addProperty("reason", "用户确认删除学习目标");
+    JsonObject action = goalAction("delete_learning_goal", "删除学习目标：" + target.title(), fields,
+        target.id());
+    return createGoalDraft(context, requestText, "已生成学习目标删除草案（不可逆），请确认后执行。", action);
   }
 
   /**
@@ -290,6 +367,7 @@ public final class LearningSubagent implements Subagent {
       messages.add(ModelClient.message("system", LearningPrompt.SYSTEM_PROMPT
           + "\n请综合分析以下学习数据并回答用户的问题。只输出 JSON："
           + "{\"reply\":\"综合分析结果\",\"highlights\":[\"亮点\"],\"concerns\":[\"需要关注的点\"]}"));
+      appendSharedContext(messages, context);
       messages.add(ModelClient.message("user", modelContext.toString()));
 
       JsonObject aiResult = model.completeJson("learning-general", messages, 0.3, 1000, 25, 1);
@@ -335,5 +413,160 @@ public final class LearningSubagent implements Subagent {
     item.addProperty("field", field);
     item.addProperty("message", message);
     return item;
+  }
+
+  private LearningResult informationForm(JsonObject request, JsonArray requirements) {
+    JsonObject data = new JsonObject(); data.add("request", request.deepCopy());
+    data.addProperty("formTitle", "信息搜集表"); data.add("inputRequirements", requirements);
+    JsonArray questions = new JsonArray(); questions.add("请补充学习信息，AI 会结合表单和备注生成学习计划。"); data.add("questions", questions);
+    return LearningResult.waitingUser("请先补充学习信息。", data);
+  }
+
+  /** 通过 createStructuredDraft 落库可确认草案，返回带真实 draft.id 的待确认结果。 */
+  private LearningResult createGoalDraft(AgentContext context, String requestText, String reply,
+                                         JsonObject action) throws Exception {
+    JsonArray actions = new JsonArray(); actions.add(action);
+    JsonObject draft = commands.createStructuredDraft(context.conversationId(), context.identity(),
+        context.channel(), requestText, reply, actions);
+    JsonObject data = new JsonObject(); data.add("draft", draft.get("draft")); data.add("actions", actions);
+    return LearningResult.pendingConfirmation(reply, data);
+  }
+
+  private JsonObject goalAction(String type, String summary, JsonObject fields, String targetId) {
+    JsonObject action = new JsonObject();
+    action.addProperty("type", type);
+    action.addProperty("summary", summary);
+    action.add("fields", fields);
+    if (targetId != null) action.addProperty("targetId", targetId);
+    return action;
+  }
+
+  /** 只保留学习目标动作允许的字段，丢弃模型输出里的扩展键（如 milestones）。 */
+  private JsonObject whitelistGoalFields(JsonObject source) {
+    JsonObject fields = new JsonObject();
+    for (String key : List.of("title", "description", "domain", "priority", "targetDate",
+        "weeklyHours", "status", "planId", "reason")) {
+      if (source.has(key) && !source.get(key).isJsonNull()) fields.add(key, source.get(key).deepCopy());
+    }
+    return fields;
+  }
+
+  private JsonObject goalDraftContext(String requestText, AgentContext context) throws Exception {
+    JsonObject modelContext = new JsonObject();
+    modelContext.addProperty("request", requestText);
+    JsonArray existing = new JsonArray();
+    for (var goal : service.listGoals(context.identity())) {
+      JsonObject g = new JsonObject();
+      g.addProperty("title", goal.title());
+      g.addProperty("domain", goal.domain());
+      g.addProperty("status", goal.status());
+      existing.add(g);
+    }
+    modelContext.add("existingGoals", existing);
+    JsonArray knownAreas = new JsonArray();
+    for (var area : service.listKnowledgeAreas(context.identity())) knownAreas.add(area.name());
+    modelContext.add("knownAreas", knownAreas);
+    return modelContext;
+  }
+
+  /** 按显式 goalId、标题/领域模糊匹配或序号解析目标；0 个或多个命中时返回 null 由调用方追问。 */
+  private LearningService.LearningGoal resolveGoal(String message, JsonObject args,
+                                                   List<LearningService.LearningGoal> goals) {
+    if (goals == null || goals.isEmpty()) return null;
+    if (args != null && args.has("goalId") && !args.get("goalId").isJsonNull()) {
+      try {
+        UUID id = UUID.fromString(args.get("goalId").getAsString());
+        for (var goal : goals) if (id.toString().equals(goal.id())) return goal;
+      } catch (IllegalArgumentException ignored) { }
+    }
+    String normalized = message == null ? "" : message.replaceAll("\\s", "").toLowerCase();
+    Matcher numeric = Pattern.compile("^(?:第)?([0-9一二三四五六七八九十①②③④⑤⑥⑦⑧⑨⑩]+)(?:个|个目标)?$")
+        .matcher(normalized);
+    if (numeric.matches()) {
+      int index = parseIndex(numeric.group(1));
+      if (index >= 1 && index <= goals.size()) return goals.get(index - 1);
+      return null;
+    }
+    LearningService.LearningGoal matched = null;
+    for (var goal : goals) {
+      String title = goal.title() == null ? "" : goal.title().replaceAll("\\s", "").toLowerCase();
+      String domain = goal.domain() == null ? "" : goal.domain().replaceAll("\\s", "").toLowerCase();
+      boolean titleHit = !title.isBlank()
+          && (normalized.contains(title) || (title.length() >= 2 && normalized.contains(title.substring(0, 2))));
+      boolean domainHit = !domain.isBlank() && domain.length() >= 2 && normalized.contains(domain);
+      if (titleHit || domainHit) {
+        if (matched != null) return null; // 多个目标命中 → 交给调用方让用户明确选择
+        matched = goal;
+      }
+    }
+    return matched;
+  }
+
+  private int parseIndex(String value) {
+    if (value == null || value.isEmpty()) return 0;
+    char c = value.charAt(0);
+    if (c >= '0' && c <= '9') {
+      try { return Integer.parseInt(value); } catch (NumberFormatException ignored) { return 0; }
+    }
+    return switch (c) {
+      case '一', '①' -> 1; case '二', '两', '②' -> 2; case '三', '③' -> 3; case '四', '④' -> 4;
+      case '五', '⑤' -> 5; case '六', '⑥' -> 6; case '七', '⑦' -> 7; case '八', '⑧' -> 8;
+      case '九', '⑨' -> 9; case '十', '⑩' -> 10;
+      default -> 0;
+    };
+  }
+
+  private String numberedGoalList(List<LearningService.LearningGoal> goals) {
+    StringBuilder sb = new StringBuilder();
+    for (int i = 0; i < goals.size(); i++) {
+      var goal = goals.get(i);
+      sb.append('\n').append(i + 1).append(". ").append(goal.title());
+      if (goal.domain() != null && !goal.domain().isBlank()) {
+        sb.append("（").append(goal.domain()).append("）");
+      }
+    }
+    return sb.toString();
+  }
+
+  private String string(JsonObject value, String name, String fallback) {
+    return value.has(name) && !value.get(name).isJsonNull() ? value.get(name).getAsString() : fallback;
+  }
+
+  private void addRequirement(JsonArray requirements, JsonObject input, String field, String label, String type, boolean required) {
+    if (input.has(field) && !input.get(field).isJsonNull()) {
+      JsonElement value = input.get(field);
+      if (value.isJsonPrimitive() && !value.getAsString().isBlank()) return;
+    }
+    JsonObject item = new JsonObject(); item.addProperty("field", field); item.addProperty("label", label); item.addProperty("type", type); item.addProperty("required", required); requirements.add(item);
+  }
+
+  private JsonObject learningPlanFields(JsonObject input) {
+    JsonObject fields = new JsonObject();
+    String title = input.has("title") ? input.get("title").getAsString() : "学习计划";
+    String domain = input.has("domain") ? input.get("domain").getAsString() : "general";
+    fields.addProperty("title", title + "学习计划"); fields.addProperty("description", "由学习规划 Agent 根据目标拆解的学习计划");
+    fields.addProperty("color", "#72806A"); fields.addProperty("dueDate", input.get("targetDate").getAsString()); fields.addProperty("reason", "learning_agent");
+    JsonObject goal = input.deepCopy(); goal.addProperty("title", title); goal.addProperty("domain", domain); fields.add("learningGoal", goal);
+    JsonArray stages = new JsonArray();
+    String[] names = {"基础与资料准备", "集中练习与巩固", "项目实践与复盘"};
+    LocalDate scheduleDate = LocalDate.now().plusDays(1);
+    for (int i = 0; i < names.length; i++) {
+      JsonObject stage = new JsonObject(); stage.addProperty("title", names[i]);
+      stage.addProperty("dueDate", scheduleDate.plusDays(i * 2L).toString());
+      JsonArray tasks = new JsonArray(); JsonObject task = new JsonObject(); task.addProperty("title", title + " - " + names[i]);
+      task.addProperty("description", "围绕" + domain + "完成本阶段学习并记录结果"); task.addProperty("priority", i == 0 ? "high" : "medium"); task.addProperty("estimatedMinutes", 120);
+      task.addProperty("dueAt", scheduleDate.plusDays(i * 2L) + "T23:00:00");
+      JsonArray schedules = new JsonArray(); JsonObject schedule = new JsonObject(); schedule.addProperty("title", title + "学习时段"); schedule.addProperty("startAt", scheduleDate.plusDays(i * 2L) + "T20:00:00"); schedule.addProperty("durationMinutes", 120); schedules.add(schedule); task.add("schedules", schedules);
+      tasks.add(task); stage.add("tasks", tasks); stages.add(stage);
+    }
+    fields.add("stages", stages); return fields;
+  }
+
+  /** 把长期记忆与最近对话注入模型消息，让 Subagent 在回答时也能结合上文。 */
+  private void appendSharedContext(JsonArray messages, AgentContext context) {
+    String shared = context.sharedContext();
+    if (shared != null && !shared.isBlank()) {
+      messages.add(ModelClient.message("system", "已知的用户长期记忆与最近对话：\n" + shared));
+    }
   }
 }

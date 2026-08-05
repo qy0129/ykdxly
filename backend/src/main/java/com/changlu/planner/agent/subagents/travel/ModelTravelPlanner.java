@@ -12,9 +12,9 @@ public final class ModelTravelPlanner implements TravelPlannerModel {
 
   public ModelTravelPlanner(ModelClient model) { this.model = model; }
 
-  @Override public JsonObject plan(SubagentRequest request, JsonArray sources) throws Exception {
+  @Override public JsonObject plan(SubagentRequest request, JsonArray sources, String sharedContext) throws Exception {
     return model.completeJson("travel-subagent",
-        TravelPrompt.messages(request.message(), gson.toJson(request.arguments()), gson.toJson(sources)),
-        0.15, 5000, 75, 2);
+        TravelPrompt.messages(request.message(), gson.toJson(request.arguments()), gson.toJson(sources), sharedContext),
+        0.15, 5000, 35, 1);
   }
 }

@@ -26,6 +26,10 @@ public record LearningResult(
     return new LearningResult("pending_confirmation", message, data, errors);
   }
 
+  public static LearningResult waitingUser(String message, JsonObject data) {
+    return new LearningResult("waiting_user", message, data, new JsonArray());
+  }
+
   /** 错误结果。 */
   public static LearningResult error(String message, JsonArray errors) {
     return new LearningResult("error", message, new JsonObject(), errors);

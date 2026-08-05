@@ -4,6 +4,7 @@ import com.changlu.planner.agent.core.ModelClient;
 import com.changlu.planner.agent.subagents.memory.MemorySubagent;
 import com.changlu.planner.agent.tools.PlanningTools;
 import com.changlu.planner.features.plan.PlanExecutionService;
+import com.changlu.planner.features.learning.LearningService;
 import com.changlu.planner.shared.database.Database;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -35,6 +36,7 @@ public final class AiCommandService {
   private final PlanExecutionService plans;
   private final ModelClient modelClient;
   private final MemorySubagent memory;
+  private final LearningService learning;
   private final Gson gson = new Gson();
 
   public AiCommandService(Database database) {
@@ -50,6 +52,7 @@ public final class AiCommandService {
     this.plans = new PlanExecutionService(database);
     this.modelClient = modelClient;
     this.memory = memory == null ? new MemorySubagent(database, modelClient) : memory;
+    this.learning = new LearningService(database);
   }
 
   public JsonObject command(JsonObject input, Database.Context context, String channel) throws Exception {
@@ -60,6 +63,11 @@ public final class AiCommandService {
     if (input.has("knowledgeContext") && !input.get("knowledgeContext").isJsonNull()
         && !input.get("knowledgeContext").getAsString().isBlank()) {
       modelContext += "\n与本次请求相关的用户文件资料：\n" + input.get("knowledgeContext").getAsString();
+    }
+    if (input.has("orchestrationContext") && !input.get("orchestrationContext").isJsonNull()
+        && !input.get("orchestrationContext").getAsString().isBlank()) {
+      modelContext += "\n本任务此前已完成的步骤结果（供你结合判断，不要重复执行）：\n"
+          + input.get("orchestrationContext").getAsString();
     }
     JsonObject modelResult = ask(text, modelContext, conversationId, context);
     JsonArray actions = array(modelResult, "actions");
@@ -94,8 +102,10 @@ public final class AiCommandService {
     result.addProperty("reply", reply);
     result.add("questions", questions);
     result.add("actions", actions);
-    saveMessage(conversationId, "user", text, null);
-    saveMessage(conversationId, "assistant", reply, actions);
+    if (!skipPersistence(input)) {
+      saveMessage(conversationId, "user", text, null);
+      saveMessage(conversationId, "assistant", reply, actions);
+    }
     if (actions.isEmpty()) {
       return result;
     }
@@ -103,6 +113,24 @@ public final class AiCommandService {
     UUID draftId = UUID.randomUUID();
     UUID changeSetId = UUID.randomUUID();
     saveDraft(draftId, changeSetId, context, conversationId, channel, text, reply, actions);
+    result.add("draft", draft(draftId, context));
+    return result;
+  }
+
+  /** 为已经结构化的 Subagent 结果创建待确认草案，绕过二次模型解析。 */
+  public JsonObject createStructuredDraft(UUID conversationId, Database.Context context, String channel,
+                                           String request, String reply, JsonArray actions) throws SQLException {
+    if (conversationId == null) throw new IllegalArgumentException("conversation_required");
+    if (actions == null || actions.isEmpty()) throw new IllegalArgumentException("actions_required");
+    validateAndEnrich(actions, context);
+    UUID draftId = UUID.randomUUID();
+    UUID changeSetId = UUID.randomUUID();
+    saveDraft(draftId, changeSetId, context, conversationId, channel, request, reply, actions);
+    JsonObject result = new JsonObject();
+    result.addProperty("conversationId", conversationId.toString());
+    result.addProperty("reply", reply == null ? "已生成待确认草案。" : reply);
+    result.add("questions", new JsonArray());
+    result.add("actions", actions.deepCopy());
     result.add("draft", draft(draftId, context));
     return result;
   }
@@ -180,10 +208,28 @@ public final class AiCommandService {
     return conversation(input, context, channel);
   }
 
+  /** 由 Agent Loop 统一负责消息持久化时置为 true，本方法内部不再重复写对话记录。 */
+  private static boolean skipPersistence(JsonObject input) {
+    return input.has("skipPersistence") && !input.get("skipPersistence").isJsonNull()
+        && input.get("skipPersistence").getAsBoolean();
+  }
+
   /** 非规划 Subagent 的消息也写入统一的 AI 会话历史。 */
   public void saveExchange(UUID conversationId, String userMessage, String assistantMessage) throws SQLException {
+    saveExchange(conversationId, userMessage, assistantMessage, null);
+  }
+
+  /** 保存带图片结果的 AI 对话，图片 URL 会随 assistant 消息持久化。 */
+  public void saveExchange(UUID conversationId, String userMessage, String assistantMessage,
+                           JsonArray imageUrls) throws SQLException {
     saveMessage(conversationId, "user", userMessage, null);
-    saveMessage(conversationId, "assistant", assistantMessage, null);
+    saveMessage(conversationId, "assistant", assistantMessage, null, imageUrls);
+  }
+
+  /** 保存确认后追加的 assistant 消息，例如批量文生图结果。 */
+  public void saveAssistantMessage(UUID conversationId, String assistantMessage,
+                                   JsonArray imageUrls) throws SQLException {
+    saveMessage(conversationId, "assistant", assistantMessage, null, imageUrls);
   }
 
   /** 恢复网页或微信最近会话及仍待处理的草案。 */
@@ -446,7 +492,10 @@ public final class AiCommandService {
         normalizeModelFields(fields);
         if (type.startsWith("create_") && !"create_schedule".equals(type) && string(fields, "title", "").isBlank()) throw new IllegalArgumentException("创建操作缺少标题");
         if (needsTarget(type)) {
-          UUID targetId = UUID.fromString(required(action, "targetId")); JsonObject before = target(c, context, type, targetId, type.startsWith("restore_"));
+          UUID targetId = UUID.fromString(required(action, "targetId"));
+          JsonObject before = type.endsWith("_learning_goal")
+              ? learningGoalSnapshot(c, context, targetId)
+              : target(c, context, type, targetId, type.startsWith("restore_"));
           action.add("before", before); action.addProperty("expectedVersion", before.get("version").getAsInt());
           fields.addProperty("expectedVersion", before.get("version").getAsInt()); action.add("changes", changes(before, fields));
         } else {
@@ -461,6 +510,12 @@ public final class AiCommandService {
     for (JsonElement item : actions) {
       JsonObject action = item.getAsJsonObject(); String type = required(action, "type");
       if (!needsTarget(type)) continue;
+      if (type.endsWith("_learning_goal")) {
+        JsonObject current = learningGoalSnapshot(c, context, UUID.fromString(required(action, "targetId")));
+        int expected = action.get("expectedVersion").getAsInt();
+        if (current.get("version").getAsInt() != expected) throw new IllegalStateException("version_conflict:" + required(action, "targetId"));
+        continue;
+      }
       JsonObject current = target(c, context, type, UUID.fromString(required(action, "targetId")), type.startsWith("restore_"));
       int expected = action.get("expectedVersion").getAsInt();
       if (current.get("version").getAsInt() != expected) throw new IllegalStateException("version_conflict:" + required(action, "targetId"));
@@ -472,6 +527,31 @@ public final class AiCommandService {
     String type = required(action, "type"); JsonObject f = fields(action); JsonArray result = new JsonArray();
     switch (type) {
       case "create_plan" -> result.addAll(createPlan(c, f, context, draftId, changeSetId, source));
+      case "create_learning_plan" -> {
+        result.addAll(createPlan(c, f, context, draftId, changeSetId, source));
+        if (!f.has("learningGoal") || !f.get("learningGoal").isJsonObject()) {
+          throw new IllegalArgumentException("learningGoal_required");
+        }
+        JsonObject planItem = result.get(0).getAsJsonObject();
+        JsonObject goal = f.getAsJsonObject("learningGoal").deepCopy();
+        goal.addProperty("planId", planItem.get("entityId").getAsString());
+        JsonObject createdGoal = insertLearningGoal(c, context, goal);
+        result.add(item("create_learning_goal", createdGoal.get("id").getAsString(), action));
+      }
+      case "create_learning_goal" -> {
+        JsonObject created = learning.createGoal(context, f);
+        result.add(item(type, created.get("id").getAsString(), action));
+      }
+      case "update_learning_goal" -> {
+        JsonObject updated = learning.updateGoal(required(action, "targetId"), context, f);
+        result.add(item(type, updated.get("id").getAsString(), action));
+      }
+      case "delete_learning_goal" -> {
+        String targetId = required(action, "targetId");
+        int expected = f.has("expectedVersion") ? f.get("expectedVersion").getAsInt() : learning.getGoal(targetId, context).version();
+        learning.deleteGoal(targetId, context, expected);
+        result.add(item(type, targetId, action));
+      }
       case "update_plan" -> result.add(item(type, updatePlan(c, UUID.fromString(required(action, "targetId")), f, context, draftId, changeSetId, source), action));
       case "delete_plan", "restore_plan", "delete_stage", "restore_stage", "delete_todo", "restore_todo", "delete_schedule", "restore_schedule" ->
           result.add(item(type, softDeleteOrRestore(c, type, UUID.fromString(required(action, "targetId")), f, context, draftId, changeSetId, source), action));
@@ -521,12 +601,22 @@ public final class AiCommandService {
         for (JsonElement scheduleElement : array(tf, "schedules")) {
           JsonObject schedule = scheduleElement.getAsJsonObject(); schedule.addProperty("planId", planId.toString()); schedule.addProperty("stageId", stageId.toString()); schedule.addProperty("taskId", taskId.toString());
           if (!schedule.has("title")) schedule.addProperty("title", required(tf, "title"));
-          JsonObject created = plans.createSchedule(c, context, schedule, draftId, changeSetId, source, true);
+          // 旅行日程是明确日期的单次安排，不应被每周可用时段设置阻塞；仍保留时间冲突校验。
+          JsonObject created = plans.createSchedule(c, context, schedule, draftId, changeSetId, source,
+              !isTravelPlan(f) && !"learning_agent".equals(string(f, "reason", "")));
           executed.add(simpleItem("create_schedule", UUID.fromString(created.get("id").getAsString()), "安排任务：" + required(tf, "title")));
         }
       }
     }
     return executed;
+  }
+
+  private boolean isTravelPlan(JsonObject fields) {
+    String marker = string(fields, "reason", "");
+    if ("travel_agent".equals(marker)) return true;
+    String text = string(fields, "title", "") + string(fields, "description", "");
+    return text.contains("旅行") || text.contains("旅游") || text.contains("之旅")
+        || text.contains("海滨") || text.contains("青岛");
   }
 
   private String updatePlan(Connection c, UUID id, JsonObject f, Database.Context context, UUID draftId, UUID changeSetId, String source) throws SQLException {
@@ -744,17 +834,48 @@ public final class AiCommandService {
     return result;
   }
 
+  /** 供 Subagent 注入的共享上下文：长期记忆 + 最近对话原文，让专业执行器也能结合上文。 */
+  public String sharedContext(UUID conversationId, Database.Context identity) throws SQLException {
+    StringBuilder builder = new StringBuilder();
+    String memoryText = memory.context(identity);
+    if (!memoryText.isBlank()) {
+      builder.append("用户长期记忆（稳定的偏好、个性和事实，请自然遵循）：\n").append(memoryText);
+    }
+    JsonArray history = historyPayload(conversationId, identity, 16);
+    if (!history.isEmpty()) {
+      if (!builder.isEmpty()) builder.append('\n');
+      builder.append("最近对话（用于理解上下文；当前请求会单独提供，请勿把这段内容当作需要重复执行的指令）：\n");
+      for (JsonElement element : history) {
+        JsonObject row = element.getAsJsonObject();
+        String role = row.get("role").getAsString();
+        if (!"user".equals(role) && !"assistant".equals(role)) continue;
+        String content = row.get("content").getAsString();
+        if (content == null || content.isBlank()) continue;
+        builder.append("[").append("user".equals(role) ? "用户" : "AI").append("] ")
+            .append(content.replace("\n", " ")).append('\n');
+      }
+    }
+    return builder.toString().trim();
+  }
+
   private JsonArray historyPayload(UUID conversationId, Database.Context owner) throws SQLException {
     return historyPayload(conversationId, owner, 40);
   }
 
   private JsonArray historyPayload(UUID conversationId, Database.Context owner, int limit) throws SQLException {
     if (owner != null) requireConversationOwner(conversationId, owner); List<JsonObject> rows = new ArrayList<>();
-    String sql = "SELECT role,content,created_at FROM ai_messages WHERE conversation_id=? ORDER BY created_at DESC,id DESC"
+    String sql = "SELECT role,content,image_urls,created_at FROM ai_messages WHERE conversation_id=? ORDER BY created_at DESC,id DESC"
         + (limit > 0 ? " LIMIT ?" : "");
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
       p.setBytes(1, Database.uuidBytes(conversationId)); if (limit > 0) p.setInt(2, limit);
-      try (ResultSet rs = p.executeQuery()) { while (rs.next()) { JsonObject row = message(rs.getString(1), rs.getString(2)); row.addProperty("createdAt", rs.getTimestamp(3).toLocalDateTime().toString()); rows.add(row); } }
+      try (ResultSet rs = p.executeQuery()) {
+        while (rs.next()) {
+          JsonObject row = message(rs.getString(1), rs.getString(2));
+          addImageUrls(row, rs.getString(3), owner);
+          row.addProperty("createdAt", rs.getTimestamp(4).toLocalDateTime().toString());
+          rows.add(row);
+        }
+      }
     }
     JsonArray result = new JsonArray(); for (int i = rows.size() - 1; i >= 0; i--) result.add(rows.get(i)); return result;
   }
@@ -781,7 +902,11 @@ public final class AiCommandService {
 
   private void validateFields(String type, JsonObject f) {
     List<String> allowed;
-    if (type.endsWith("_plan")) allowed = List.of("title", "description", "color", "status", "dueDate", "stages", "reason", "expectedVersion");
+    if ("create_learning_goal".equals(type) || "update_learning_goal".equals(type)) {
+      allowed = List.of("title", "description", "domain", "priority", "targetDate", "weeklyHours", "status", "planId", "reason", "expectedVersion");
+    } else if ("delete_learning_goal".equals(type)) {
+      allowed = List.of("reason", "expectedVersion");
+    } else if (type.endsWith("_plan")) allowed = List.of("title", "description", "color", "status", "dueDate", "stages", "learningGoal", "reason", "expectedVersion");
     else if (type.endsWith("_stage")) allowed = List.of("planId", "title", "description", "status", "dueDate", "sortOrder", "tasks", "reason", "expectedVersion");
     else if (type.endsWith("_task")) allowed = List.of("planId", "stageId", "title", "description", "status", "priority", "estimatedMinutes", "actualMinutes", "dueAt", "sortOrder", "reason", "schedules", "expectedVersion", "actionType");
     else if (type.endsWith("_todo")) allowed = List.of("title", "description", "status", "priority", "dueAt", "actualMinutes", "reason", "expectedVersion");
@@ -792,6 +917,8 @@ public final class AiCommandService {
     if ("create_stage".equals(type)) UUID.fromString(required(f, "planId"));
     if ("create_task".equals(type)) { UUID.fromString(required(f, "planId")); UUID.fromString(required(f, "stageId")); }
     if ("create_schedule".equals(type)) { required(f, "startAt"); if (integer(f, "durationMinutes", 0) < 1) throw new IllegalArgumentException("durationMinutes_required"); }
+    if ("create_learning_goal".equals(type)) { required(f, "title"); }
+    if (("update_learning_goal".equals(type) || "delete_learning_goal".equals(type)) && f.has("targetDate") && !f.get("targetDate").isJsonNull()) LocalDate.parse(f.get("targetDate").getAsString());
     if ("delay_task".equals(type) && string(f, "dueAt", "").isBlank()) throw new IllegalArgumentException("延期任务缺少新截止时间");
     if ("delay_todo".equals(type) && string(f, "dueAt", "").isBlank()) throw new IllegalArgumentException("延期待办缺少新截止时间");
     if ("delay_schedule".equals(type) && string(f, "startAt", "").isBlank()) throw new IllegalArgumentException("延期日程缺少新开始时间");
@@ -802,8 +929,10 @@ public final class AiCommandService {
     if (type.endsWith("_stage") && status != null && !List.of("pending", "in_progress", "done", "blocked", "cancelled").contains(status)) throw new IllegalArgumentException("invalid_stage_status");
     if (type.endsWith("_todo") && status != null && !List.of("pending", "done", "delayed", "cancelled").contains(status)) throw new IllegalArgumentException("invalid_todo_status");
     if (type.endsWith("_schedule") && status != null && !List.of("pending", "done", "delayed", "cancelled").contains(status)) throw new IllegalArgumentException("invalid_schedule_status");
+    if (type.endsWith("_learning_goal") && status != null && !List.of("active", "paused", "completed", "abandoned").contains(status)) throw new IllegalArgumentException("invalid_learning_goal_status");
     if (f.has("priority") && !List.of("high", "medium", "low").contains(f.get("priority").getAsString())) throw new IllegalArgumentException("invalid_priority");
     if (f.has("dueDate") && !f.get("dueDate").isJsonNull()) LocalDate.parse(f.get("dueDate").getAsString());
+    if (f.has("targetDate") && !f.get("targetDate").isJsonNull()) LocalDate.parse(f.get("targetDate").getAsString());
     if (f.has("dueAt") && !f.get("dueAt").isJsonNull()) LocalDateTime.parse(f.get("dueAt").getAsString());
     if (f.has("startAt") && !f.get("startAt").isJsonNull()) LocalDateTime.parse(f.get("startAt").getAsString());
   }
@@ -821,6 +950,30 @@ public final class AiCommandService {
     throw new IllegalArgumentException("不支持的目标类型：" + actionType);
   }
   private EntityTable entityByName(String type) { return switch (type) { case "plan" -> entityTable("update_plan"); case "plan_stage" -> entityTable("update_stage"); case "plan_task" -> entityTable("update_task"); case "todo" -> entityTable("update_todo"); case "schedule" -> entityTable("update_schedule"); default -> throw new IllegalArgumentException("不支持撤销的实体：" + type); }; }
+
+  private JsonObject learningGoalSnapshot(Connection c, Database.Context context, UUID id) throws SQLException {
+    try (PreparedStatement p = c.prepareStatement("SELECT id,title,description,domain,priority,target_date,weekly_hours,status,progress,version FROM learning_goals WHERE id=? AND workspace_id=? AND user_id=? AND deleted_at IS NULL")) {
+      p.setBytes(1, Database.uuidBytes(id)); p.setBytes(2, Database.uuidBytes(context.workspaceId())); p.setBytes(3, Database.uuidBytes(context.userId()));
+      try (ResultSet rs = p.executeQuery()) {
+        if (!rs.next()) throw new IllegalArgumentException("learning_goal_not_found");
+        JsonObject row = new JsonObject(); row.addProperty("id", Database.id(rs, "id")); row.addProperty("title", rs.getString("title"));
+        row.addProperty("description", rs.getString("description")); row.addProperty("domain", rs.getString("domain")); row.addProperty("priority", rs.getString("priority"));
+        row.addProperty("targetDate", rs.getDate("target_date") == null ? null : rs.getDate("target_date").toString()); row.add("weeklyHours", gson.toJsonTree(rs.getObject("weekly_hours")));
+        row.addProperty("status", rs.getString("status")); row.addProperty("progress", rs.getDouble("progress")); row.addProperty("version", rs.getInt("version")); return row;
+      }
+    }
+  }
+
+  private JsonObject insertLearningGoal(Connection c, Database.Context context, JsonObject input) throws SQLException {
+    UUID id = UUID.randomUUID();
+    try (PreparedStatement p = c.prepareStatement("INSERT INTO learning_goals (id,workspace_id,user_id,plan_id,title,description,domain,priority,target_date,weekly_hours,status) VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
+      p.setBytes(1, Database.uuidBytes(id)); p.setBytes(2, Database.uuidBytes(context.workspaceId())); p.setBytes(3, Database.uuidBytes(context.userId()));
+      p.setBytes(4, input.has("planId") && !input.get("planId").isJsonNull() ? Database.uuidBytes(UUID.fromString(input.get("planId").getAsString())) : null);
+      p.setString(5, required(input, "title")); p.setString(6, nullable(input, "description")); p.setString(7, string(input, "domain", "general")); p.setString(8, string(input, "priority", "medium"));
+      p.setObject(9, date(input, "targetDate")); p.setObject(10, input.has("weeklyHours") && !input.get("weeklyHours").isJsonNull() ? input.get("weeklyHours").getAsDouble() : null); p.setString(11, string(input, "status", "active")); p.executeUpdate();
+    }
+    JsonObject row = new JsonObject(); row.addProperty("id", id.toString()); row.addProperty("version", 0); row.addProperty("title", input.get("title").getAsString()); return row;
+  }
 
   private boolean needsTarget(String type) { return !type.startsWith("create_") && !"batch_reschedule".equals(type) && !"update_preference".equals(type); }
   private boolean containsAction(JsonArray actions, String type) { for (JsonElement item : actions) if (item.isJsonObject() && type.equals(string(item.getAsJsonObject(), "type", ""))) return true; return false; }
@@ -842,6 +995,8 @@ public final class AiCommandService {
       String type = string(action, "type", "");
       if (type.contains("schedule") || "batch_reschedule".equals(type)) {
         actions.remove(index);
+      } else if ("create_plan".equals(type) && isTravelPlan(fields(action))) {
+        // 旅行计划按天排期是核心诉求，保留嵌套日程；非旅行计划仍按"未明确要求不排期"剥离。
       } else {
         removeNestedSchedules(fields(action));
       }
@@ -885,12 +1040,19 @@ public final class AiCommandService {
   private JsonObject simpleItem(String type, UUID id, String summary) { JsonObject row = new JsonObject(); row.addProperty("type", type); row.addProperty("entityId", id.toString()); row.addProperty("summary", summary); return row; }
   private JsonObject message(String role, String content) { JsonObject row = new JsonObject(); row.addProperty("role", role); row.addProperty("content", content); return row; }
   private void saveMessage(UUID conversationId, String role, String content, JsonArray actions) throws SQLException {
+    saveMessage(conversationId, role, content, actions, null);
+  }
+
+  private void saveMessage(UUID conversationId, String role, String content, JsonArray actions,
+                           JsonArray imageUrls) throws SQLException {
     try (Connection c = database.connection()) {
       try (PreparedStatement p = c.prepareStatement(
-          "INSERT INTO ai_messages (id,conversation_id,role,content,proposed_changes) VALUES (?,?,?,?,?)")) {
+          "INSERT INTO ai_messages (id,conversation_id,role,content,proposed_changes,image_urls) VALUES (?,?,?,?,?,?)")) {
         p.setBytes(1, Database.uuidBytes(UUID.randomUUID())); p.setBytes(2, Database.uuidBytes(conversationId));
         p.setString(3, role); p.setString(4, content);
-        p.setString(5, actions == null ? null : gson.toJson(actions)); p.executeUpdate();
+        p.setString(5, actions == null ? null : gson.toJson(actions));
+        p.setString(6, imageUrls == null ? null : gson.toJson(imageUrls));
+        p.executeUpdate();
       }
       String title = content.replaceAll("\\s+", " ").trim();
       if (title.length() > 40) title = title.substring(0, 40) + "...";
@@ -900,6 +1062,33 @@ public final class AiCommandService {
         p.setString(1, role); p.setString(2, title.isBlank() ? "新对话" : title);
         p.setBytes(3, Database.uuidBytes(conversationId)); p.executeUpdate();
       }
+    }
+  }
+
+  private void addImageUrls(JsonObject message, String raw, Database.Context owner) throws SQLException {
+    if (raw == null || raw.isBlank()) return;
+    JsonElement value;
+    try { value = JsonParser.parseString(raw); } catch (RuntimeException ignored) { return; }
+    if (!value.isJsonArray()) return;
+    JsonArray urls = new JsonArray();
+    for (JsonElement item : value.getAsJsonArray()) {
+      if (!item.isJsonPrimitive() || !item.getAsJsonPrimitive().isString()) continue;
+      String url = item.getAsString();
+      if (owner != null && url.startsWith("http")) {
+        String requestId = imageRequestId(url, owner);
+        if (requestId != null) url = "/api/ai/images/" + requestId;
+      }
+      urls.add(url);
+    }
+    if (!urls.isEmpty()) message.add("imageUrls", urls);
+  }
+
+  /** 为旧消息把供应商 URL 映射成稳定的后端图片地址。 */
+  private String imageRequestId(String imageUrl, Database.Context owner) throws SQLException {
+    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
+        "SELECT request_id FROM ai_images WHERE image_url=? AND workspace_id=? AND user_id=? AND status='SUCCESS' ORDER BY created_at DESC LIMIT 1")) {
+      p.setString(1, imageUrl); p.setBytes(2, Database.uuidBytes(owner.workspaceId())); p.setBytes(3, Database.uuidBytes(owner.userId()));
+      try (ResultSet rs = p.executeQuery()) { return rs.next() ? rs.getString(1) : null; }
     }
   }
   private void updateDraftStatus(Connection c, UUID id, String status) throws SQLException { try (PreparedStatement p = c.prepareStatement("UPDATE ai_action_drafts SET status=?,confirmed_at=CASE WHEN ?='confirmed' THEN NOW() ELSE confirmed_at END WHERE id=?")) { p.setString(1, status); p.setString(2, status); p.setBytes(3, Database.uuidBytes(id)); p.executeUpdate(); } }

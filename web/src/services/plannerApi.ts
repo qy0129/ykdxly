@@ -164,6 +164,43 @@ export interface AiCommandResponse {
 
 export type AgentRunStatus = 'RUNNING' | 'WAITING_USER' | 'WAITING_CONFIRMATION' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
 
+export interface AgentInputRequirement {
+  field: string
+  label: string
+  type: 'text' | 'date' | 'number' | 'select' | 'textarea'
+  required?: boolean
+  options?: string[]
+}
+
+/** Agent 主循环中的一个步骤：主执行器步骤或 subagent 内部的工具子步骤。 */
+export interface AgentRunStep {
+  seq: number
+  parentStepId?: string
+  stepLevel: 'main' | 'tool'
+  executorType: string
+  executorName: string
+  label: string
+  message?: string
+  status: string
+  result?: unknown
+  toolCallId?: string
+  durationMs?: number
+  startedAt: string
+  completedAt?: string
+}
+
+export interface AgentToolCall {
+  toolCallId: string
+  executorType?: string
+  toolName?: string
+  arguments?: unknown
+  result?: unknown
+  status: string
+  requiresConfirmation?: boolean
+  attemptCount?: number
+  error?: string
+}
+
 export interface AgentRunResponse {
   runId: string
   conversationId: string
@@ -177,6 +214,15 @@ export interface AgentRunResponse {
   executorName?: string
   lastError?: string
   report?: ReviewReport
+  steps?: AgentRunStep[]
+  toolCalls?: AgentToolCall[]
+  data?: Record<string, unknown>
+  planReview?: boolean
+  travelData?: Record<string, unknown>
+  inputRequirements?: AgentInputRequirement[]
+  formTitle?: string
+  imageUrl?: string
+  images?: Array<{ imageUrl?: string; requestId?: string }>
 }
 
 export interface AgentDocument {
@@ -194,8 +240,12 @@ export interface AiSession {
   conversationId?: string
   runId?: string
   runStatus?: AgentRunResponse['status']
-  messages: Array<{ role: 'user' | 'assistant'; content: string; createdAt: string }>
+  messages: Array<{ role: 'user' | 'assistant'; content: string; imageUrls?: string[]; createdAt: string }>
   draft?: AiDraft
+  planReview?: boolean
+  travelData?: Record<string, unknown>
+  inputRequirements?: AgentInputRequirement[]
+  formTitle?: string
 }
 
 export interface AiConversation {
@@ -516,13 +566,13 @@ export const plannerApi = {
     method: 'POST',
     body: JSON.stringify({ message, conversationId }),
   }),
-  startAgent: (message: string, conversationId?: string, documentIds: string[] = []) => request<AgentRunResponse>('/agent/runs', {
+  startAgent: (message: string, conversationId?: string, documentIds: string[] = [], agentArguments?: Record<string, unknown>) => request<AgentRunResponse>('/agent/runs', {
     method: 'POST',
-    body: JSON.stringify({ message, conversationId, documentIds }),
+    body: JSON.stringify({ message, conversationId, documentIds, arguments: agentArguments }),
   }),
-  resumeAgent: (runId: string, message: string, documentIds: string[] = []) => request<AgentRunResponse>(`/agent/runs/${runId}/resume`, {
+  resumeAgent: (runId: string, message: string, documentIds: string[] = [], agentArguments?: Record<string, unknown>) => request<AgentRunResponse>(`/agent/runs/${runId}/resume`, {
     method: 'POST',
-    body: JSON.stringify({ message, documentIds }),
+    body: JSON.stringify({ message, documentIds, arguments: agentArguments }),
   }),
   uploadAgentFile: async (file: File) => {
     const response = await fetch(API_BASE + '/agent/files', {
