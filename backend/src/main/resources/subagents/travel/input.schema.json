@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://changlu.local/schemas/subagents/travel/input.schema.json",
+  "title": "Travel Subagent Input",
+  "type": "object",
+  "properties": {
+    "message": { "type": "string", "minLength": 1 },
+    "arguments": {
+      "type": "object",
+      "properties": {
+        "destination": { "type": "string" },
+        "origin": { "type": "string" },
+        "startDate": { "type": "string", "format": "date" },
+        "endDate": { "type": "string", "format": "date" },
+        "travelers": { "type": "integer", "minimum": 1 },
+        "budget": {
+          "type": "object",
+          "properties": {
+            "amount": { "type": "number", "minimum": 0 },
+            "currency": { "type": "string", "minLength": 3, "maxLength": 3 }
+          },
+          "required": ["amount", "currency"]
+        },
+        "pace": { "type": "string", "enum": ["relaxed", "balanced", "intensive"] },
+        "interests": { "type": "array", "items": { "type": "string" } },
+        "constraints": { "type": "array", "items": { "type": "string" } },
+        "saveToPlanner": { "type": "boolean" }
+      }
+    },
+    "documentIds": { "type": "array", "items": { "type": "string", "format": "uuid" } }
+  },
+  "required": ["message", "arguments", "documentIds"]
+}

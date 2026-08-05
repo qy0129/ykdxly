@@ -8,12 +8,22 @@ import com.google.gson.JsonObject;
 public final class AgentRouter {
   public record Decision(String executorType, String executorName, String reason) {}
 
-  private final ModelClient model;
+  @FunctionalInterface
+  public interface RouteModel {
+    JsonObject choose(JsonArray messages) throws Exception;
+  }
+
+  private final RouteModel model;
   private final Gson gson = new Gson();
 
-  public AgentRouter(ModelClient model) { this.model = model; }
+  public AgentRouter(ModelClient model) {
+    this(messages -> model.completeJson("agent-router", messages, 0, 300, 12, 1));
+  }
 
-  public Decision route(String request, boolean hasDocuments, ToolRegistry tools, SubagentRegistry subagents)
+  public AgentRouter(RouteModel model) { this.model = model; }
+
+  public Decision route(String request, boolean hasDocuments, ToolRegistry tools,
+                        com.changlu.planner.agent.core.registry.SubagentRegistry subagents)
       throws Exception {
     JsonArray messages = new JsonArray();
     messages.add(ModelClient.message("system", """
@@ -26,6 +36,8 @@ public final class AgentRouter {
         document 负责分析上传文件、总结文件和基于文件内容问答；根据文件创建计划或任务仍交给 planning.assistant。
         memory 负责回答”你记得我什么”、记住或忘记长期偏好；普通对话中的记忆提取由运行时自动完成。
         learning 负责学习目标管理、学习进度分析、学习计划建议和知识领域梳理；创建学习目标时先生成草案。
+        专业领域能力只能从 Subagent Registry 的元数据中选择，不得发明未注册的执行器。
+        结合 description、supportedScenarios 和 unsupportedScenarios 判断职责边界。
         当前请求是否附带文件：%s。
         只输出 JSON：{"executorType":"tool或subagent","executorName":"名称","reason":"简短原因"}。
         可用 Tools：%s
@@ -33,17 +45,19 @@ public final class AgentRouter {
         """.formatted(hasDocuments, gson.toJson(tools.definitions()), gson.toJson(subagents.definitions()))));
     messages.add(ModelClient.message("user", request));
     try {
-      JsonObject result = model.completeJson("agent-router", messages, 0, 300, 12, 1);
+      JsonObject result = model.choose(messages);
       String type = string(result, "executorType", "tool");
       String name = string(result, "executorName", "planning.assistant");
       if ("subagent".equals(type)) subagents.require(name); else tools.require(name);
       return new Decision(type, name, string(result, "reason", ""));
     } catch (Exception error) {
-      return fallback(request, hasDocuments, error);
+      return fallback(request, hasDocuments, subagents, error);
     }
   }
 
-  private Decision fallback(String request, boolean hasDocuments, Exception error) {
+  private Decision fallback(String request, boolean hasDocuments,
+                            com.changlu.planner.agent.core.registry.SubagentRegistry subagents,
+                            Exception error) {
     String normalized = request.replaceAll("\\s", "");
     if (hasDocuments && planningIntent(normalized)) {
       return new Decision("tool", "planning.assistant", "请求基于附件创建或调整计划数据");
@@ -78,6 +92,9 @@ public final class AgentRouter {
         || normalized.contains("学习计划") || normalized.contains("学习进度")) {
       return new Decision("subagent", "learning", "模型路由失败，按明确学习规划意图回退");
     }
+    var match = subagents.bestMatch(hasDocuments ? request + " 附件" : request);
+    if (match.isPresent()) return new Decision("subagent", match.get().definition().name(),
+        "模型路由失败，按 Registry 场景元数据回退");
     return new Decision("tool", "planning.assistant", "模型路由失败，回退核心规划能力：" + error.getMessage());
   }
 

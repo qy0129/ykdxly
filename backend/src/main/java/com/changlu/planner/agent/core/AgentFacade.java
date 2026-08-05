@@ -11,12 +11,14 @@ import com.changlu.planner.agent.subagents.learning.LearningSubagent;
 import com.changlu.planner.agent.subagents.review.ReviewSubagent;
 import com.changlu.planner.agent.subagents.scheduling.ConflictTool;
 import com.changlu.planner.agent.subagents.scheduling.SchedulingSubagent;
+import com.changlu.planner.agent.subagents.travel.TravelModule;
 import com.changlu.planner.agent.tools.PlanningTools;
 import com.changlu.planner.features.command.AiCommandService;
 import com.changlu.planner.features.learning.LearningService;
 import com.changlu.planner.shared.database.Database;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonArray;
+import java.util.List;
 
 /** 网页和微信共用的 Agent 应用入口。 */
 public final class AgentFacade implements AutoCloseable {
@@ -32,11 +34,15 @@ public final class AgentFacade implements AutoCloseable {
     memory = new MemorySubagent(database, model);
     commands = new AiCommandService(database, model, memory);
     ToolRegistry tools = PlanningTools.registry();
-    SubagentRegistry subagents = new SubagentRegistry();
+    com.changlu.planner.agent.core.registry.SubagentRegistry subagents =
+        new com.changlu.planner.agent.core.registry.SubagentRegistry();
+    com.changlu.planner.agent.core.tool.ToolRegistry standardTools =
+        new com.changlu.planner.agent.core.tool.ToolRegistry();
     WebSearchTool webSearch = new WebSearchTool();
     review = new ReviewSubagent(database, commands, model);
     briefing = new BriefingSubagent(database, webSearch);
     documents = new DocumentSubagent(database, model);
+
     subagents.register(review);
     subagents.register(briefing);
     subagents.register(new ResearchSubagent(webSearch));
@@ -46,6 +52,7 @@ public final class AgentFacade implements AutoCloseable {
     LearningService learningService = new LearningService(database);
     subagents.register(new LearningSubagent(learningService, model));
     runtime = new AgentRuntime(database, commands, new AgentRouter(model), tools, subagents, documents, memory);
+
   }
 
   public JsonObject start(JsonObject input, Database.Context context, String channel) throws Exception {
