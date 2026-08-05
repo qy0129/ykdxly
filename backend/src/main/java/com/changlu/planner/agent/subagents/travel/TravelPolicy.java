@@ -1,6 +1,7 @@
 package com.changlu.planner.agent.subagents.travel;
 
 import com.google.gson.JsonObject;
+import com.google.gson.JsonArray;
 import com.changlu.planner.agent.core.contract.SubagentRequest;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
@@ -67,6 +68,20 @@ public final class TravelPolicy {
     if (result.questions().isEmpty() && request.destination().isBlank()) {
       throw new IllegalArgumentException("TRAVEL_DESTINATION_REQUIRED");
     }
+  }
+
+  public JsonArray missingQuestions(TravelRequest request) {
+    JsonArray questions = new JsonArray();
+    boolean destinationMissing = request.destination().isBlank();
+    boolean datesMissing = request.startDate().isBlank() || request.endDate().isBlank();
+    if (destinationMissing && datesMissing) {
+      questions.add("请告诉我旅行目的地，以及计划出发的日期和旅行天数。");
+    } else if (destinationMissing) {
+      questions.add("这次旅行的目的地是哪里？");
+    } else if (datesMissing) {
+      questions.add("计划什么时候出发，旅行几天？");
+    }
+    return questions;
   }
 
   private void requireType(JsonObject arguments, String name, String expected) {

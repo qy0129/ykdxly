@@ -73,7 +73,7 @@ public final class AgentRuntime implements AutoCloseable {
     createRun(runId, identity, conversationId, channel, message);
     JsonObject request = input.deepCopy();
     request.addProperty("conversationId", conversationId.toString());
-    return execute(runId, request, identity, channel, 0);
+    return execute(runId, request, identity, channel, 0, null);
   }
 
   public JsonObject startAsync(JsonObject input, Database.Context identity, String channel) throws Exception {
@@ -83,7 +83,7 @@ public final class AgentRuntime implements AutoCloseable {
     createRun(runId, identity, conversationId, channel, message);
     JsonObject request = input.deepCopy();
     request.addProperty("conversationId", conversationId.toString());
-    submit(runId, () -> execute(runId, request, identity, channel, 0));
+    submit(runId, () -> execute(runId, request, identity, channel, 0, null));
     return accepted(runId, conversationId, 0);
   }
 
@@ -95,7 +95,7 @@ public final class AgentRuntime implements AutoCloseable {
     appendGoal(runId, message);
     JsonObject request = input.deepCopy();
     request.addProperty("conversationId", run.conversationId().toString());
-    return execute(runId, request, identity, run.channel(), run.iteration());
+    return execute(runId, request, identity, run.channel(), run.iteration(), previousResult(run));
   }
 
   public JsonObject resumeAsync(String reference, JsonObject input, Database.Context identity) throws Exception {
@@ -107,7 +107,8 @@ public final class AgentRuntime implements AutoCloseable {
     markRunning(runId);
     JsonObject request = input.deepCopy();
     request.addProperty("conversationId", run.conversationId().toString());
-    submit(runId, () -> execute(runId, request, identity, run.channel(), run.iteration()));
+    JsonObject previousResult = previousResult(run);
+    submit(runId, () -> execute(runId, request, identity, run.channel(), run.iteration(), previousResult));
     return accepted(runId, run.conversationId(), run.iteration());
   }
 
@@ -176,7 +177,7 @@ public final class AgentRuntime implements AutoCloseable {
   }
 
   private JsonObject execute(UUID runId, JsonObject input, Database.Context identity, String channel,
-                             int currentIteration) throws Exception {
+                             int currentIteration, JsonObject previousResult) throws Exception {
     if (currentIteration >= MAX_ITERATIONS) {
       failRun(runId, "达到最大循环次数 " + MAX_ITERATIONS);
       return get(runId.toString(), identity);
@@ -185,7 +186,10 @@ public final class AgentRuntime implements AutoCloseable {
     updateRunning(runId, iteration);
     String message = required(input, "message");
     workflow("收到消息", "用户消息", "待判断", message);
-    AgentRouter.Decision decision = router.route(message, documents.hasAttachments(input), tools, subagents);
+    AgentRouter.Decision decision = continuationDecision(previousResult);
+    if (decision == null) {
+      decision = router.route(message, documents.hasAttachments(input), tools, subagents);
+    }
     String route = routeName(decision.executorName());
     workflow("路由完成", "路由决策", route, "进入" + route + " Agent");
     String toolCallId = runId + ":" + iteration;
@@ -199,9 +203,10 @@ public final class AgentRuntime implements AutoCloseable {
         com.changlu.planner.agent.core.contract.Subagent subagent = subagents.require(decision.executorName());
         UUID conversationId = UUID.fromString(input.get("conversationId").getAsString());
         String traceId = runId.toString();
+        JsonObject taskState = previousTaskState(previousResult, decision.executorName());
         var context = new com.changlu.planner.agent.core.contract.AgentContext(runId, conversationId, traceId,
             identity, channel, Set.of("travel:read", "planning:write"),
-            Instant.now().plus(subagent.definition().timeout()), input.deepCopy());
+            Instant.now().plus(subagent.definition().timeout()), taskState);
         var request = new com.changlu.planner.agent.core.contract.SubagentRequest(message,
             object(input, "arguments"), documentIds(input));
         JsonObject schemaInput = new JsonObject();
@@ -249,6 +254,32 @@ public final class AgentRuntime implements AutoCloseable {
   private String routeName(String executorName) {
     if ("planning.assistant".equals(executorName)) return "计划管理";
     return subagents.contains(executorName) ? subagents.require(executorName).definition().description() : executorName;
+  }
+
+  private AgentRouter.Decision continuationDecision(JsonObject previousResult) {
+    if (previousResult == null
+        || !"subagent".equals(string(previousResult, "executorType", ""))) return null;
+    String name = string(previousResult, "executorName", "");
+    if (name.isBlank() || !subagents.contains(name)) return null;
+    return new AgentRouter.Decision("subagent", name, "continue_pending_subagent");
+  }
+
+  private JsonObject previousTaskState(JsonObject previousResult, String executorName) {
+    if (previousResult == null || !"travel".equals(executorName)) return new JsonObject();
+    JsonObject data = previousResult.has("data") && previousResult.get("data").isJsonObject()
+        ? previousResult.getAsJsonObject("data") : previousResult;
+    return data.has("request") && data.get("request").isJsonObject()
+        ? data.getAsJsonObject("request").deepCopy() : new JsonObject();
+  }
+
+  private JsonObject previousResult(RunRow run) {
+    if (run.result() == null || run.result().isBlank()) return null;
+    try {
+      return JsonParser.parseString(run.result()).getAsJsonObject();
+    } catch (RuntimeException error) {
+      LOG.warn("[Agent state restore failed] run={} reason={}", run.conversationId(), error.getMessage());
+      return null;
+    }
   }
 
   private String statusName(String status) {

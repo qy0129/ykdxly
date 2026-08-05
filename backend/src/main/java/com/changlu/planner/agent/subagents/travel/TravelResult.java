@@ -34,6 +34,11 @@ public record TravelResult(
     return value;
   }
 
+  public TravelResult withRequestAndQuestions(TravelRequest mergedRequest, JsonArray mergedQuestions) {
+    return new TravelResult(message, mergedRequest, days, preparationTasks, budgetEstimate, sources, risks,
+        mergedQuestions, planningInstruction);
+  }
+
   private static String text(JsonObject value, String name, String fallback) {
     return value.has(name) && !value.get(name).isJsonNull() ? value.get(name).getAsString() : fallback;
   }

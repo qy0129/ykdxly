@@ -20,6 +20,18 @@ public record TravelRequest(
         text(value, "pace"), array(value, "interests"), array(value, "constraints"));
   }
 
+  public static TravelRequest merge(TravelRequest previous, TravelRequest current) {
+    if (previous == null) return current;
+    if (current == null) return previous;
+    return new TravelRequest(prefer(current.destination, previous.destination),
+        prefer(current.origin, previous.origin), prefer(current.startDate, previous.startDate),
+        prefer(current.endDate, previous.endDate), current.travelers == null ? previous.travelers : current.travelers,
+        current.budget.isEmpty() ? previous.budget.deepCopy() : current.budget.deepCopy(),
+        prefer(current.pace, previous.pace), current.interests.isEmpty()
+            ? previous.interests.deepCopy() : current.interests.deepCopy(),
+        current.constraints.isEmpty() ? previous.constraints.deepCopy() : current.constraints.deepCopy());
+  }
+
   public JsonObject toJson() {
     JsonObject value = new JsonObject();
     value.addProperty("destination", destination);
@@ -45,5 +57,8 @@ public record TravelRequest(
   }
   private static JsonArray array(JsonObject value, String name) {
     return value.has(name) && value.get(name).isJsonArray() ? value.getAsJsonArray(name).deepCopy() : new JsonArray();
+  }
+  private static String prefer(String current, String previous) {
+    return current == null || current.isBlank() ? previous : current;
   }
 }

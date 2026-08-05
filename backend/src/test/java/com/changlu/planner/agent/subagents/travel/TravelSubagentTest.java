@@ -17,7 +17,11 @@ import com.changlu.planner.agent.core.tool.ToolRegistry;
 import com.changlu.planner.agent.core.tool.ToolRiskLevel;
 import com.changlu.planner.agent.core.tool.ToolSideEffect;
 import com.changlu.planner.agent.subagents.travel.tools.DestinationResearchTool;
+import com.changlu.planner.agent.subagents.travel.tools.OpeningHoursTool;
+import com.changlu.planner.agent.subagents.travel.tools.RouteEstimateTool;
 import com.changlu.planner.agent.subagents.travel.tools.TravelDraftTool;
+import com.changlu.planner.agent.subagents.travel.tools.TravelPlanValidationTool;
+import com.changlu.planner.agent.subagents.travel.tools.TravelWeatherTool;
 import com.changlu.planner.shared.database.Database;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
@@ -28,6 +32,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 final class TravelSubagentTest {
@@ -42,6 +47,10 @@ final class TravelSubagentTest {
       assertEquals(0, drafts.get());
       assertFalse(result.requiresConfirmation());
       assertEquals(1, result.data().getAsJsonArray("sources").size());
+      assertTrue(result.data().has("weather"));
+      assertTrue(result.data().has("routes"));
+      assertTrue(result.data().has("openingHours"));
+      assertTrue(result.data().has("validation"));
     }
   }
 
@@ -83,6 +92,36 @@ final class TravelSubagentTest {
     }
   }
 
+  @Test void reusesPreviousTravelStateWithoutRepeatingQuestions() throws Exception {
+    AtomicReference<JsonObject> receivedArguments = new AtomicReference<>();
+    JsonObject generated = toPlan("[\"请再告诉我目的地和日期\"]");
+    JsonObject generatedRequest = generated.getAsJsonObject("request");
+    generatedRequest.addProperty("destination", "");
+    generatedRequest.addProperty("origin", "");
+    generatedRequest.addProperty("startDate", "");
+    generatedRequest.addProperty("endDate", "");
+    JsonObject previous = JsonParser.parseString("""
+        {"destination":"北京","origin":"杭州","startDate":"2026-09-01","endDate":"2026-09-03",
+        "travelers":2,"budget":{"amount":5000,"currency":"CNY"},"pace":"relaxed",
+        "interests":["美食"],"constraints":[]}
+        """).getAsJsonObject();
+
+    try (ToolRegistry tools = tools(new AtomicInteger())) {
+      TravelSubagent subagent = new TravelSubagent((request, sources) -> {
+        receivedArguments.set(request.arguments());
+        return generated.deepCopy();
+      }, tools, new TravelPolicy(), new JsonObject(), new JsonObject());
+      AgentResult result = subagent.execute(new SubagentRequest("两个人，预算五千", new JsonObject(), List.of()),
+          context(Set.of("travel:read"), previous));
+
+      assertEquals(AgentStatus.COMPLETED, result.status());
+      assertTrue(result.data().getAsJsonArray("questions").isEmpty());
+      assertEquals("北京", result.data().getAsJsonObject("request").get("destination").getAsString());
+      assertEquals("杭州", receivedArguments.get().get("origin").getAsString());
+      assertEquals("2026-09-01", receivedArguments.get().get("startDate").getAsString());
+    }
+  }
+
   @Test void doesNotHidePermissionFailuresAsResearchDegradation() {
     try (ToolRegistry tools = tools(new AtomicInteger())) {
       assertThrows(SecurityException.class, () -> subagent(toPlan("[]"), tools).execute(
@@ -104,6 +143,27 @@ final class TravelSubagentTest {
           sources.add(source);
           JsonObject data = new JsonObject(); data.add("sources", sources);
           return AgentResult.completed("资料完成", data, "trace");
+        }));
+    tools.register(handler(TravelWeatherTool.NAME, Set.of("travel:read"), ToolRiskLevel.READ_ONLY,
+        ToolSideEffect.NONE, false, call -> {
+          JsonObject data = new JsonObject(); data.add("weather", new JsonObject());
+          return AgentResult.completed("weather", data, "trace");
+        }));
+    tools.register(handler(RouteEstimateTool.NAME, Set.of("travel:read"), ToolRiskLevel.READ_ONLY,
+        ToolSideEffect.NONE, false, call -> {
+          JsonObject data = new JsonObject(); data.add("routes", new JsonArray());
+          return AgentResult.completed("routes", data, "trace");
+        }));
+    tools.register(handler(OpeningHoursTool.NAME, Set.of("travel:read"), ToolRiskLevel.READ_ONLY,
+        ToolSideEffect.NONE, false, call -> {
+          JsonObject data = new JsonObject(); data.add("openingHours", new JsonArray());
+          return AgentResult.completed("opening", data, "trace");
+        }));
+    tools.register(handler(TravelPlanValidationTool.NAME, Set.of("travel:read"), ToolRiskLevel.READ_ONLY,
+        ToolSideEffect.NONE, false, call -> {
+          JsonObject validation = new JsonObject(); validation.add("issues", new JsonArray());
+          JsonObject data = new JsonObject(); data.add("validation", validation);
+          return AgentResult.completed("validation", data, "trace");
         }));
     tools.register(handler(TravelDraftTool.NAME, Set.of("planning:write"), ToolRiskLevel.LOW_RISK_WRITE,
         ToolSideEffect.INTERNAL_WRITE, true, call -> {
@@ -141,9 +201,13 @@ final class TravelSubagentTest {
   }
 
   private AgentContext context(Set<String> permissions) {
+    return context(permissions, new JsonObject());
+  }
+
+  private AgentContext context(Set<String> permissions, JsonObject taskState) {
     UUID runId = UUID.randomUUID();
     return new AgentContext(runId, UUID.randomUUID(), "trace", new Database.Context(UUID.randomUUID(),
-        UUID.randomUUID()), "web", permissions, Instant.now().plusSeconds(5), new JsonObject());
+        UUID.randomUUID()), "web", permissions, Instant.now().plusSeconds(5), taskState);
   }
 
   @FunctionalInterface private interface ToolWork { AgentResult execute(ToolCall call) throws Exception; }

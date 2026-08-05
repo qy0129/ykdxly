@@ -13,6 +13,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Set;
 
 public final class DestinationResearchTool implements ToolHandler {
@@ -41,6 +42,8 @@ public final class DestinationResearchTool implements ToolHandler {
       JsonObject row = new JsonObject();
       row.addProperty("title", result.title()); row.addProperty("summary", result.summary());
       row.addProperty("source", result.source()); row.addProperty("url", result.url());
+      row.addProperty("type", "guide"); row.addProperty("queriedAt", Instant.now().toString());
+      row.addProperty("estimated", false); row.addProperty("verificationRequired", true);
       sources.add(row);
     }
     JsonObject data = new JsonObject(); data.add("sources", sources);

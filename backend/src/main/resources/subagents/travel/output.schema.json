@@ -18,6 +18,10 @@
         "preparationTasks": { "type": "array" },
         "budgetEstimate": { "type": "object" },
         "sources": { "type": "array" },
+        "weather": { "type": "object" },
+        "routes": { "type": "array" },
+        "openingHours": { "type": "array" },
+        "validation": { "type": "object" },
         "risks": { "type": "array" },
         "questions": { "type": "array" },
         "planningInstruction": { "type": "string" }
