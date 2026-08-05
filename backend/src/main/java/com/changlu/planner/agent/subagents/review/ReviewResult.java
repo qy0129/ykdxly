@@ -2,9 +2,14 @@ package com.changlu.planner.agent.subagents.review;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
+import com.google.gson.stream.JsonReader;
+import java.io.StringReader;
 import java.time.LocalDate;
+import java.util.ArrayDeque;
+import java.util.Deque;
 
-/** 复盘的结构化结果，同时负责 JSON 边界转换和本地降级。 */
+/** 复盘的结构化结果，同时负责 AI 输出的 JSON 边界转换。 */
 public record ReviewResult(
     String date,
     JsonObject facts,
@@ -16,15 +21,128 @@ public record ReviewResult(
     boolean aiGenerated
 ) {
   public static ReviewResult fromGenerated(JsonObject facts, JsonObject generated, String generatedAt) {
+    String summary = text(generated, "summary", "").trim();
+    if (summary.isBlank()) throw new IllegalStateException("AI 返回的复盘总结为空");
+    // 部分模型会把真正的复盘对象再次序列化到 summary 字符串中。
+    // 在统一出口拆开，避免嵌套 JSON 被当成用户可读总结保存。
+    JsonObject nested = parseEmbeddedJson(summary);
+    JsonObject content = nested != null && nested.has("summary") ? nested : generated;
+    summary = text(content, "summary", summary).trim();
+    if (summary.isBlank()) throw new IllegalStateException("AI summary is empty");
     return new ReviewResult(
         text(facts, "date", LocalDate.now().toString()),
         facts,
-        text(generated, "summary", "今天还没有足够的执行记录可供复盘。"),
-        array(generated, "highlights"),
-        array(generated, "risks"),
-        array(generated, "nextActions"),
+        summary,
+        array(content, "highlights"),
+        array(content, "risks"),
+        array(content, "nextActions"),
         generatedAt,
         true);
+  }
+
+  /** 模型理解了复盘但没有遵守 JSON 格式时，保留真实 AI 原文，不生成固定替代文案。 */
+  public static ReviewResult fromPlainText(JsonObject facts, String content, String generatedAt) {
+    String raw = content == null ? "" : content.trim();
+    JsonObject structured = parseEmbeddedJson(raw);
+    if (structured != null && structured.has("summary")) {
+      return fromGenerated(facts, structured, generatedAt);
+    }
+    String summary = raw
+        .replaceAll("(?s)<think>.*?</think>", "")
+        .replace("```json", "")
+        .replace("```JSON", "")
+        .replace("```", "")
+        .trim();
+    if (summary.isBlank()) throw new IllegalStateException("AI 返回了空的复盘内容");
+    return new ReviewResult(
+        text(facts, "date", LocalDate.now().toString()), facts, summary,
+        new JsonArray(), new JsonArray(), new JsonArray(), generatedAt, true);
+  }
+
+  private static JsonObject parseEmbeddedJson(String value) {
+    String candidate = value.replace("```json", "").replace("```JSON", "").replace("```", "").trim();
+    // 从混有解释文字的返回中提取最后一个完整 JSON 对象。
+    int start = -1;
+    int depth = 0;
+    boolean quoted = false;
+    boolean escaped = false;
+    for (int i = 0; i < candidate.length(); i++) {
+      char current = candidate.charAt(i);
+      if (start < 0) {
+        if (current == '{') { start = i; depth = 1; }
+        continue;
+      }
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (current == '\\') escaped = true;
+        else if (current == '"') quoted = false;
+        continue;
+      }
+      if (current == '"') quoted = true;
+      else if (current == '{') depth++;
+      else if (current == '}' && --depth == 0) {
+        candidate = candidate.substring(start, i + 1);
+        break;
+      }
+    }
+    try { return JsonParser.parseString(candidate).getAsJsonObject(); }
+    catch (RuntimeException ignored) {
+      try {
+        String repaired = repairDelimiters(candidate.replace("\\\"", "\""))
+            .replaceAll(",\\s*([}\\]])", "$1");
+        return JsonParser.parseString(repaired).getAsJsonObject();
+      } catch (RuntimeException ignoredAgain) {
+        try {
+          // AI 偶尔会带尾逗号、控制字符或全角标点，宽松读取后仍按字段校验。
+          String normalized = candidate
+              .replace('\u201c', '"').replace('\u201d', '"')
+              .replace('\uFF1A', ':');
+          normalized = repairDelimiters(normalized);
+          JsonReader reader = new JsonReader(new StringReader(normalized));
+          reader.setLenient(true);
+          return JsonParser.parseReader(reader).getAsJsonObject();
+        } catch (RuntimeException ignoredLenient) { return null; }
+      }
+    }
+  }
+
+  /**
+   * 模型偶尔会漏掉数组或对象的结束括号。按字符串状态补齐括号，避免把整段
+   * JSON 当作用户可见的摘要；这不会改变已经完整的 JSON。
+   */
+  private static String repairDelimiters(String value) {
+    StringBuilder output = new StringBuilder(value.length() + 8);
+    Deque<Character> expected = new ArrayDeque<>();
+    boolean quoted = false;
+    boolean escaped = false;
+    for (int i = 0; i < value.length(); i++) {
+      char current = value.charAt(i);
+      if (quoted) {
+        output.append(current);
+        if (escaped) escaped = false;
+        else if (current == '\\') escaped = true;
+        else if (current == '"') quoted = false;
+        continue;
+      }
+      if (current == '"') {
+        quoted = true;
+        output.append(current);
+      } else if (current == '{') {
+        expected.push('}');
+        output.append(current);
+      } else if (current == '[') {
+        expected.push(']');
+        output.append(current);
+      } else if (current == '}' || current == ']') {
+        while (!expected.isEmpty() && expected.peek() != current) output.append(expected.pop());
+        if (!expected.isEmpty()) expected.pop();
+        output.append(current);
+      } else {
+        output.append(current);
+      }
+    }
+    while (!expected.isEmpty()) output.append(expected.pop());
+    return output.toString();
   }
 
   public static ReviewResult fromCache(JsonObject facts, String summary, JsonObject suggestions,
@@ -37,29 +155,7 @@ public record ReviewResult(
         array(suggestions, "risks"),
         array(suggestions, "nextActions"),
         generatedAt,
-        !suggestions.has("aiGenerated") || suggestions.get("aiGenerated").getAsBoolean());
-  }
-
-  public static ReviewResult fallback(JsonObject facts, String generatedAt) {
-    int completed = facts.get("completedTasks").getAsInt() + facts.get("completed").getAsInt()
-        + facts.get("scheduleCompleted").getAsInt();
-    int delayed = facts.get("delayed").getAsInt();
-    int blocked = facts.get("blocked").getAsInt();
-    String summary = completed == 0
-        ? "今天还没有已确认的完成记录。先选一项最重要且能在短时间内完成的任务，建立今天的第一个进展。"
-        : "今天共留下 " + completed + " 项完成记录。"
-            + (delayed + blocked == 0 ? "执行过程暂未出现明显的延期或阻塞。"
-                : "同时有 " + delayed + " 项延期、" + blocked + " 项阻塞，需要优先处理原因。");
-    JsonArray highlights = new JsonArray();
-    if (completed > 0) highlights.add("完成了 " + completed + " 项已确认事项");
-    JsonArray risks = new JsonArray();
-    if (delayed > 0) risks.add("有 " + delayed + " 项延期");
-    if (blocked > 0) risks.add("有 " + blocked + " 项阻塞");
-    JsonArray nextActions = new JsonArray();
-    nextActions.add(completed == 0 ? "选择一项 30 分钟内可完成的任务并开始" : "从未完成事项中确认明天最重要的一项");
-    if (delayed + blocked > 0) nextActions.add("逐项补充延期或阻塞原因");
-    return new ReviewResult(text(facts, "date", LocalDate.now().toString()), facts, summary,
-        highlights, risks, nextActions, generatedAt, false);
+        suggestions.has("aiGenerated") && suggestions.get("aiGenerated").getAsBoolean());
   }
 
   public JsonObject suggestions() {

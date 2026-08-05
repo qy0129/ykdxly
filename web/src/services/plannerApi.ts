@@ -101,6 +101,27 @@ export interface AiReviewMessage {
   content: string
 }
 
+export interface NoteChatTurn {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface NoteGenerateContext {
+  scheduleTitle: string
+  studyNote: string
+  draftNote: string
+  keyPoints: string[]
+  sections: Array<{ title: string; content: string }>
+  message: string
+  history: NoteChatTurn[]
+}
+
+export interface NoteGenerateResponse {
+  markdown: string
+  reply: string
+  title: string
+}
+
 export interface AiPlanChange {
   entity: 'plan' | 'schedule'
   action: 'update'
@@ -226,6 +247,7 @@ export interface ReviewFacts {
   blocked: number
   estimationError7d: number
   logs: Array<{ entityType: string; action: string; note: string; actualMinutes?: number; occurredAt: string }>
+  recentExecution: Array<{ entityType: string; action: string; reason: string; actualMinutes?: number; occurredAt: string }>
 }
 
 export interface ReviewReport {
@@ -237,6 +259,33 @@ export interface ReviewReport {
   nextActions: string[]
   generatedAt: string
   aiGenerated: boolean
+}
+
+/**
+ * 兼容旧版本缓存：旧后端曾把 AI 返回的完整 JSON 写进 summary 字段。
+ * 页面只消费统一的结构化字段，避免把 JSON 原文直接展示给用户。
+ */
+function normalizeReviewReport(report: ReviewReport): ReviewReport {
+  let value: unknown = report.summary?.trim()
+  for (let attempt = 0; attempt < 2 && typeof value === 'string'; attempt += 1) {
+    const source = value.trim()
+    if (!source.startsWith('{') || !source.endsWith('}')) break
+    try { value = JSON.parse(source) } catch { break }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return report
+
+  const generated = value as Record<string, unknown>
+  const summary = typeof generated.summary === 'string' ? generated.summary.trim() : ''
+  if (!summary) return report
+  const strings = (candidate: unknown, fallback: string[]) =>
+    Array.isArray(candidate) ? candidate.filter((item): item is string => typeof item === 'string') : fallback
+  return {
+    ...report,
+    summary,
+    highlights: strings(generated.highlights, report.highlights),
+    risks: strings(generated.risks, report.risks),
+    nextActions: strings(generated.nextActions, report.nextActions),
+  }
 }
 
 export interface UserProfile {
@@ -436,6 +485,21 @@ export const plannerApi = {
   deleteNote: (id: string) => request<void>(`/notes/${id}`, { method: 'DELETE' }),
   createNoteRelation: (fromNoteId: string, toNoteId: string) => request<void>(`/notes/${fromNoteId}/relations`, { method: 'POST', body: JSON.stringify({ toNoteId }) }),
   deleteNoteRelation: (fromNoteId: string, toNoteId: string) => request<void>(`/notes/${fromNoteId}/relations`, { method: 'DELETE', body: JSON.stringify({ toNoteId }) }),
+  generateNoteContent: (context: NoteGenerateContext) => request<NoteGenerateResponse>('/notes/generate', { method: 'POST', body: JSON.stringify(context) }),
+  uploadNoteImage: async (file: File) => {
+    const response = await fetch(API_BASE + '/notes/images', {
+      method: 'POST',
+      headers: { 'Content-Type': file.type || 'image/png' },
+      body: file,
+    })
+    if (!response.ok) {
+      let payload: { message?: string; error?: string } | undefined
+      try { payload = await response.json() as { message?: string; error?: string } }
+      catch { payload = undefined }
+      throw new Error(payload?.message || payload?.error || `图片上传失败（${response.status}）`)
+    }
+    return response.json() as Promise<{ url: string; filename: string; size: number }>
+  },
   downloadExcel: async () => {
     const response = await fetch(API_BASE + '/export/xlsx')
     if (!response.ok) throw new Error(`API ${response.status}: /export/xlsx`)
@@ -501,8 +565,8 @@ export const plannerApi = {
   loadProfile: () => request<UserProfile>('/profile'),
   saveProfile: (value: UserProfile) => request<UserProfile>('/profile', { method: 'PUT', body: JSON.stringify(value) }),
   reviewFacts: () => request<ReviewFacts>('/review/facts'),
-  loadTodayReview: () => request<ReviewReport>('/review/today'),
-  regenerateTodayReview: () => request<ReviewReport>('/review/today/regenerate', { method: 'POST' }),
+   loadTodayReview: async () => normalizeReviewReport(await request<ReviewReport>('/review/today')),
+   regenerateTodayReview: async () => normalizeReviewReport(await request<ReviewReport>('/review/today/regenerate', { method: 'POST' })),
   chatReview: (message: string, history: AiReviewMessage[], conversationId?: string) => request<AiReviewResponse>('/ai/review/chat', {
     method: 'POST',
     body: JSON.stringify({ message, history, conversationId }),

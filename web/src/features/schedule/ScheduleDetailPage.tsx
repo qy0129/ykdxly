@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react'
-import { BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, NotebookPen, PenLine, Play, Plus, RefreshCw, Save, Sparkles, X } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { BookOpen, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ExternalLink, Image, LoaderCircle, NotebookPen, PenLine, Play, Plus, RefreshCw, Save, Send, Sparkles, X } from 'lucide-react'
 import type { CalendarItem, Note, Plan, SourceMaterial } from '../../types/planner'
 import { plannerApi } from '../../services/plannerApi'
+import { MarkdownPreview } from '../notes/MarkdownPreview'
 
 function fallbackMaterials(item: CalendarItem, plan?: Plan): SourceMaterial[] {
   const query = [plan?.title, item.title].filter(Boolean).join(' ').trim() || item.title
@@ -36,6 +37,11 @@ function fallbackStudySections(item: CalendarItem): StudySection[] {
   ]
 }
 
+type NoteChatMessage = { role: 'user' | 'assistant'; content: string; markdown?: string }
+
+const NOTE_PREFILL = '请根据本次学习资料写一份结构化笔记'
+const NOTE_QUICK_SUGGESTIONS = ['写完整笔记', '精简一点', '加一个例子', '口语化语气']
+
 export function ScheduleDetailPage({
   item,
   plansData,
@@ -69,9 +75,16 @@ export function ScheduleDetailPage({
   const [materialsLoading, setMaterialsLoading] = useState(true)
   const [materialsError, setMaterialsError] = useState('')
   const [personalNote, setPersonalNote] = useState('')
-  const [saved, setSaved] = useState(true)
-  const [savedSources, setSavedSources] = useState<string[]>([])
   const [personalNoteId, setPersonalNoteId] = useState<string | null>(null)
+  const [noteMode, setNoteMode] = useState<'edit' | 'preview'>('edit')
+  const [imageUploading, setImageUploading] = useState(false)
+  const [savedSources, setSavedSources] = useState<string[]>([])
+  const [chatOpen, setChatOpen] = useState(false)
+  const [chatMessages, setChatMessages] = useState<NoteChatMessage[]>([])
+  const [chatInput, setChatInput] = useState('')
+  const [chatBusy, setChatBusy] = useState(false)
+  const [noteVersions, setNoteVersions] = useState<string[]>([])
+  const chatListRef = useRef<HTMLDivElement>(null)
 
   const loadMaterials = useCallback(async (refresh = false) => {
     setMaterialsLoading(true)
@@ -129,6 +142,77 @@ export function ScheduleDetailPage({
     setSavedSources((current) => [...current, material.id])
   }
 
+  useEffect(() => {
+    chatListRef.current?.scrollTo({ top: chatListRef.current.scrollHeight, behavior: 'smooth' })
+  }, [chatMessages, chatBusy])
+
+  const sendChat = async (text: string) => {
+    const message = text.trim()
+    if (!message || chatBusy) return
+    const snapshot = personalNote
+    setChatBusy(true)
+    setChatMessages((current) => [...current, { role: 'user', content: message }])
+    setChatInput('')
+    try {
+      // 历史只带指令与 AI 回复摘要（slice 前的旧数组天然排除本条），完整笔记始终由 draftNote 携带。
+      const history = chatMessages.slice(-8).map(({ role, content }) => ({ role, content }))
+      const result = await plannerApi.generateNoteContent({
+        scheduleTitle: item.title,
+        studyNote,
+        draftNote: personalNote,
+        keyPoints,
+        sections: studySections,
+        message,
+        history,
+      })
+      setNoteVersions((stack) => [...stack, snapshot])
+      setPersonalNote(result.markdown) // 整篇替换
+      setChatMessages((current) => [...current, { role: 'assistant', content: result.reply, markdown: result.markdown }])
+      setNoteMode('preview')
+    } catch (cause) {
+      setChatMessages((current) => [...current, {
+        role: 'assistant',
+        content: '生成失败：' + (cause instanceof Error ? cause.message : '未知错误'),
+        markdown: undefined,
+      }])
+    } finally {
+      setChatBusy(false)
+    }
+  }
+
+  const toggleChatPanel = () => {
+    if (chatOpen) { setChatOpen(false); return }
+    setChatOpen(true)
+    if (chatMessages.length === 0) void sendChat(NOTE_PREFILL)
+  }
+
+  const undoLastAdjust = () => {
+    if (!noteVersions.length || chatBusy) return
+    setPersonalNote(noteVersions[noteVersions.length - 1])
+    setNoteVersions((stack) => stack.slice(0, -1))
+  }
+
+  const handleImageUpload = () => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = 'image/*'
+    input.onchange = async () => {
+      const file = input.files?.[0]
+      if (!file) return
+      setImageUploading(true)
+      try {
+        const result = await plannerApi.uploadNoteImage(file)
+        const imageMarkdown = `\n![${file.name}](${result.url})\n`
+        setPersonalNote((current) => current + imageMarkdown)
+      } catch (cause) {
+        alert('图片上传失败：' + (cause instanceof Error ? cause.message : '未知错误'))
+      } finally {
+        setImageUploading(false)
+      }
+    }
+    input.click()
+  }
+
   const savePersonalNote = () => {
     const next: Note = {
       id: personalNoteId ?? `study-note-${Date.now()}`,
@@ -143,7 +227,6 @@ export function ScheduleDetailPage({
     }
     onNotesChange(personalNoteId ? noteItems.map((note) => note.id === personalNoteId ? next : note) : [next, ...noteItems])
     setPersonalNoteId(next.id)
-    setSaved(true)
   }
 
   return (
@@ -224,10 +307,73 @@ export function ScheduleDetailPage({
         <aside className="schedule-notes">
           <div className="section-heading">
             <div><span className="eyebrow">我的记录</span><h3>本次学习笔记</h3></div>
-            <span className="save-state">{saved ? '已保存' : '未保存'}</span>
+            <button className="primary-button save-note-top" type="button" onClick={savePersonalNote} title="保存到长期笔记"><Save size={14} /> 保存</button>
           </div>
-          <textarea value={personalNote} onChange={(event) => { setPersonalNote(event.target.value); setSaved(false) }} placeholder="写下本次学习的收获、疑问或下一步…" />
-          <button className="primary-button note-save-button" type="button" onClick={savePersonalNote} title="保存本次学习记录"><Save size={16} /> 保存到长期笔记</button>
+          <div className="note-mode-tabs">
+            <button type="button" className={noteMode === 'edit' ? 'active' : ''} onClick={() => setNoteMode('edit')}>✏️ 编辑</button>
+            <button type="button" className={noteMode === 'preview' ? 'active' : ''} onClick={() => setNoteMode('preview')}>👁 预览</button>
+          </div>
+          {noteMode === 'edit' ? (
+            <textarea value={personalNote} onChange={(event) => setPersonalNote(event.target.value)} placeholder="写下本次学习的收获、疑问或下一步…支持 Markdown 语法" />
+          ) : (
+            <div className="note-preview-area" onClick={() => setNoteMode('edit')} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && setNoteMode('edit')}>
+              {personalNote.trim() ? <MarkdownPreview value={personalNote} /> : <p className="note-preview-empty">点击此处开始编辑笔记</p>}
+            </div>
+          )}
+          <div className="note-editor-toolbar">
+            <button className="secondary-button" type="button" onClick={handleImageUpload} disabled={imageUploading} title="上传图片到笔记">
+              <Image size={14} /> {imageUploading ? '上传中…' : '图片'}
+            </button>
+            <button className="secondary-button ai-write-button" type="button" onClick={toggleChatPanel} disabled={chatBusy} title="和 AI 对话来写笔记、反复调整笔记">
+              <Sparkles size={14} /> {chatBusy ? 'AI 处理中…' : chatOpen ? '收起 AI 对话' : 'AI 写笔记'}
+            </button>
+          </div>
+
+          {chatOpen && (
+            <div className="note-chat-panel">
+              <div className="note-chat-header">
+                <span><Sparkles size={13} /> AI 笔记助手</span>
+                <button className="icon-button" type="button" onClick={() => setChatOpen(false)} title="收起对话" aria-label="收起对话"><ChevronDown size={15} /></button>
+              </div>
+
+              {noteVersions.length > 0 && (
+                <div className="note-chat-undo">
+                  <button className="secondary-button" type="button" onClick={undoLastAdjust} disabled={chatBusy} title="恢复上一次 AI 调整前的笔记内容"><RefreshCw size={12} /> 撤销本次调整</button>
+                </div>
+              )}
+
+              <div className="note-chat-messages" ref={chatListRef}>
+                {chatMessages.length === 0 && <p className="note-chat-empty">点击下方快捷指令开始，或直接输入你的要求。</p>}
+                {chatMessages.map((message, index) => (
+                  <article className={`ai-chat-message ${message.role}`} key={`${message.role}-${index}`}>
+                    <span>{message.role === 'assistant' ? 'AI' : '你'}</span>
+                    <div className="note-chat-body">
+                      <p>{message.content}</p>
+                      {message.role === 'assistant' && message.markdown && (
+                        <div className="note-chat-reply-note"><MarkdownPreview value={message.markdown} /></div>
+                      )}
+                    </div>
+                  </article>
+                ))}
+                {chatBusy && (
+                  <article className="ai-chat-message assistant loading"><span>AI</span><p><LoaderCircle className="spin" size={13} /> 正在处理</p></article>
+                )}
+              </div>
+
+              <div className="note-chat-suggestions">
+                {NOTE_QUICK_SUGGESTIONS.map((suggestion) => (
+                  <button type="button" key={suggestion} disabled={chatBusy} onClick={() => void sendChat(suggestion)}>{suggestion}</button>
+                ))}
+              </div>
+
+              <div className="ai-chat-composer note-chat-composer">
+                <textarea value={chatInput} onChange={(event) => setChatInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendChat(chatInput) } }} placeholder="输入你的要求，Enter 发送" rows={1} />
+                <div className="ai-composer-actions">
+                  <button className="icon-button ai-send-button" type="button" disabled={chatBusy || !chatInput.trim()} onClick={() => void sendChat(chatInput)} title="发送" aria-label="发送"><Send size={15} /></button>
+                </div>
+              </div>
+            </div>
+          )}
 
           <div className="schedule-related">
             <span className="eyebrow">相关长期笔记</span>

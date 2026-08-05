@@ -12,7 +12,7 @@ function escapeHtml(value: string) {
 }
 
 function safeUrl(value: string) {
-  return /^(https?:|mailto:|#)/i.test(value.trim())
+  return /^(https?:|mailto:|#|\/uploads\/)/i.test(value.trim())
 }
 
 function renderMath(source: string, displayMode: boolean) {
@@ -42,8 +42,11 @@ function renderInline(source: string) {
   value = value.replace(/\$(?!\$)([^$\n]+?)\$(?!\$)/g, (_, formula: string) => protect(renderMath(formula, false)))
   value = escapeHtml(value)
   value = value.replace(/!?\[([^\]]+)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (match, label: string, url: string) => {
-    if (match.startsWith('!') || !safeUrl(url)) return match
-    return protect(`<a href="${url}">${label}</a>`)
+    if (match.startsWith('!')) {
+      return protect(`<img src="${url}" alt="${label}"${safeUrl(url) ? '' : ' class="broken-image"'} loading="lazy" />`)
+    }
+    if (!safeUrl(url)) return match
+    return protect(`<a href="${url}" target="_blank" rel="noopener">${label}</a>`)
   })
   value = value.replace(/(\*\*|__)(.+?)\1/g, '<strong>$2</strong>')
   value = value.replace(/~~(.+?)~~/g, '<del>$1</del>')

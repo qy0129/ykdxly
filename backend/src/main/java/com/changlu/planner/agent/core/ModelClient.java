@@ -3,6 +3,7 @@ package com.changlu.planner.agent.core;
 import com.changlu.planner.shared.config.EnvironmentConfig;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.net.URI;
@@ -34,23 +35,43 @@ public final class ModelClient {
 
   public JsonObject completeJson(String purpose, JsonArray messages, double temperature, int maxTokens,
                                  int timeoutSeconds, int maxAttempts) throws Exception {
+    return withRetries(purpose, maxAttempts, timeoutSeconds,
+        attempt -> requestJson(purpose, messages, temperature, maxTokens, timeoutSeconds, attempt));
+  }
+
+  /** 返回模型原始文本（不解析 JSON），适合生成 Markdown 等非结构化输出。 */
+  public String completeText(String purpose, JsonArray messages, double temperature, int maxTokens)
+      throws Exception {
+    return completeText(purpose, messages, temperature, maxTokens, 60, MAX_ATTEMPTS);
+  }
+
+  public String completeText(String purpose, JsonArray messages, double temperature, int maxTokens,
+                             int timeoutSeconds, int maxAttempts) throws Exception {
+    return withRetries(purpose, maxAttempts, timeoutSeconds,
+        attempt -> requestRaw(purpose, messages, temperature, maxTokens, timeoutSeconds, attempt).text());
+  }
+
+  /** 统一超时与有限重试：把每次尝试封装成一个可抛异常的 Attempt，失败时按 retryable 判定重试。 */
+  private <T> T withRetries(String purpose, int maxAttempts, int timeoutSeconds,
+                            Attempt<T> attempt) throws Exception {
     if (!configured()) throw new IllegalStateException("PLANNER_AI_API_KEY 未配置");
     Exception lastError = null;
-    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+    for (int count = 1; count <= maxAttempts; count++) {
       try {
-        return requestJson(purpose, messages, temperature, maxTokens, timeoutSeconds, attempt);
+        return attempt.run(count);
       } catch (Exception error) {
         lastError = error;
-        if (attempt == maxAttempts || !retryable(error)) throw error;
-        LOG.warn("[模型重试] 第{}次，原因={}", attempt, error.getMessage());
-        Thread.sleep(300L * attempt);
+        if (count == maxAttempts || !retryable(error)) throw error;
+        LOG.warn("[模型重试] 第{}次，原因={}", count, error.getMessage());
+        Thread.sleep(300L * count);
       }
     }
     throw lastError;
   }
 
-  private JsonObject requestJson(String purpose, JsonArray messages, double temperature, int maxTokens,
-                                 int timeoutSeconds, int attempt) throws Exception {
+  /** 发起一次模型请求并返回原始输出文本，供 JSON 或纯文本调用方各自解析。 */
+  private RawReply requestRaw(String purpose, JsonArray messages, double temperature, int maxTokens,
+                              int timeoutSeconds, int attempt) throws Exception {
     JsonObject body = new JsonObject();
     body.addProperty("model", model);
     body.addProperty("temperature", temperature);
@@ -70,22 +91,41 @@ public final class ModelClient {
     if (response.statusCode() / 100 != 2) {
       throw new ModelHttpException(response.statusCode(), "AI 服务返回 " + response.statusCode());
     }
-    String content = JsonParser.parseString(response.body()).getAsJsonObject().getAsJsonArray("choices").get(0)
-        .getAsJsonObject().getAsJsonObject("message").get("content").getAsString().trim()
-        .replaceFirst("^```(?:json)?\\s*", "").replaceFirst("\\s*```$", "");
+    JsonObject choice = JsonParser.parseString(response.body()).getAsJsonObject()
+        .getAsJsonArray("choices").get(0).getAsJsonObject();
+    JsonObject message = choice.getAsJsonObject("message");
+    String content = messageContent(message.get("content"));
+    String reasoning = messageContent(message.get("reasoning_content"));
+    if (reasoning.isBlank()) reasoning = messageContent(choice.get("reasoning_content"));
+    if (reasoning.isBlank()) reasoning = messageContent(choice.get("text"));
+    return new RawReply(content, reasoning);
+  }
+
+  private JsonObject requestJson(String purpose, JsonArray messages, double temperature, int maxTokens,
+                                 int timeoutSeconds, int attempt) throws Exception {
+    RawReply raw = requestRaw(purpose, messages, temperature, maxTokens, timeoutSeconds, attempt);
+    String content = raw.content();
+    String reasoning = raw.reasoning();
     JsonObject result = parseJsonObject(content);
+    // 部分推理模型会把最终 JSON 放在 reasoning_content，content 只放解释文本。
+    if (result == null && !reasoning.isBlank()) result = parseJsonObject(reasoning);
     if (result != null) return result;
-    throw new IllegalStateException("AI 未返回有效 JSON");
+    if (content.isBlank()) content = reasoning;
+    LOG.warn("[模型 JSON 解析失败] 用途={} 内容预览={}", purpose, preview(content));
+    throw new InvalidJsonException(content);
   }
 
   private JsonObject parseJsonObject(String content) {
-    try { return JsonParser.parseString(content).getAsJsonObject(); }
-    catch (Exception ignored) { }
+    if (content == null || content.isBlank()) return null;
+    JsonObject direct = tryParseObject(content.trim());
+    if (direct != null) return direct;
+
     int thoughtEnd = content.lastIndexOf("</think>");
-    String value = thoughtEnd >= 0 ? content.substring(thoughtEnd + 8).trim() : content;
-    value = value.replaceFirst("^```(?:json)?\\s*", "").replaceFirst("\\s*```$", "");
-    try { return JsonParser.parseString(value).getAsJsonObject(); }
-    catch (Exception ignored) { }
+    String value = thoughtEnd >= 0
+        ? content.substring(thoughtEnd + "</think>".length()).trim() : content.trim();
+    value = value.replace("```json", "").replace("```JSON", "").replace("```", "").trim();
+    direct = tryParseObject(value);
+    if (direct != null) return direct;
 
     JsonObject last = null;
     int start = -1;
@@ -107,12 +147,109 @@ public final class ModelClient {
       if (current == '"') quoted = true;
       else if (current == '{') depth++;
       else if (current == '}' && --depth == 0) {
-        try { last = JsonParser.parseString(value.substring(start, index + 1)).getAsJsonObject(); }
-        catch (Exception ignored) { }
+        JsonObject parsed = tryParseObject(value.substring(start, index + 1));
+        if (parsed != null) last = parsed;
         start = -1;
       }
     }
     return last;
+  }
+
+  /** 兼容模型返回字符串、文本块数组、思考标签和末尾逗号等常见格式偏差。 */
+  private JsonObject tryParseObject(String value) {
+    JsonObject parsed = parseStrictObject(value);
+    if (parsed != null) return parsed;
+    parsed = parseStrictObject(value.replaceAll(",\\s*([}\\]])", "$1"));
+    if (parsed != null) return parsed;
+    String normalized = normalizeJsonText(value);
+    parsed = parseStrictObject(normalized);
+    if (parsed != null) return parsed;
+    parsed = parseStrictObject(normalized.replaceAll(",\\s*([}\\]])", "$1"));
+    if (parsed != null) return parsed;
+    // 有些兼容接口会把 JSON 作为转义字符串直接放进 content。
+    String unescaped = normalized.replace("\\\"", "\"")
+        .replace("\\n", " ").replace("\\r", " ").replace("\\t", " ");
+    parsed = parseStrictObject(unescaped);
+    if (parsed != null) return parsed;
+    return parseStrictObject(unescaped.replaceAll(",\\s*([}\\]])", "$1"));
+  }
+
+  private JsonObject parseStrictObject(String value) {
+    try {
+      JsonElement parsed = JsonParser.parseString(value);
+      if (parsed.isJsonObject()) return parsed.getAsJsonObject();
+      if (parsed.isJsonPrimitive() && parsed.getAsJsonPrimitive().isString()) {
+        JsonElement nested = JsonParser.parseString(parsed.getAsString());
+        return nested.isJsonObject() ? nested.getAsJsonObject() : null;
+      }
+    } catch (Exception ignored) { }
+    return null;
+  }
+
+  private String normalizeJsonText(String value) {
+    StringBuilder normalized = new StringBuilder(value.length());
+    boolean quoted = false;
+    boolean escaped = false;
+    for (int index = 0; index < value.length(); index++) {
+      char current = value.charAt(index);
+      char normalizedCurrent = switch (current) {
+        case '“', '”' -> '"';
+        case '：' -> ':';
+        default -> current;
+      };
+      if (quoted && (normalizedCurrent == '\n' || normalizedCurrent == '\r' || normalizedCurrent == '\t')) {
+        // 保留换行转义，避免把 JSON 字符串里的真实换行压平成空格而破坏 Markdown。
+        normalized.append('\\').append('n');
+        continue;
+      }
+      if (escaped) escaped = false;
+      else if (normalizedCurrent == '\\') escaped = true;
+      else if (normalizedCurrent == '"') quoted = !quoted;
+      normalized.append(normalizedCurrent);
+    }
+    return normalized.toString();
+  }
+
+  private String messageContent(JsonElement content) {
+    if (content == null || content.isJsonNull()) return "";
+    if (content.isJsonPrimitive()) return content.getAsString();
+    if (!content.isJsonArray()) return content.toString();
+    StringBuilder text = new StringBuilder();
+    for (JsonElement part : content.getAsJsonArray()) {
+      if (!part.isJsonObject()) continue;
+      JsonElement value = part.getAsJsonObject().get("text");
+      if (value != null && value.isJsonPrimitive()) text.append(value.getAsString());
+    }
+    return text.toString();
+  }
+
+  private String preview(String value) {
+    String normalized = value == null ? "" : value.replaceAll("\\s+", " ").trim();
+    return normalized.length() <= 240 ? normalized : normalized.substring(0, 240) + "...";
+  }
+
+  /** 单次模型尝试；允许抛出受检异常以便统一在 withRetries 里处理。 */
+  @FunctionalInterface
+  private interface Attempt<T> {
+    T run(int attempt) throws Exception;
+  }
+
+  /** 一次模型请求的原始输出：content 为正文，reasoning 为思考文本。 */
+  private record RawReply(String content, String reasoning) {
+    /** 纯文本场景：content 优先，为空时退回 reasoning。 */
+    String text() { return content.isBlank() ? reasoning : content; }
+  }
+
+  /** 保留模型原文，供复盘在结构化输出失败时展示真实 AI 总结。 */
+  public static final class InvalidJsonException extends IllegalStateException {
+    private final String content;
+
+    public InvalidJsonException(String content) {
+      super("AI 未返回有效 JSON，请重试或检查模型输出格式");
+      this.content = content == null ? "" : content;
+    }
+
+    public String content() { return content; }
   }
 
   private boolean retryable(Exception error) {
