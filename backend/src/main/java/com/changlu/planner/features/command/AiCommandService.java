@@ -22,6 +22,8 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -81,6 +83,15 @@ public final class AiCommandService {
         }
       } catch (Exception error) {
         LOG.warn("[AI草案纠正失败] 会话={} 原因={}", conversationId, error.getMessage());
+      }
+    }
+    // Date-range clearing is deterministic so a model reply cannot claim completion without a real draft.
+    if (actions.isEmpty()) {
+      JsonArray rangeDelete = deterministicScheduleDelete(text);
+      if (!rangeDelete.isEmpty()) {
+        actions = rangeDelete;
+        modelResult.addProperty("reply", "已识别为删除指定日期范围内的日程，生成待确认草案。请确认后执行。");
+        modelResult.add("questions", new JsonArray());
       }
     }
     if (!requestsScheduling(text)) discardUnrequestedSchedules(actions);
@@ -248,8 +259,8 @@ public final class AiCommandService {
             + "(SELECT m.content FROM ai_messages m WHERE m.conversation_id=c.id ORDER BY m.created_at DESC,m.id DESC LIMIT 1) last_message,"
             + "(SELECT COUNT(*) FROM ai_messages m WHERE m.conversation_id=c.id) message_count,"
             + "EXISTS(SELECT 1 FROM ai_action_drafts d WHERE d.conversation_id=c.id AND d.status='pending' AND d.expires_at>NOW()) has_draft,"
-            + "(SELECT r.id FROM agent_runs r WHERE r.conversation_id=c.id ORDER BY r.updated_at DESC,r.id DESC LIMIT 1) run_id,"
-            + "(SELECT r.status FROM agent_runs r WHERE r.conversation_id=c.id ORDER BY r.updated_at DESC,r.id DESC LIMIT 1) run_status "
+            + "(SELECT r.id FROM agent_runs r WHERE r.workspace_id=c.workspace_id AND r.user_id=c.user_id AND r.conversation_id=c.id ORDER BY r.updated_at DESC,r.id DESC LIMIT 1) run_id,"
+            + "(SELECT r.status FROM agent_runs r WHERE r.workspace_id=c.workspace_id AND r.user_id=c.user_id AND r.conversation_id=c.id ORDER BY r.updated_at DESC,r.id DESC LIMIT 1) run_status "
             + "FROM ai_conversations c WHERE c.workspace_id=? AND c.user_id=? AND c.source_channel=? "
             + "ORDER BY c.updated_at DESC,c.id DESC LIMIT 100")) {
       p.setBytes(1, Database.uuidBytes(context.workspaceId()));
@@ -444,7 +455,10 @@ public final class AiCommandService {
         只能引用下面真实存在的 ID；查询和复盘直接根据真实数据回答，actions 为空。
         长期记忆中记录了用户稳定的偏好和沟通风格。相关时自然遵循，不要主动声称“我记得”。
         当前真实上下文：
-        """ + context;
+        """
+        + "\nAction rule: use delete_schedules for requests to clear or delete all schedules between two dates. "
+        + "Its fields must be startDate, endDate, and reason in yyyy-MM-dd format; it does not use targetId.\n"
+        + context;
   }
 
   private String loadContext(Database.Context context) throws SQLException {
@@ -457,7 +471,7 @@ public final class AiCommandService {
     value.add("stages", query("SELECT s.id,s.plan_id,s.title,s.status,s.progress,s.task_progress,s.effort_progress,s.due_date,s.version FROM plan_stages s JOIN plans p ON p.id=s.plan_id WHERE p.workspace_id=? AND s.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY s.plan_id,s.sort_order", context.workspaceId(), "stage"));
     value.add("tasks", query("SELECT t.id,t.plan_id,t.stage_id,t.title,t.status,t.priority,t.estimated_minutes,t.actual_minutes,t.due_at,t.version FROM plan_tasks t JOIN plans p ON p.id=t.plan_id WHERE p.workspace_id=? AND t.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY t.due_at LIMIT 100", context.workspaceId(), "task"));
     value.add("todos", query("SELECT id,title,status,priority,due_at,version FROM todos WHERE workspace_id=? AND deleted_at IS NULL ORDER BY due_at LIMIT 60", context.workspaceId(), "todo"));
-    value.add("schedules", query("SELECT id,title,status,start_at,duration_minutes,plan_id,stage_id,task_id,version FROM schedule_items WHERE workspace_id=? AND deleted_at IS NULL ORDER BY start_at DESC LIMIT 100", context.workspaceId(), "schedule"));
+    value.add("schedules", query("SELECT id,title,status,start_at,duration_minutes,plan_id,stage_id,task_id,version,location_name,latitude,longitude,coordinate_system,timezone_id,source_url,reservation_required FROM schedule_items WHERE workspace_id=? AND deleted_at IS NULL ORDER BY start_at DESC LIMIT 100", context.workspaceId(), "schedule"));
     value.add("recentExecution", recentExecution(context)); return gson.toJson(value);
   }
 
@@ -471,7 +485,7 @@ public final class AiCommandService {
         if ("stage".equals(type)) { row.addProperty("planId", Database.id(rs, "plan_id")); addProgress(row, rs); row.addProperty("dueDate", dateText(rs, "due_date")); row.addProperty("version", rs.getInt("version")); }
         if ("task".equals(type)) { row.addProperty("planId", Database.id(rs, "plan_id")); row.addProperty("stageId", Database.id(rs, "stage_id")); row.addProperty("priority", rs.getString("priority")); row.addProperty("estimatedMinutes", integer(rs.getObject("estimated_minutes"))); row.addProperty("actualMinutes", integer(rs.getObject("actual_minutes"))); row.addProperty("dueAt", timeText(rs, "due_at")); row.addProperty("version", rs.getInt("version")); }
         if ("todo".equals(type)) { row.addProperty("priority", rs.getString("priority")); row.addProperty("dueAt", timeText(rs, "due_at")); row.addProperty("version", rs.getInt("version")); }
-        if ("schedule".equals(type)) { row.addProperty("startAt", timeText(rs, "start_at")); row.addProperty("durationMinutes", rs.getInt("duration_minutes")); addUuid(row, "planId", rs.getBytes("plan_id")); addUuid(row, "stageId", rs.getBytes("stage_id")); addUuid(row, "taskId", rs.getBytes("task_id")); row.addProperty("version", rs.getInt("version")); }
+        if ("schedule".equals(type)) { row.addProperty("startAt", timeText(rs, "start_at")); row.addProperty("durationMinutes", rs.getInt("duration_minutes")); addUuid(row, "planId", rs.getBytes("plan_id")); addUuid(row, "stageId", rs.getBytes("stage_id")); addUuid(row, "taskId", rs.getBytes("task_id")); row.addProperty("locationName", rs.getString("location_name")); row.add("latitude", gson.toJsonTree(rs.getObject("latitude"))); row.add("longitude", gson.toJsonTree(rs.getObject("longitude"))); row.addProperty("coordinateSystem", rs.getString("coordinate_system")); row.addProperty("timezoneId", rs.getString("timezone_id")); row.addProperty("sourceUrl", rs.getString("source_url")); row.add("reservationRequired", gson.toJsonTree(rs.getObject("reservation_required"))); row.addProperty("version", rs.getInt("version")); }
         rows.add(row);
       }}
     }
@@ -555,6 +569,7 @@ public final class AiCommandService {
       case "update_plan" -> result.add(item(type, updatePlan(c, UUID.fromString(required(action, "targetId")), f, context, draftId, changeSetId, source), action));
       case "delete_plan", "restore_plan", "delete_stage", "restore_stage", "delete_todo", "restore_todo", "delete_schedule", "restore_schedule" ->
           result.add(item(type, softDeleteOrRestore(c, type, UUID.fromString(required(action, "targetId")), f, context, draftId, changeSetId, source), action));
+      case "delete_schedules" -> result.addAll(deleteSchedules(c, f, context, draftId, changeSetId, source));
       case "create_stage" -> result.add(item(type, plans.createStage(c, context, UUID.fromString(required(f, "planId")), f, draftId, changeSetId, source).get("id").getAsString(), action));
       case "update_stage" -> result.add(item(type, plans.updateStage(c, context, UUID.fromString(required(action, "targetId")), f, draftId, changeSetId, source).get("id").getAsString(), action));
       case "create_task" -> result.add(item(type, plans.createTask(c, context, UUID.fromString(required(f, "planId")), f, draftId, changeSetId, source).get("id").getAsString(), action));
@@ -602,11 +617,17 @@ public final class AiCommandService {
           JsonObject schedule = scheduleElement.getAsJsonObject(); schedule.addProperty("planId", planId.toString()); schedule.addProperty("stageId", stageId.toString()); schedule.addProperty("taskId", taskId.toString());
           if (!schedule.has("title")) schedule.addProperty("title", required(tf, "title"));
           // 旅行日程是明确日期的单次安排，不应被每周可用时段设置阻塞；仍保留时间冲突校验。
-          JsonObject created = plans.createSchedule(c, context, schedule, draftId, changeSetId, source,
-              !isTravelPlan(f) && !"learning_agent".equals(string(f, "reason", "")));
-          executed.add(simpleItem("create_schedule", UUID.fromString(created.get("id").getAsString()), "安排任务：" + required(tf, "title")));
-        }
+          try {
+            JsonObject created = plans.createSchedule(c, context, schedule, draftId, changeSetId, source,
+                !isTravelPlan(f) && !"learning_agent".equals(string(f, "reason", "")));
+            executed.add(simpleItem("create_schedule", UUID.fromString(created.get("id").getAsString()), "安排任务：" + required(tf, "title")));
+          } catch (IllegalArgumentException error) {
+            // A reviewed itinerary must be written atomically. Keeping only the task makes the
+            // preview disagree with the calendar, so surface the conflict and roll back instead.
+            throw error;
+          }
       }
+    }
     }
     return executed;
   }
@@ -658,6 +679,28 @@ public final class AiCommandService {
     UUID planId = planIdFromSnapshot(before); if (planId != null) plans.recomputeProgress(c, planId); return id.toString();
   }
 
+  private JsonArray deleteSchedules(Connection c, JsonObject f, Database.Context context, UUID draftId,
+                                    UUID changeSetId, String source) throws SQLException {
+    LocalDate start = LocalDate.parse(required(f, "startDate"));
+    LocalDate end = LocalDate.parse(required(f, "endDate"));
+    JsonArray executed = new JsonArray();
+    String sql = "SELECT id FROM schedule_items WHERE workspace_id=? AND deleted_at IS NULL "
+        + "AND start_at>=? AND start_at<? ORDER BY start_at,id";
+    try (PreparedStatement p = c.prepareStatement(sql)) {
+      p.setBytes(1, Database.uuidBytes(context.workspaceId()));
+      p.setTimestamp(2, Timestamp.valueOf(start.atStartOfDay()));
+      p.setTimestamp(3, Timestamp.valueOf(end.plusDays(1).atStartOfDay()));
+      try (ResultSet rs = p.executeQuery()) {
+        while (rs.next()) {
+          UUID id = Database.bytesUuid(rs.getBytes(1));
+          String deleted = softDeleteOrRestore(c, "delete_schedule", id, f, context, draftId, changeSetId, source);
+          executed.add(item("delete_schedule", deleted, new JsonObject()));
+        }
+      }
+    }
+    return executed;
+  }
+
   private void prepareTaskStatus(String type, JsonObject f) {
     String status = switch (type) { case "complete_task" -> "done"; case "delay_task" -> "pending"; case "block_task" -> "blocked"; case "skip_task" -> "skipped"; case "cancel_task" -> "cancelled"; default -> null; };
     if (status != null) f.addProperty("status", status); f.addProperty("actionType", type);
@@ -701,7 +744,7 @@ public final class AiCommandService {
     JsonObject o = baseRow(rs); o.addProperty("description", rs.getString("description")); o.addProperty("status", rs.getString("status")); o.addProperty("priority", rs.getString("priority")); o.addProperty("dueAt", timeText(rs, "due_at")); o.addProperty("completedAt", timeText(rs, "completed_at")); return o;
   }
   private JsonObject scheduleRow(ResultSet rs) throws SQLException {
-    JsonObject o = baseRow(rs); o.addProperty("description", rs.getString("description")); o.addProperty("status", rs.getString("status")); o.addProperty("startAt", timeText(rs, "start_at")); o.addProperty("durationMinutes", rs.getInt("duration_minutes")); addUuid(o, "planId", rs.getBytes("plan_id")); addUuid(o, "stageId", rs.getBytes("stage_id")); addUuid(o, "taskId", rs.getBytes("task_id")); o.addProperty("completedAt", timeText(rs, "completed_at")); return o;
+    JsonObject o = baseRow(rs); o.addProperty("description", rs.getString("description")); o.addProperty("status", rs.getString("status")); o.addProperty("startAt", timeText(rs, "start_at")); o.addProperty("durationMinutes", rs.getInt("duration_minutes")); addUuid(o, "planId", rs.getBytes("plan_id")); addUuid(o, "stageId", rs.getBytes("stage_id")); addUuid(o, "taskId", rs.getBytes("task_id")); o.addProperty("locationName", rs.getString("location_name")); o.add("latitude", gson.toJsonTree(rs.getObject("latitude"))); o.add("longitude", gson.toJsonTree(rs.getObject("longitude"))); o.addProperty("coordinateSystem", rs.getString("coordinate_system")); o.addProperty("timezoneId", rs.getString("timezone_id")); o.addProperty("sourceUrl", rs.getString("source_url")); o.add("reservationRequired", gson.toJsonTree(rs.getObject("reservation_required"))); o.addProperty("completedAt", timeText(rs, "completed_at")); return o;
   }
   private JsonObject baseRow(ResultSet rs) throws SQLException { JsonObject o = new JsonObject(); o.addProperty("id", Database.id(rs, "id")); o.addProperty("title", rs.getString("title")); o.addProperty("version", rs.getInt("version")); o.addProperty("deletedAt", timeText(rs, "deleted_at")); return o; }
 
@@ -725,7 +768,7 @@ public final class AiCommandService {
       case "plan_stage" -> { sql = "UPDATE plan_stages s JOIN plans p ON p.id=s.plan_id SET s.title=?,s.description=?,s.status=?,s.due_date=?,s.sort_order=?,s.deleted_at=?,s.purge_after=NULL,s.version=s.version+1 WHERE s.id=? AND p.workspace_id=? AND s.version=?"; add(values, before, "title", "description", "status"); values.add(sqlDate(before, "dueDate")); values.add(integer(before, "sortOrder", 0)); values.add(sqlTime(before, "deletedAt")); }
       case "plan_task" -> { sql = "UPDATE plan_tasks t JOIN plans p ON p.id=t.plan_id SET t.title=?,t.description=?,t.status=?,t.priority=?,t.estimated_minutes=?,t.actual_minutes=?,t.due_at=?,t.completed_at=?,t.blocked_reason=?,t.sort_order=?,t.deleted_at=?,t.purge_after=NULL,t.version=t.version+1 WHERE t.id=? AND p.workspace_id=? AND t.version=?"; add(values, before, "title", "description", "status", "priority"); values.add(optionalInteger(before, "estimatedMinutes")); values.add(optionalInteger(before, "actualMinutes")); values.add(sqlTime(before, "dueAt")); values.add(sqlTime(before, "completedAt")); values.add(nullable(before, "reason")); values.add(integer(before, "sortOrder", 0)); values.add(sqlTime(before, "deletedAt")); }
       case "todo" -> { sql = "UPDATE todos SET title=?,description=?,status=?,priority=?,due_at=?,completed_at=?,deleted_at=?,purge_after=NULL,version=version+1 WHERE id=? AND workspace_id=? AND version=?"; add(values, before, "title", "description", "status", "priority"); values.add(sqlTime(before, "dueAt")); values.add(sqlTime(before, "completedAt")); values.add(sqlTime(before, "deletedAt")); }
-      case "schedule" -> { sql = "UPDATE schedule_items SET title=?,description=?,status=?,start_at=?,duration_minutes=?,plan_id=?,stage_id=?,task_id=?,completed_at=?,deleted_at=?,purge_after=NULL,version=version+1 WHERE id=? AND workspace_id=? AND version=?"; add(values, before, "title", "description", "status"); values.add(sqlTime(before, "startAt")); values.add(integer(before, "durationMinutes", 30)); values.add(uuidBytes(before, "planId")); values.add(uuidBytes(before, "stageId")); values.add(uuidBytes(before, "taskId")); values.add(sqlTime(before, "completedAt")); values.add(sqlTime(before, "deletedAt")); }
+      case "schedule" -> { sql = "UPDATE schedule_items SET title=?,description=?,status=?,start_at=?,duration_minutes=?,plan_id=?,stage_id=?,task_id=?,location_name=?,latitude=?,longitude=?,coordinate_system=?,timezone_id=?,source_url=?,reservation_required=?,completed_at=?,deleted_at=?,purge_after=NULL,version=version+1 WHERE id=? AND workspace_id=? AND version=?"; add(values, before, "title", "description", "status"); values.add(sqlTime(before, "startAt")); values.add(integer(before, "durationMinutes", 30)); values.add(uuidBytes(before, "planId")); values.add(uuidBytes(before, "stageId")); values.add(uuidBytes(before, "taskId")); add(values, before, "locationName", "latitude", "longitude", "coordinateSystem", "timezoneId", "sourceUrl", "reservationRequired"); values.add(sqlTime(before, "completedAt")); values.add(sqlTime(before, "deletedAt")); }
       default -> throw new IllegalArgumentException("unsupported_undo_entity");
     }
     try (PreparedStatement p = c.prepareStatement(sql)) { int index = 1; for (Object value : values) p.setObject(index++, value); p.setBytes(index++, Database.uuidBytes(id)); p.setBytes(index++, Database.uuidBytes(workspaceId)); p.setInt(index, currentVersion); requireAffected(p.executeUpdate(), "undo_version_conflict"); }
@@ -910,8 +953,9 @@ public final class AiCommandService {
     else if (type.endsWith("_stage")) allowed = List.of("planId", "title", "description", "status", "dueDate", "sortOrder", "tasks", "reason", "expectedVersion");
     else if (type.endsWith("_task")) allowed = List.of("planId", "stageId", "title", "description", "status", "priority", "estimatedMinutes", "actualMinutes", "dueAt", "sortOrder", "reason", "schedules", "expectedVersion", "actionType");
     else if (type.endsWith("_todo")) allowed = List.of("title", "description", "status", "priority", "dueAt", "actualMinutes", "reason", "expectedVersion");
-    else if (type.endsWith("_schedule")) allowed = List.of("title", "description", "status", "startAt", "durationMinutes", "planId", "stageId", "taskId", "actualMinutes", "reason", "expectedVersion", "actionType");
+    else if (type.endsWith("_schedule")) allowed = List.of("title", "description", "status", "startAt", "durationMinutes", "planId", "stageId", "taskId", "actualMinutes", "reason", "expectedVersion", "actionType", "locationName", "latitude", "longitude", "coordinateSystem", "timezoneId", "sourceUrl", "reservationRequired");
     else if ("batch_reschedule".equals(type)) allowed = List.of("items", "reason");
+    else if ("delete_schedules".equals(type)) allowed = List.of("startDate", "endDate", "reason");
     else allowed = List.of("timezone", "availability", "maxSessionMinutes", "bufferMinutes");
     requireOnly(f, allowed);
     if ("create_stage".equals(type)) UUID.fromString(required(f, "planId"));
@@ -924,6 +968,11 @@ public final class AiCommandService {
     if ("delay_schedule".equals(type) && string(f, "startAt", "").isBlank()) throw new IllegalArgumentException("延期日程缺少新开始时间");
     if ("block_task".equals(type) && string(f, "reason", "").isBlank()) throw new IllegalArgumentException("阻塞任务必须填写原因");
     if ("batch_reschedule".equals(type) && array(f, "items").isEmpty()) throw new IllegalArgumentException("批量重排缺少具体项目");
+    if ("delete_schedules".equals(type)) {
+      LocalDate start = LocalDate.parse(required(f, "startDate"));
+      LocalDate end = LocalDate.parse(required(f, "endDate"));
+      if (end.isBefore(start)) throw new IllegalArgumentException("invalid_schedule_date_range");
+    }
     String status = nullable(f, "status");
     if (type.endsWith("_plan") && status != null && !List.of("active", "paused", "completed").contains(status)) throw new IllegalArgumentException("invalid_plan_status");
     if (type.endsWith("_stage") && status != null && !List.of("pending", "in_progress", "done", "blocked", "cancelled").contains(status)) throw new IllegalArgumentException("invalid_stage_status");
@@ -975,7 +1024,64 @@ public final class AiCommandService {
     JsonObject row = new JsonObject(); row.addProperty("id", id.toString()); row.addProperty("version", 0); row.addProperty("title", input.get("title").getAsString()); return row;
   }
 
-  private boolean needsTarget(String type) { return !type.startsWith("create_") && !"batch_reschedule".equals(type) && !"update_preference".equals(type); }
+  private boolean needsTarget(String type) { return !type.startsWith("create_") && !"batch_reschedule".equals(type) && !"delete_schedules".equals(type) && !"update_preference".equals(type); }
+
+  private JsonArray deterministicScheduleDelete(String text) {
+    String value = text == null ? "" : text.replaceAll("\\s", "");
+    if (!(value.contains("删除") || value.contains("清空") || value.contains("移除"))
+        || !(value.contains("日程") || value.contains("安排") || value.contains("日历"))) return new JsonArray();
+    String number = "[0-9一二三四五六七八九十百零两]+";
+    Pattern pattern = Pattern.compile("(?:([0-9]{4}|[一二三四五六七八九十百零两]+)年)?(" + number + ")月(" + number
+        + ")(?:日|号)?(?:到|至|[-~])(?:([0-9]{4}|[一二三四五六七八九十百零两]+)年)?(" + number
+        + ")(?:(" + number + ")月)?(" + number + ")(?:日|号)?");
+    Matcher matcher = pattern.matcher(value);
+    if (!matcher.find()) return new JsonArray();
+    try {
+      LocalDate today = LocalDate.now();
+      int year = matcher.group(1) == null ? today.getYear() : chineseNumber(matcher.group(1));
+      int startMonth = chineseNumber(matcher.group(2));
+      int startDay = chineseNumber(matcher.group(3));
+      int endYear = matcher.group(4) == null ? year : chineseNumber(matcher.group(4));
+      int endMonth = matcher.group(5) == null ? startMonth : chineseNumber(matcher.group(5));
+      int endDay = chineseNumber(matcher.group(6));
+      // The second month is optional; the regex group contains only the number before an optional 月.
+      String matchedRange = matcher.group();
+      int monthMarker = matchedRange.indexOf("到");
+      if (monthMarker < 0) monthMarker = matchedRange.indexOf("至");
+      String right = monthMarker < 0 ? matchedRange : matchedRange.substring(monthMarker + 1);
+      Matcher rightMonth = Pattern.compile("(" + number + ")月").matcher(right);
+      if (rightMonth.find()) endMonth = chineseNumber(rightMonth.group(1));
+      LocalDate start = LocalDate.of(year, startMonth, startDay);
+      LocalDate end = LocalDate.of(endYear, endMonth, endDay);
+      if (end.isBefore(start)) end = end.plusYears(1);
+      JsonObject action = new JsonObject();
+      action.addProperty("type", "delete_schedules");
+      action.addProperty("summary", "删除指定日期范围内的日程");
+      JsonObject fields = new JsonObject();
+      fields.addProperty("startDate", start.toString());
+      fields.addProperty("endDate", end.toString());
+      fields.addProperty("reason", "用户请求清空日期范围内的日程");
+      action.add("fields", fields);
+      JsonArray actions = new JsonArray(); actions.add(action); return actions;
+    } catch (RuntimeException error) {
+      return new JsonArray();
+    }
+  }
+
+  private int chineseNumber(String value) {
+    if (value.chars().allMatch(Character::isDigit)) return Integer.parseInt(value);
+    int ten = value.indexOf('十');
+    if (ten < 0) {
+      return switch (value) {
+        case "零" -> 0; case "一" -> 1; case "二", "两" -> 2; case "三" -> 3; case "四" -> 4;
+        case "五" -> 5; case "六" -> 6; case "七" -> 7; case "八" -> 8; case "九" -> 9;
+        default -> throw new IllegalArgumentException("invalid_chinese_number");
+      };
+    }
+    int before = ten == 0 ? 1 : chineseNumber(value.substring(0, ten));
+    String suffix = value.substring(ten + 1);
+    return before * 10 + (suffix.isBlank() ? 0 : chineseNumber(suffix));
+  }
   private boolean containsAction(JsonArray actions, String type) { for (JsonElement item : actions) if (item.isJsonObject() && type.equals(string(item.getAsJsonObject(), "type", ""))) return true; return false; }
   private boolean requestsDraft(String text) {
     String value = text.replaceAll("\\s", "");
@@ -993,6 +1099,9 @@ public final class AiCommandService {
     for (int index = actions.size() - 1; index >= 0; index--) {
       JsonObject action = actions.get(index).getAsJsonObject();
       String type = string(action, "type", "");
+      if ("delete_schedules".equals(type)) {
+        continue;
+      }
       if (type.contains("schedule") || "batch_reschedule".equals(type)) {
         actions.remove(index);
       } else if ("create_plan".equals(type) && isTravelPlan(fields(action))) {
@@ -1032,7 +1141,7 @@ public final class AiCommandService {
       normalizeModelFields(object.get(key));
     }
   }
-  private boolean containsScheduling(JsonArray actions) { for (JsonElement item : actions) { if (!item.isJsonObject()) continue; JsonObject action = item.getAsJsonObject(); String type = string(action, "type", ""); if (type.contains("schedule") || "batch_reschedule".equals(type)) return true; if ("create_plan".equals(type) && gson.toJson(fields(action)).contains("startAt")) return true; } return false; }
+  private boolean containsScheduling(JsonArray actions) { for (JsonElement item : actions) { if (!item.isJsonObject()) continue; JsonObject action = item.getAsJsonObject(); String type = string(action, "type", ""); if (!"delete_schedules".equals(type) && (type.contains("schedule") || "batch_reschedule".equals(type))) return true; if ("create_plan".equals(type) && gson.toJson(fields(action)).contains("startAt")) return true; } return false; }
   private JsonObject fields(JsonObject action) { JsonObject fields = action.has("fields") && action.get("fields").isJsonObject() ? action.getAsJsonObject("fields") : new JsonObject(); action.add("fields", fields); return fields; }
   private JsonArray array(JsonObject object, String key) { return object.has(key) && object.get(key).isJsonArray() ? object.getAsJsonArray(key) : new JsonArray(); }
   private JsonArray changes(JsonObject before, JsonObject fields) { JsonArray rows = new JsonArray(); for (String key : fields.keySet()) { if ("expectedVersion".equals(key) || "reason".equals(key)) continue; JsonObject row = new JsonObject(); row.addProperty("field", key); row.add("before", before != null && before.has(key) ? before.get(key).deepCopy() : JsonNull.INSTANCE); row.add("after", fields.get(key).deepCopy()); rows.add(row); } return rows; }

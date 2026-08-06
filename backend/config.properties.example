@@ -8,10 +8,32 @@ api.key=
 api.url=https://api.siliconflow.cn/v1/chat/completions
 ai.model=Qwen/Qwen3.5-9B
 
-# 天气简报功能可选。
+# 高德地图：天气简报，以及旅游 Agent 的地理编码、POI 和本地路径规划。
 amap.api.key=
 briefing.default.location=杭州
 briefing.news.enabled=true
+
+amap.api.base-url=https://restapi.amap.com/v3
+
+# 旅游 Agent：和风天气。Host 以供应商控制台分配值为准。
+# Travel Agent weather uses the Amap API key and base URL configured above.
+
+# 旅游攻略搜索：bing-rss 无需 Key；tavily 为可选增强。
+travel.search.provider=bing-rss
+travel.search.api-key=
+travel.search.base-url=https://api.tavily.com
+
+# 旅游模型：10 天等长行程需要比普通对话更长的生成时间。
+travel.model.max-tokens=4800
+travel.model.timeout-seconds=120
+travel.location.ip-fallback-enabled=false
+travel.geocoding.cache-hours=24
+travel.weather.cache-hours=6
+travel.routing.cache-hours=1
+travel.refresh.enabled=true
+travel.refresh.daily-hours=24
+travel.refresh.urgent-hours=6
+travel.refresh.retry-base-minutes=15
 
 # 微信消息里的网页地址。局域网使用时填 http://电脑IP:8081/。
 web.url=

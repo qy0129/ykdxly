@@ -272,6 +272,7 @@ function App() {
     catch (cause) { setDataError(cause instanceof Error ? cause.message : '日程保存失败') }
   }
   const deleteSchedule = (id: string) => { void confirmDelete('确认是否删除这条日程？日程将进入回收站 30 天。').then((confirmed) => { if (confirmed) void mutation(plannerApi.deleteSchedule(id)).then(() => navigate('calendar')) }) }
+  const deleteSchedules = (ids: string[]) => bulkDelete('日程', ids.length, () => [plannerApi.deleteSchedules(ids)])
   const createTodo = (item: TodoItem) => { void mutation(plannerApi.createTodo(item)) }
   const updateTodo = (item: TodoItem) => { void mutation(plannerApi.updateTodo(item)) }
   const deleteTodo = (id: string) => { void confirmDelete('确认是否删除这个待办？待办将进入回收站 30 天。').then((confirmed) => { if (confirmed) void mutation(plannerApi.deleteTodo(id)) }) }
@@ -408,7 +409,7 @@ function App() {
         />
         {dataError && <p className="ai-chat-error">{dataError}</p>}
         <div className="page-content">
-          {activeView === 'calendar' && <CalendarPage items={calendarEntries} plansData={plansData} onToggleItem={toggleCalendarItem} onOpenItem={openSchedule} onAdd={(date) => setScheduleDialog({ date: format(date, 'yyyy-MM-dd') })} />}
+          {activeView === 'calendar' && <CalendarPage items={calendarEntries} plansData={plansData} onToggleItem={toggleCalendarItem} onOpenItem={openSchedule} onDeleteMany={deleteSchedules} onAdd={(date) => setScheduleDialog({ date: format(date, 'yyyy-MM-dd') })} />}
           {activeView === 'plans' && <PlansPage activePlanId={activePlanId} plansData={plansData} calendarItems={calendarItems} onPlanChange={setActivePlanId} onUpdatePlan={updatePlan} onDeletePlans={deletePlans} onCreateStage={createStage} onUpdateStage={updateStage} onDeleteStage={deleteStage} onCreateTask={createTask} onUpdateTask={updateTask} onDeleteTask={deleteTask} onDeleteTasks={deleteTasks} onAddSchedule={(planId) => setScheduleDialog({ planId })} onOpenSchedule={openSchedule} onAiAdjust={(plan) => { setAgentSeed(`请调整计划“${plan.title}”（计划 ID：${plan.id}）`); navigate('agent') }} />}
           {activeView === 'todos' && <TodosPage todoItems={todoItems} onCreate={createTodo} onUpdate={updateTodo} onDelete={deleteTodo} onDeleteMany={deleteTodos} onToggle={toggleCalendarItem} />}
           {activeView === 'notes' && <NotesPage noteItems={noteItems} onChange={saveNotes} onCreate={createNote} onDelete={deleteNote} onDeleteMany={deleteNotes} selectedNoteId={selectedNoteId} />}

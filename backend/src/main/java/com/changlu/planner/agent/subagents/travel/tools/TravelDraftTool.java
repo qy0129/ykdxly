@@ -43,21 +43,8 @@ public final class TravelDraftTool implements ToolHandler {
     String instruction = call.arguments().has("planningInstruction")
         ? call.arguments().get("planningInstruction").getAsString().trim() : "";
     if (instruction.isBlank()) throw new IllegalArgumentException("TRAVEL_PLANNING_INSTRUCTION_REQUIRED");
-    if (call.arguments().has("travelData") && call.arguments().get("travelData").isJsonObject()) {
-      return deterministicDraft(call.arguments(), context);
-    }
-    JsonObject input = new JsonObject();
-    input.addProperty("message", instruction);
-    input.addProperty("conversationId", context.conversationId().toString());
-    input.addProperty("skipPersistence", true);
-    try {
-      JsonObject legacy = commands.command(input, context.identity(), context.channel());
-      if (legacy.has("draft") && legacy.get("draft").isJsonObject()) {
-        return AgentResult.fromLegacy(legacy, context.traceId());
-      }
-    } catch (Exception modelError) {
-      // 旅游结果已经结构化，二次模型解析失败时使用确定性草案，避免整条行程失败。
-    }
+    if (!call.arguments().has("travelData") || !call.arguments().get("travelData").isJsonObject())
+      throw new IllegalArgumentException("TRAVEL_DATA_REQUIRED");
     return deterministicDraft(call.arguments(), context);
   }
 
@@ -75,6 +62,7 @@ public final class TravelDraftTool implements ToolHandler {
     fields.addProperty("reason", "travel_agent");
     if (!endDate.isBlank()) fields.addProperty("dueDate", endDate);
     JsonArray stages = new JsonArray();
+    appendPreparationStage(stages, travel);
     JsonArray days = travel.has("days") && travel.get("days").isJsonArray()
         ? travel.getAsJsonArray("days") : new JsonArray();
     for (JsonElement dayElement : days) {
@@ -85,20 +73,26 @@ public final class TravelDraftTool implements ToolHandler {
       JsonObject stage = new JsonObject();
       stage.addProperty("title", text(day, "title", "旅行日程"));
       stage.addProperty("dueDate", date);
-      JsonObject task = new JsonObject();
-      task.addProperty("title", text(day, "title", "旅行日程"));
-      task.addProperty("description", activitySummary(day));
-      task.addProperty("priority", "medium");
-      task.addProperty("estimatedMinutes", 120);
-      task.addProperty("dueAt", date + "T18:00:00");
-      JsonArray schedules = new JsonArray();
-      JsonObject schedule = new JsonObject();
-      schedule.addProperty("title", text(day, "title", "旅行日程"));
-      schedule.addProperty("startAt", date + "T10:00:00");
-      schedule.addProperty("durationMinutes", 120);
-      schedules.add(schedule);
-      task.add("schedules", schedules);
-      JsonArray tasks = new JsonArray(); tasks.add(task); stage.add("tasks", tasks);
+      JsonArray tasks = new JsonArray(); JsonArray activities = day.has("activities") && day.get("activities").isJsonArray()
+          ? day.getAsJsonArray("activities") : new JsonArray(); int fallbackMinutes = 9 * 60 + 30;
+      for (JsonElement activityElement : activities) {
+        if (!activityElement.isJsonObject()) continue; JsonObject activity = activityElement.getAsJsonObject();
+        int duration = number(activity, "durationMinutes", 90); String startTime = text(activity, "startTime", "");
+        boolean estimatedTime = startTime.isBlank(); if (estimatedTime) startTime = "%02d:%02d".formatted(fallbackMinutes / 60, fallbackMinutes % 60);
+        fallbackMinutes += duration + 45;
+        JsonObject task = new JsonObject(); String title = text(activity, "title", text(activity, "attractionName", "旅行活动"));
+        task.addProperty("title", title); task.addProperty("description", activityDescription(activity, estimatedTime));
+        task.addProperty("priority", Boolean.TRUE.equals(nullableBoolean(activity, "requiresReservation")) ? "high" : "medium");
+        task.addProperty("estimatedMinutes", duration); task.addProperty("dueAt", date + "T" + startTime + ":00");
+        JsonObject schedule = new JsonObject(); schedule.addProperty("title", title); schedule.addProperty("description", activityDescription(activity, estimatedTime));
+        schedule.addProperty("startAt", date + "T" + startTime + ":00"); schedule.addProperty("durationMinutes", duration);
+        schedule.addProperty("locationName", text(activity, "location", text(activity, "attractionName", "")));
+        copy(activity, schedule, "lat", "latitude"); copy(activity, schedule, "lng", "longitude"); copy(activity, schedule, "coordinateSystem", "coordinateSystem");
+        schedule.addProperty("timezoneId", timezone(travel)); copy(activity, schedule, "sourceUrl", "sourceUrl"); copy(activity, schedule, "requiresReservation", "reservationRequired");
+        JsonArray schedules = new JsonArray(); schedules.add(schedule); task.add("schedules", schedules); tasks.add(task);
+      }
+      if (tasks.isEmpty()) { JsonObject task = new JsonObject(); task.addProperty("title", text(day, "title", "旅行日程")); task.addProperty("description", activitySummary(day)); task.addProperty("priority", "medium"); task.addProperty("estimatedMinutes", 60); task.addProperty("dueAt", date + "T18:00:00"); tasks.add(task); }
+      stage.add("tasks", tasks);
       stages.add(stage);
     }
     fields.add("stages", stages);
@@ -111,6 +105,53 @@ public final class TravelDraftTool implements ToolHandler {
         text(arguments, "planningInstruction", destination + "旅行计划"), "已生成旅行计划和日历待确认草案。", actions);
     return AgentResult.fromLegacy(legacy, context.traceId());
   }
+
+  private void appendPreparationStage(JsonArray stages, JsonObject travel) {
+    if (!travel.has("preparationTasks") || !travel.get("preparationTasks").isJsonArray()) return;
+    JsonArray source = travel.getAsJsonArray("preparationTasks");
+    if (source.isEmpty()) return;
+    JsonObject stage = new JsonObject();
+    stage.addProperty("stageType", "preparation");
+    stage.addProperty("title", "出发前准备");
+    String startDate = text(travel.has("request") && travel.get("request").isJsonObject()
+        ? travel.getAsJsonObject("request") : new JsonObject(), "startDate", "");
+    if (!startDate.isBlank()) stage.addProperty("dueDate", startDate);
+    JsonArray tasks = new JsonArray();
+    for (JsonElement item : source) {
+      if (!item.isJsonObject()) continue;
+      JsonObject sourceTask = item.getAsJsonObject();
+      String title = text(sourceTask, "title", "旅行准备事项");
+      JsonObject task = new JsonObject();
+      task.addProperty("title", title);
+      task.addProperty("description", text(sourceTask, "description", "出发前完成该准备事项"));
+      task.addProperty("priority", text(sourceTask, "priority", "medium"));
+      task.addProperty("estimatedMinutes", number(sourceTask, "estimatedMinutes", 30));
+      if (!startDate.isBlank()) task.addProperty("dueAt", startDate + "T09:00:00");
+      tasks.add(task);
+    }
+    if (!tasks.isEmpty()) {
+      stage.add("tasks", tasks);
+      stages.add(stage);
+    }
+  }
+
+  private int number(JsonObject value, String key, int fallback) {
+    return value.has(key) && value.get(key).isJsonPrimitive() && value.getAsJsonPrimitive(key).isNumber()
+        ? Math.max(1, value.get(key).getAsInt()) : fallback;
+  }
+
+  private String activityDescription(JsonObject activity, boolean estimatedTime) {
+    StringBuilder value = new StringBuilder(text(activity, "notes", ""));
+    if (estimatedTime) value.append(value.length() == 0 ? "" : "；").append("开始时间为估算");
+    Boolean reservation = nullableBoolean(activity, "requiresReservation");
+    if (Boolean.TRUE.equals(reservation)) value.append(value.length() == 0 ? "" : "；").append("需提前预约");
+    if (activity.has("backupActivity") && activity.get("backupActivity").isJsonObject() && !activity.getAsJsonObject("backupActivity").keySet().isEmpty())
+      value.append(value.length() == 0 ? "" : "；").append("备用：").append(activity.getAsJsonObject("backupActivity"));
+    return value.toString();
+  }
+  private Boolean nullableBoolean(JsonObject value, String key) { try { return value.has(key) && !value.get(key).isJsonNull() ? value.get(key).getAsBoolean() : null; } catch (Exception e) { return null; } }
+  private void copy(JsonObject source, JsonObject target, String sourceKey, String targetKey) { if (source.has(sourceKey) && !source.get(sourceKey).isJsonNull()) target.add(targetKey, source.get(sourceKey).deepCopy()); }
+  private String timezone(JsonObject travel) { return travel.has("locationContext") && travel.get("locationContext").isJsonObject() ? text(travel.getAsJsonObject("locationContext"), "timezone", "Asia/Shanghai") : "Asia/Shanghai"; }
 
   private String activitySummary(JsonObject day) {
     if (!day.has("activities") || !day.get("activities").isJsonArray()) return "按当天行程安排，保留机动休息时间。";

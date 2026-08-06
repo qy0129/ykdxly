@@ -779,7 +779,11 @@ public final class ApiServer {
         String type = parts[3]; UUID id = UUID.fromString(parts[4]);
         if ("task".equals(type)) { json(e, 200, planExecution.restoreTask(context(e), id, "web")); return; }
         if ("stage".equals(type)) { json(e, 200, planExecution.restoreStage(context(e), id, "web")); return; }
-        String table = switch (type) { case "plan" -> "plans"; case "todo" -> "todos"; case "schedule" -> "schedule_items"; default -> throw new IllegalArgumentException("不支持的回收站类型"); };
+        if ("plan".equals(type)) {
+          restorePlanFromTrash(id, workspace(e));
+          json(e, 200, Map.of("id", id.toString(), "restored", true)); return;
+        }
+        String table = switch (type) { case "todo" -> "todos"; case "schedule" -> "schedule_items"; default -> throw new IllegalArgumentException("不支持的回收站类型"); };
         try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("UPDATE " + table + " SET deleted_at=NULL,purge_after=NULL,version=version+1 WHERE id=? AND workspace_id=? AND deleted_at IS NOT NULL")) {
           p.setBytes(1, Database.uuidBytes(id)); p.setBytes(2, Database.uuidBytes(workspace(e)));
           if (p.executeUpdate() == 0) throw new IllegalArgumentException("记录不在回收站");
@@ -793,6 +797,7 @@ public final class ApiServer {
 
   /** 永久删除严格限定为当前工作区内已经软删除的记录。 */
   private int purgeTrashItem(String type, UUID id, UUID workspaceId) throws SQLException {
+    if ("plan".equals(type)) return purgePlanFromTrash(id, workspaceId);
     String sql = switch (type) {
       case "plan" -> "DELETE FROM plans WHERE id=? AND workspace_id=? AND deleted_at IS NOT NULL";
       case "todo" -> "DELETE FROM todos WHERE id=? AND workspace_id=? AND deleted_at IS NOT NULL";
@@ -1148,6 +1153,10 @@ public final class ApiServer {
   }
 
   private void delete(HttpExchange e, String table, String id) throws SQLException, IOException {
+    if ("plans".equals(table)) {
+      json(e, softDeletePlan(UUID.fromString(id), workspace(e)) ? 204 : 404, Map.of("deleted", true));
+      return;
+    }
     if (List.of("plans", "todos", "schedule_items").contains(table)) {
       try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("UPDATE " + table + " SET deleted_at=NOW(),purge_after=DATE_ADD(NOW(),INTERVAL 30 DAY),version=version+1 WHERE id=? AND workspace_id=? AND deleted_at IS NULL")) {
         p.setBytes(1, Database.uuidBytes(UUID.fromString(id))); p.setBytes(2, Database.uuidBytes(workspace(e))); json(e, p.executeUpdate() == 0 ? 404 : 204, Map.of("deleted", true));
@@ -1155,6 +1164,72 @@ public final class ApiServer {
       return;
     }
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("DELETE FROM " + table + " WHERE id = ? AND workspace_id = ?")) { p.setBytes(1, Database.uuidBytes(UUID.fromString(id))); p.setBytes(2, Database.uuidBytes(workspace(e))); json(e, p.executeUpdate() == 0 ? 404 : 204, Map.of("deleted", true)); }
+  }
+
+  /** Delete all plan-owned calendar entries together with the plan so hidden entries cannot block new schedules. */
+  private boolean softDeletePlan(UUID planId, UUID workspaceId) throws SQLException {
+    try (Connection c = database.connection()) {
+      c.setAutoCommit(false);
+      try {
+        try (PreparedStatement p = c.prepareStatement("UPDATE plans SET deleted_at=NOW(),purge_after=DATE_ADD(NOW(),INTERVAL 30 DAY),version=version+1 WHERE id=? AND workspace_id=? AND deleted_at IS NULL")) {
+          p.setBytes(1, Database.uuidBytes(planId)); p.setBytes(2, Database.uuidBytes(workspaceId));
+          if (p.executeUpdate() == 0) { c.rollback(); return false; }
+        }
+        softDeletePlanChildren(c, planId, workspaceId);
+        c.commit(); return true;
+      } catch (Exception error) { c.rollback(); throw error; }
+      finally { c.setAutoCommit(true); }
+    }
+  }
+
+  private void softDeletePlanChildren(Connection c, UUID planId, UUID workspaceId) throws SQLException {
+    try (PreparedStatement p = c.prepareStatement("UPDATE plan_stages SET deleted_at=NOW(),purge_after=DATE_ADD(NOW(),INTERVAL 30 DAY),version=version+1 WHERE plan_id=? AND deleted_at IS NULL")) {
+      p.setBytes(1, Database.uuidBytes(planId)); p.executeUpdate();
+    }
+    try (PreparedStatement p = c.prepareStatement("UPDATE plan_tasks SET deleted_at=NOW(),purge_after=DATE_ADD(NOW(),INTERVAL 30 DAY),version=version+1 WHERE plan_id=? AND deleted_at IS NULL")) {
+      p.setBytes(1, Database.uuidBytes(planId)); p.executeUpdate();
+    }
+    try (PreparedStatement p = c.prepareStatement("UPDATE schedule_items SET deleted_at=NOW(),purge_after=DATE_ADD(NOW(),INTERVAL 30 DAY),version=version+1 WHERE plan_id=? AND workspace_id=? AND deleted_at IS NULL")) {
+      p.setBytes(1, Database.uuidBytes(planId)); p.setBytes(2, Database.uuidBytes(workspaceId)); p.executeUpdate();
+    }
+  }
+
+  private void restorePlanFromTrash(UUID planId, UUID workspaceId) throws SQLException {
+    try (Connection c = database.connection()) {
+      c.setAutoCommit(false);
+      try {
+        try (PreparedStatement p = c.prepareStatement("UPDATE plans SET deleted_at=NULL,purge_after=NULL,version=version+1 WHERE id=? AND workspace_id=? AND deleted_at IS NOT NULL")) {
+          p.setBytes(1, Database.uuidBytes(planId)); p.setBytes(2, Database.uuidBytes(workspaceId));
+          if (p.executeUpdate() == 0) throw new IllegalArgumentException("plan_not_in_trash");
+        }
+        for (String table : List.of("plan_stages", "plan_tasks")) {
+          try (PreparedStatement p = c.prepareStatement("UPDATE " + table + " SET deleted_at=NULL,purge_after=NULL,version=version+1 WHERE plan_id=? AND deleted_at IS NOT NULL")) {
+            p.setBytes(1, Database.uuidBytes(planId)); p.executeUpdate();
+          }
+        }
+        try (PreparedStatement p = c.prepareStatement("UPDATE schedule_items SET deleted_at=NULL,purge_after=NULL,version=version+1 WHERE plan_id=? AND workspace_id=? AND deleted_at IS NOT NULL")) {
+          p.setBytes(1, Database.uuidBytes(planId)); p.setBytes(2, Database.uuidBytes(workspaceId)); p.executeUpdate();
+        }
+        c.commit();
+      } catch (Exception error) { c.rollback(); throw error; }
+      finally { c.setAutoCommit(true); }
+    }
+  }
+
+  private int purgePlanFromTrash(UUID planId, UUID workspaceId) throws SQLException {
+    try (Connection c = database.connection()) {
+      c.setAutoCommit(false);
+      try {
+        try (PreparedStatement p = c.prepareStatement("DELETE FROM schedule_items WHERE plan_id=? AND workspace_id=?")) {
+          p.setBytes(1, Database.uuidBytes(planId)); p.setBytes(2, Database.uuidBytes(workspaceId)); p.executeUpdate();
+        }
+        try (PreparedStatement p = c.prepareStatement("DELETE FROM plans WHERE id=? AND workspace_id=? AND deleted_at IS NOT NULL")) {
+          p.setBytes(1, Database.uuidBytes(planId)); p.setBytes(2, Database.uuidBytes(workspaceId));
+          int deleted = p.executeUpdate(); c.commit(); return deleted;
+        }
+      } catch (Exception error) { c.rollback(); throw error; }
+      finally { c.setAutoCommit(true); }
+    }
   }
 
   private void recordManualExecution(Connection c, UUID workspace, UUID user, String table, UUID entityId, String action, String note) throws SQLException {
@@ -1195,6 +1270,10 @@ public final class ApiServer {
       String[] parts = e.getRequestURI().getPath().split("/");
       // /api/schedules/{id} 仍是日程 CRUD，只有 /materials 才属于资料子资源。
       if (parts.length == 4 && !parts[3].isBlank()) {
+        if ("batch".equals(parts[3])) {
+          scheduleBatch(e);
+          return;
+        }
         crud(e, "schedule_items");
         return;
       }
@@ -1210,6 +1289,37 @@ public final class ApiServer {
       json(e, 200, scheduleMaterials.load(context(e), UUID.fromString(parts[3]), refresh));
     } catch (IllegalArgumentException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
       catch (Exception ex) { LOG.warn("[日程资料] 获取失败: {}", ex.getMessage()); json(e, 502, Map.of("error", "schedule_materials_unavailable", "message", "暂时无法获取学习资料")); }
+  }
+
+  private void scheduleBatch(HttpExchange e) throws IOException {
+    if (options(e)) return;
+    if (!"DELETE".equals(e.getRequestMethod())) {
+      json(e, 405, Map.of("error", "method_not_allowed"));
+      return;
+    }
+    JsonObject payload = body(e);
+    JsonArray ids = payload.has("ids") && payload.get("ids").isJsonArray()
+        ? payload.getAsJsonArray("ids") : new JsonArray();
+    if (ids.isEmpty() || ids.size() > 500) {
+      json(e, 400, Map.of("error", "ids_required", "message", "请选择 1 到 500 条日程"));
+      return;
+    }
+    List<UUID> scheduleIds = new ArrayList<>();
+    for (JsonElement id : ids) scheduleIds.add(UUID.fromString(id.getAsString()));
+    UUID workspace = workspace(e);
+    String placeholders = String.join(",", java.util.Collections.nCopies(scheduleIds.size(), "?"));
+    String sql = "UPDATE schedule_items SET deleted_at=NOW(),purge_after=DATE_ADD(NOW(),INTERVAL 30 DAY),version=version+1 "
+        + "WHERE workspace_id=? AND deleted_at IS NULL AND id IN (" + placeholders + ")";
+    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
+      int index = 1;
+      p.setBytes(index++, Database.uuidBytes(workspace));
+      for (UUID id : scheduleIds) p.setBytes(index++, Database.uuidBytes(id));
+      int deleted = p.executeUpdate();
+      json(e, 200, Map.of("deleted", deleted));
+    } catch (SQLException ex) {
+      LOG.warn("[批量删除日程] 失败: {}", ex.getMessage());
+      json(e, 500, Map.of("error", "database_error", "message", ex.getMessage()));
+    }
   }
 
   private String safeBody(JsonObject body) {

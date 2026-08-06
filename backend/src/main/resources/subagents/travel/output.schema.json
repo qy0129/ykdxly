@@ -14,13 +14,47 @@
       "type": "object",
       "properties": {
         "request": { "type": "object" },
-        "days": { "type": "array" },
+        "days": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "date": { "type": "string", "format": "date" },
+              "title": { "type": "string" },
+              "activities": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "attractionId": { "type": "string" },
+                    "attractionName": { "type": "string" },
+                    "startTime": { "type": "string" },
+                    "durationMinutes": { "type": "integer", "minimum": 1 },
+                    "lat": { "type": ["number", "null"] },
+                    "lng": { "type": ["number", "null"] },
+                    "coordinateSystem": { "type": "string" },
+                    "indoor": { "type": "boolean" },
+                    "requiresReservation": { "type": ["boolean", "null"] },
+                    "openingHours": { "type": "string" },
+                    "transitFromPrevious": { "type": "object" },
+                    "backupActivity": { "type": "object" }
+                  }
+                }
+              }
+            }
+          }
+        },
         "preparationTasks": { "type": "array" },
         "budgetEstimate": { "type": "object" },
         "sources": { "type": "array" },
         "risks": { "type": "array" },
         "questions": { "type": "array" },
-        "planningInstruction": { "type": "string" }
+        "planningInstruction": { "type": "string" },
+        "locationContext": { "type": "object" },
+        "weather": { "type": "array" },
+        "attractions": { "type": "array" },
+        "transitMatrix": { "type": "array" },
+        "alternativePlans": { "type": "array" }
       },
       "required": ["request", "days", "preparationTasks", "budgetEstimate", "sources", "risks", "questions", "planningInstruction"]
     },

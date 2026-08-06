@@ -1,4 +1,4 @@
-import type { CalendarItem, Note, Plan, PlanItem, PlanTask, ScheduleMaterialsResponse, TaskRecurrenceType, TodoItem } from '../types/planner'
+import type { CalendarItem, Note, Plan, PlanItem, PlanTask, ScheduleMaterialsResponse, TaskRecurrenceType, TodoItem, TravelPlanData } from '../types/planner'
 
 const DEV_PORTS = new Set(['4173', '5173', '5187'])
 const API_BASE = import.meta.env.VITE_API_BASE_URL
@@ -28,6 +28,13 @@ interface ApiSchedule {
   stageId?: string | null
   taskId?: string | null
   version: number
+  locationName?: string | null
+  latitude?: number | null
+  longitude?: number | null
+  coordinateSystem?: string | null
+  timezoneId?: string | null
+  sourceUrl?: string | null
+  reservationRequired?: boolean | null
 }
 
 interface ApiStage {
@@ -218,7 +225,7 @@ export interface AgentRunResponse {
   toolCalls?: AgentToolCall[]
   data?: Record<string, unknown>
   planReview?: boolean
-  travelData?: Record<string, unknown>
+  travelData?: TravelPlanData
   inputRequirements?: AgentInputRequirement[]
   formTitle?: string
   imageUrl?: string
@@ -243,7 +250,7 @@ export interface AiSession {
   messages: Array<{ role: 'user' | 'assistant'; content: string; imageUrls?: string[]; createdAt: string }>
   draft?: AiDraft
   planReview?: boolean
-  travelData?: Record<string, unknown>
+  travelData?: TravelPlanData
   inputRequirements?: AgentInputRequirement[]
   formTitle?: string
 }
@@ -479,7 +486,19 @@ export const plannerApi = {
     }))
     const schedules: CalendarItem[] = rawSchedules.map((item) => {
       const when = splitDateTime(item.startAt)
-      return { id: item.id, title: item.title, date: when.date, time: when.time, planId: item.planId ?? undefined, stageId: item.stageId ?? undefined, taskId: item.taskId ?? undefined, color: '#d39a24', status: item.status, duration: item.durationMinutes, progress: Math.round(item.progress), version: item.version }
+      return {
+        id: item.id, title: item.title, date: when.date, time: when.time,
+        planId: item.planId ?? undefined, stageId: item.stageId ?? undefined, taskId: item.taskId ?? undefined,
+        color: '#d39a24', status: item.status, duration: item.durationMinutes,
+        progress: Math.round(item.progress), version: item.version,
+        locationName: item.locationName ?? undefined,
+        latitude: item.latitude ?? undefined,
+        longitude: item.longitude ?? undefined,
+        coordinateSystem: item.coordinateSystem ?? undefined,
+        timezoneId: item.timezoneId ?? undefined,
+        sourceUrl: item.sourceUrl ?? undefined,
+        reservationRequired: item.reservationRequired,
+      }
     })
     const todos: TodoItem[] = rawTodos.map((item) => {
       const when = splitDateTime(item.dueAt)
@@ -495,9 +514,10 @@ export const plannerApi = {
   updatePlan: (item: Plan) => request<ApiPlan>(`/plans/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, description: item.subtitle, color: item.color, status: item.status, dueDate: item.dueDate || null, expectedVersion: item.version }) }),
   deletePlan: (id: string) => request<void>(`/plans/${id}`, { method: 'DELETE' }),
 
-  createSchedule: (item: CalendarItem) => request<ApiSchedule>('/schedules', { method: 'POST', body: JSON.stringify({ title: item.title, startAt: `${item.date}T${item.time}:00`, durationMinutes: item.duration, status: item.status, planId: item.planId ?? null, stageId: item.stageId ?? null, taskId: item.taskId ?? null }) }),
-  updateSchedule: (item: CalendarItem) => request<ApiSchedule>(`/schedules/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, startAt: `${item.date}T${item.time}:00`, durationMinutes: item.duration, status: item.status, planId: item.planId ?? null, stageId: item.stageId ?? null, taskId: item.taskId ?? null, expectedVersion: item.version }) }),
+  createSchedule: (item: CalendarItem) => request<ApiSchedule>('/schedules', { method: 'POST', body: JSON.stringify({ title: item.title, startAt: `${item.date}T${item.time}:00`, durationMinutes: item.duration, status: item.status, planId: item.planId ?? null, stageId: item.stageId ?? null, taskId: item.taskId ?? null, locationName: item.locationName ?? null, latitude: item.latitude ?? null, longitude: item.longitude ?? null, coordinateSystem: item.coordinateSystem ?? null, timezoneId: item.timezoneId ?? null, sourceUrl: item.sourceUrl ?? null, reservationRequired: item.reservationRequired ?? null }) }),
+  updateSchedule: (item: CalendarItem) => request<ApiSchedule>(`/schedules/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, startAt: `${item.date}T${item.time}:00`, durationMinutes: item.duration, status: item.status, planId: item.planId ?? null, stageId: item.stageId ?? null, taskId: item.taskId ?? null, locationName: item.locationName ?? null, latitude: item.latitude ?? null, longitude: item.longitude ?? null, coordinateSystem: item.coordinateSystem ?? null, timezoneId: item.timezoneId ?? null, sourceUrl: item.sourceUrl ?? null, reservationRequired: item.reservationRequired ?? null, expectedVersion: item.version }) }),
   deleteSchedule: (id: string) => request<void>(`/schedules/${id}`, { method: 'DELETE' }),
+  deleteSchedules: (ids: string[]) => request<{ deleted: number }>('/schedules/batch', { method: 'DELETE', body: JSON.stringify({ ids }) }),
   loadScheduleMaterials: (id: string, refresh = false) => request<ScheduleMaterialsResponse>(`/schedules/${id}/materials${refresh ? '?refresh=true' : ''}`),
 
   createTodo: (item: TodoItem) => request<ApiTodo>('/todos', { method: 'POST', body: JSON.stringify({ title: item.title, dueAt: todoDueAt(item), status: item.done ? 'done' : 'pending', priority: priorityToApi(item.priority), reminderMinutes: reminderToMinutes(item.reminder) }) }),

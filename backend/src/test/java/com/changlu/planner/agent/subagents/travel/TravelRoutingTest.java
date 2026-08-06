@@ -3,6 +3,7 @@ package com.changlu.planner.agent.subagents.travel;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import com.changlu.planner.agent.core.AgentRouter;
+import com.changlu.planner.agent.core.contract.AgentLoopState;
 import com.changlu.planner.agent.core.contract.AgentContext;
 import com.changlu.planner.agent.core.contract.AgentResult;
 import com.changlu.planner.agent.core.contract.Subagent;
@@ -45,6 +46,18 @@ final class TravelRoutingTest {
     AgentRouter.Decision decision = router.route("查询今天的待办", false, planningTools(), registry());
     assertEquals("tool", decision.executorType());
     assertEquals("planning.assistant", decision.executorName());
+  }
+
+  @Test void routesCancelledTravelDraftRevisionBackToTravel() throws Exception {
+    AgentRouter router = new AgentRouter(messages -> { throw new IllegalStateException("model unavailable"); });
+    JsonObject arguments = new JsonObject();
+    arguments.add("previousTravelData", new JsonObject());
+
+    AgentRouter.Decision decision = router.route("第一天的早上10点去海底世界修改成去爬崂山", false,
+        planningTools(), registry(), new AgentLoopState(), arguments);
+
+    assertEquals("subagent", decision.executorType());
+    assertEquals("travel", decision.executorName());
   }
 
   private SubagentRegistry registry() {

@@ -5,6 +5,7 @@ backend/target/
 backend/dependency-reduced-pom.xml
 backend/*.log
 backend/config.properties
+/config.properties
 
 web/node_modules/
 web/*.log

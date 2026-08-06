@@ -10,7 +10,7 @@ public final class PlanningTools {
       "create_task", "update_task", "complete_task", "delay_task", "block_task",
       "skip_task", "cancel_task", "delete_task", "restore_task",
       "create_todo", "update_todo", "complete_todo", "delay_todo", "delete_todo", "restore_todo",
-      "create_schedule", "update_schedule", "complete_schedule", "delay_schedule", "delete_schedule",
+      "create_schedule", "update_schedule", "complete_schedule", "delay_schedule", "delete_schedule", "delete_schedules",
       "restore_schedule", "batch_reschedule", "update_preference",
       "create_learning_goal", "update_learning_goal", "delete_learning_goal", "create_learning_plan");
 

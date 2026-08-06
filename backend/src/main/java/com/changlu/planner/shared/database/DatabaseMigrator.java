@@ -34,7 +34,12 @@ final class DatabaseMigrator {
       "013_agent_loop.sql",
         "014_ai_images.sql",
         "015_ai_message_images.sql",
-        "016_ai_image_assets.sql"
+        "016_ai_image_assets.sql",
+        "017_travel_schedule_context.sql",
+        "018_travel_refresh.sql",
+        "019_agent_run_lookup_indexes.sql",
+        "020_agent_tool_call_order_index.sql",
+        "021_deleted_plan_schedule_cleanup.sql"
   );
 
   private DatabaseMigrator() {}

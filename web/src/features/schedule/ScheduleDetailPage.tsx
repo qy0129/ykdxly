@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { BookOpen, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ExternalLink, Image, LoaderCircle, NotebookPen, PenLine, Play, Plus, RefreshCw, Save, Send, Sparkles, X } from 'lucide-react'
+import { BookOpen, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ExternalLink, Image, LoaderCircle, MapPin, NotebookPen, PenLine, Play, Plus, RefreshCw, Save, Send, ShieldCheck, Sparkles, X } from 'lucide-react'
 import type { CalendarItem, Note, Plan, SourceMaterial } from '../../types/planner'
 import { plannerApi } from '../../services/plannerApi'
 import { MarkdownPreview } from '../notes/MarkdownPreview'
@@ -235,9 +235,15 @@ export function ScheduleDetailPage({
       <section className="schedule-heading">
         <div className="schedule-title-mark" style={{ backgroundColor: item.color }}><BookOpen size={22} /></div>
         <div>
-          <span className="eyebrow">当日安排 · 学习</span>
+          <span className="eyebrow">当日安排 · {item.locationName ? '旅行' : '学习'}</span>
           <h2>{item.title}</h2>
           <p>{item.date} · {item.time} · {item.duration} 分钟 {plan ? `· ${plan.title}` : ''}</p>
+          {(item.locationName || item.timezoneId || item.reservationRequired != null) && <div className="schedule-travel-context">
+            {item.locationName && <span><MapPin size={13} />{item.sourceUrl && /^https?:\/\//i.test(item.sourceUrl) ? <a href={item.sourceUrl} target="_blank" rel="noreferrer">{item.locationName}<ExternalLink size={11} /></a> : item.locationName}</span>}
+            {item.timezoneId && <span>{item.timezoneId}</span>}
+            {item.reservationRequired === true && <span><ShieldCheck size={13} />需要预约</span>}
+            {item.reservationRequired === false && <span>无需预约</span>}
+          </div>}
         </div>
         <div className="schedule-heading-actions">
           <button className="secondary-button" type="button" onClick={() => onToggle(item.id)} title="切换这条日程的完成状态"><CheckCircle2 size={16} /> {item.status === 'done' ? '已完成' : '标记完成'}</button>

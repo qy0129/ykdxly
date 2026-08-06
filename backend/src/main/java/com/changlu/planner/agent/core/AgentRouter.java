@@ -44,6 +44,18 @@ public final class AgentRouter {
                         com.changlu.planner.agent.core.tool.ToolRegistry tools,
                         com.changlu.planner.agent.core.registry.SubagentRegistry subagents,
                         com.changlu.planner.agent.core.contract.AgentLoopState state) throws Exception {
+    return route(request, hasDocuments, tools, subagents, state, new JsonObject());
+  }
+
+  /** Request arguments carry durable editor context when a cancelled draft starts a fresh run. */
+  public Decision route(String request, boolean hasDocuments,
+                        com.changlu.planner.agent.core.tool.ToolRegistry tools,
+                        com.changlu.planner.agent.core.registry.SubagentRegistry subagents,
+                        com.changlu.planner.agent.core.contract.AgentLoopState state,
+                        JsonObject arguments) throws Exception {
+    if (travelRevisionIntent(request, state, arguments, subagents)) {
+      return Decision.execute("subagent", "travel", "当前旅行方案的局部修改");
+    }
     JsonArray messages = new JsonArray();
     messages.add(ModelClient.message("system", """
         你是长路计划的主 Agent，在一个循环中持续调度执行器，直到用户请求被完整满足。
@@ -88,7 +100,7 @@ public final class AgentRouter {
       return avoidRepeatedCompletedExecutor(
           Decision.execute(type, name, string(result, "reason", "")), state);
     } catch (Exception error) {
-      return avoidRepeatedCompletedExecutor(fallback(request, hasDocuments, subagents, state, error), state);
+      return avoidRepeatedCompletedExecutor(fallback(request, hasDocuments, tools, subagents, state, arguments, error), state);
     }
   }
 
@@ -107,11 +119,16 @@ public final class AgentRouter {
   }
 
   private Decision fallback(String request, boolean hasDocuments,
-                            com.changlu.planner.agent.core.registry.SubagentRegistry subagents,
-                            com.changlu.planner.agent.core.contract.AgentLoopState state,
-                            Exception error) {
+                             com.changlu.planner.agent.core.tool.ToolRegistry tools,
+                             com.changlu.planner.agent.core.registry.SubagentRegistry subagents,
+                             com.changlu.planner.agent.core.contract.AgentLoopState state,
+                             JsonObject arguments,
+                             Exception error) {
     String normalized = request.replaceAll("\\s", "");
-    if (hasDocuments && planningIntent(normalized)) {
+    if (travelRevisionIntent(request, state, arguments, subagents)) {
+      return Decision.execute("subagent", "travel", "模型路由失败，按旅行方案修改上下文回退");
+    }
+    if (hasDocuments && planningIntent(normalized) && tools.contains("planning.assistant")) {
       return Decision.execute("tool", "planning.assistant", "请求基于附件创建或调整计划数据");
     }
     if (hasDocuments) {
@@ -155,7 +172,33 @@ public final class AgentRouter {
       return Decision.complete("已完成前面步骤，如需继续请再告诉我。",
           "模型路由失败，且已有已完成步骤，避免循环重复执行");
     }
-    return Decision.execute("tool", "planning.assistant", "模型路由失败，回退核心规划能力：" + error.getMessage());
+    if (tools.contains("planning.assistant")) {
+      return Decision.execute("tool", "planning.assistant", "模型路由失败，回退核心规划能力：" + error.getMessage());
+    }
+    return Decision.complete("暂时无法识别这条请求，请补充具体目标后重试。",
+        "模型路由失败，且核心规划工具未注册");
+  }
+
+  private boolean travelRevisionIntent(String request,
+                                       com.changlu.planner.agent.core.contract.AgentLoopState state,
+                                       JsonObject arguments,
+                                       com.changlu.planner.agent.core.registry.SubagentRegistry subagents) {
+    if (!subagents.contains("travel") || request == null) return false;
+    String normalized = request.replaceAll("\\s", "");
+    boolean dayReference = normalized.matches(".*第[一二三四五六七八九十两0-9]+天.*")
+        || normalized.matches(".*20\\d{2}-\\d{2}-\\d{2}.*");
+    boolean change = normalized.contains("修改") || normalized.contains("改成") || normalized.contains("调整")
+        || normalized.contains("替换") || normalized.contains("换成") || normalized.contains("改为");
+    if (!dayReference || !change) return false;
+    boolean suppliedTravelPlan = arguments != null && arguments.has("previousTravelData")
+        && arguments.get("previousTravelData").isJsonObject();
+    boolean stateHasTravelPlan = state != null && state.taskData.has("days") && state.taskData.has("request");
+    if (suppliedTravelPlan || stateHasTravelPlan) return true;
+    return normalized.contains("旅行") || normalized.contains("旅游") || normalized.contains("行程")
+        || normalized.contains("景点") || normalized.contains("海底世界") || normalized.contains("爬山")
+        || normalized.contains("海边") || normalized.contains("海滨") || normalized.contains("沙滩")
+        || normalized.contains("酒店") || normalized.contains("民宿") || normalized.contains("门票")
+        || normalized.contains("登山") || normalized.contains("海洋馆");
   }
 
   private boolean planningIntent(String request) {

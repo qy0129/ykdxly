@@ -48,7 +48,7 @@ public final class ModelClient {
   public String completeText(String purpose, JsonArray messages, double temperature, int maxTokens,
                              int timeoutSeconds, int maxAttempts) throws Exception {
     return withRetries(purpose, maxAttempts, timeoutSeconds,
-        attempt -> requestRaw(purpose, messages, temperature, maxTokens, timeoutSeconds, attempt).text());
+        attempt -> requestRaw(purpose, messages, temperature, maxTokens, timeoutSeconds, attempt, false).text());
   }
 
   /** 统一超时与有限重试：把每次尝试封装成一个可抛异常的 Attempt，失败时按 retryable 判定重试。 */
@@ -71,12 +71,17 @@ public final class ModelClient {
 
   /** 发起一次模型请求并返回原始输出文本，供 JSON 或纯文本调用方各自解析。 */
   private RawReply requestRaw(String purpose, JsonArray messages, double temperature, int maxTokens,
-                              int timeoutSeconds, int attempt) throws Exception {
+                               int timeoutSeconds, int attempt, boolean jsonMode) throws Exception {
     JsonObject body = new JsonObject();
     body.addProperty("model", model);
     body.addProperty("temperature", temperature);
     body.addProperty("max_tokens", maxTokens);
     body.addProperty("enable_thinking", false);
+    if (jsonMode) {
+      JsonObject responseFormat = new JsonObject();
+      responseFormat.addProperty("type", "json_object");
+      body.add("response_format", responseFormat);
+    }
     body.add("messages", messages);
     HttpRequest request = HttpRequest.newBuilder(URI.create(apiUrl))
         .timeout(Duration.ofSeconds(timeoutSeconds))
@@ -89,21 +94,26 @@ public final class ModelClient {
     long durationMs = (System.nanoTime() - startedAt) / 1_000_000;
     LOG.debug("[模型调用] 用途={} 状态={} 耗时={}毫秒", purpose, response.statusCode(), durationMs);
     if (response.statusCode() / 100 != 2) {
-      throw new ModelHttpException(response.statusCode(), "AI 服务返回 " + response.statusCode());
+      String detail = safeProviderErrorDetail(response.body());
+      LOG.warn("[模型 HTTP 错误] 用途={} 状态={} 详情={}", purpose, response.statusCode(), detail);
+      throw new ModelHttpException(response.statusCode(),
+          "AI 服务返回 " + response.statusCode() + "：" + detail);
     }
-    JsonObject choice = JsonParser.parseString(response.body()).getAsJsonObject()
-        .getAsJsonArray("choices").get(0).getAsJsonObject();
+    JsonObject root = JsonParser.parseString(response.body()).getAsJsonObject();
+    JsonObject choice = root.getAsJsonArray("choices").get(0).getAsJsonObject();
     JsonObject message = choice.getAsJsonObject("message");
     String content = messageContent(message.get("content"));
     String reasoning = messageContent(message.get("reasoning_content"));
     if (reasoning.isBlank()) reasoning = messageContent(choice.get("reasoning_content"));
     if (reasoning.isBlank()) reasoning = messageContent(choice.get("text"));
-    return new RawReply(content, reasoning);
+    return new RawReply(content, reasoning, text(choice, "finish_reason"),
+        integer(root.has("usage") && root.get("usage").isJsonObject() ? root.getAsJsonObject("usage") : null,
+            "completion_tokens"));
   }
 
   private JsonObject requestJson(String purpose, JsonArray messages, double temperature, int maxTokens,
                                  int timeoutSeconds, int attempt) throws Exception {
-    RawReply raw = requestRaw(purpose, messages, temperature, maxTokens, timeoutSeconds, attempt);
+    RawReply raw = requestRaw(purpose, messages, temperature, maxTokens, timeoutSeconds, attempt, true);
     String content = raw.content();
     String reasoning = raw.reasoning();
     JsonObject result = parseJsonObject(content);
@@ -111,8 +121,9 @@ public final class ModelClient {
     if (result == null && !reasoning.isBlank()) result = parseJsonObject(reasoning);
     if (result != null) return result;
     if (content.isBlank()) content = reasoning;
-    LOG.warn("[模型 JSON 解析失败] 用途={} 内容预览={}", purpose, preview(content));
-    throw new InvalidJsonException(content);
+    LOG.warn("[模型 JSON 解析失败] 用途={} finishReason={} completionTokens={} contentChars={} 内容预览={}",
+        purpose, raw.finishReason(), raw.completionTokens(), content.length(), preview(content));
+    throw new InvalidJsonException(content, raw.finishReason());
   }
 
   private JsonObject parseJsonObject(String content) {
@@ -228,6 +239,64 @@ public final class ModelClient {
     return normalized.length() <= 240 ? normalized : normalized.substring(0, 240) + "...";
   }
 
+  private String text(JsonObject object, String name) {
+    if (object == null || !object.has(name) || object.get(name).isJsonNull()
+        || !object.get(name).isJsonPrimitive()) return "";
+    return object.get(name).getAsString();
+  }
+
+  private int integer(JsonObject object, String name) {
+    try {
+      return object != null && object.has(name) ? object.get(name).getAsInt() : -1;
+    } catch (RuntimeException ignored) {
+      return -1;
+    }
+  }
+
+  static String safeProviderErrorDetail(String body) {
+    if (body == null || body.isBlank()) return "empty_error_response";
+    try {
+      JsonElement parsed = JsonParser.parseString(body);
+      if (!parsed.isJsonObject()) return "non_object_json_error_response";
+      JsonObject root = parsed.getAsJsonObject();
+      JsonObject error = root.has("error") && root.get("error").isJsonObject()
+          ? root.getAsJsonObject("error") : root;
+      StringBuilder detail = new StringBuilder();
+      appendErrorField(detail, "code", firstText(error, root, "code"));
+      appendErrorField(detail, "type", firstText(error, root, "type"));
+      appendErrorField(detail, "param", firstText(error, root, "param"));
+      appendErrorField(detail, "message", firstText(error, root, "message"));
+      if (detail.isEmpty()) return "json_error_without_code_or_message";
+      return redactErrorDetail(detail.toString());
+    } catch (RuntimeException ignored) {
+      return "non_json_error_response";
+    }
+  }
+
+  private static String firstText(JsonObject primary, JsonObject fallback, String name) {
+    String value = textField(primary, name);
+    return value.isBlank() ? textField(fallback, name) : value;
+  }
+
+  private static String textField(JsonObject object, String name) {
+    if (object == null || !object.has(name) || object.get(name).isJsonNull()
+        || !object.get(name).isJsonPrimitive()) return "";
+    return object.get(name).getAsString().trim();
+  }
+
+  private static void appendErrorField(StringBuilder detail, String name, String value) {
+    if (value.isBlank()) return;
+    if (!detail.isEmpty()) detail.append(", ");
+    detail.append(name).append('=').append(value);
+  }
+
+  private static String redactErrorDetail(String value) {
+    String safe = value.replaceAll("(?i)bearer\\s+[A-Za-z0-9._~+\\-/=]+", "Bearer [REDACTED]")
+        .replaceAll("(?i)((?:api[_ -]?key|token|secret|authorization)\\s*[:=]\\s*)[^\\s,;]+", "$1[REDACTED]")
+        .replaceAll("\\s+", " ").trim();
+    return safe.length() <= 400 ? safe : safe.substring(0, 400) + "...";
+  }
+
   /** 单次模型尝试；允许抛出受检异常以便统一在 withRetries 里处理。 */
   @FunctionalInterface
   private interface Attempt<T> {
@@ -235,7 +304,7 @@ public final class ModelClient {
   }
 
   /** 一次模型请求的原始输出：content 为正文，reasoning 为思考文本。 */
-  private record RawReply(String content, String reasoning) {
+  private record RawReply(String content, String reasoning, String finishReason, int completionTokens) {
     /** 纯文本场景：content 优先，为空时退回 reasoning。 */
     String text() { return content.isBlank() ? reasoning : content; }
   }
@@ -243,13 +312,20 @@ public final class ModelClient {
   /** 保留模型原文，供复盘在结构化输出失败时展示真实 AI 总结。 */
   public static final class InvalidJsonException extends IllegalStateException {
     private final String content;
+    private final String finishReason;
 
     public InvalidJsonException(String content) {
+      this(content, "");
+    }
+
+    public InvalidJsonException(String content, String finishReason) {
       super("AI 未返回有效 JSON，请重试或检查模型输出格式");
       this.content = content == null ? "" : content;
+      this.finishReason = finishReason == null ? "" : finishReason;
     }
 
     public String content() { return content; }
+    public String finishReason() { return finishReason; }
   }
 
   private boolean retryable(Exception error) {

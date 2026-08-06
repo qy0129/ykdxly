@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { Brain, Check, CheckCircle2, ChevronDown, ChevronRight, Clock3, FileText, LoaderCircle, MessageSquare, Paperclip, Pencil, Plus, RefreshCw, Save, Send, Trash2, Workflow, X, XCircle } from 'lucide-react'
+import { Brain, Check, CheckCircle2, ChevronDown, ChevronRight, CircleAlert, Clock3, CloudRain, ExternalLink, FileText, LoaderCircle, MapPin, MessageSquare, Paperclip, Pencil, Plus, RefreshCw, Save, Send, ShieldCheck, Trash2, Umbrella, WalletCards, Workflow, X, XCircle } from 'lucide-react'
 import {
   plannerApi,
   type AgentDocument,
@@ -11,6 +11,8 @@ import {
   type AiMemory,
   type AiSession,
 } from '../../services/plannerApi'
+import type { TravelActivity, TravelPlanData } from '../../types/planner'
+import { collectDeviceLocation, isTravelRequest, type DeviceLocationPermission } from './deviceLocation'
 
 type ChatMessage = { role: 'user' | 'assistant'; content: string; imageUrls?: string[] }
 
@@ -162,11 +164,11 @@ function draftPlanPreview(action: AiDraft['actions'][number]) {
     <div className="ai-draft-plan-preview">
       {stages.map((stage, index) => {
         if (!stage || typeof stage !== 'object') return null
-        const item = stage as { title?: unknown; dueDate?: unknown; tasks?: unknown[] }
+        const item = stage as { title?: unknown; dueDate?: unknown; stageType?: unknown; tasks?: unknown[] }
         const tasks = Array.isArray(item.tasks) ? item.tasks : []
         return (
           <div className="ai-draft-stage" key={`${String(item.dueDate ?? '')}-${index}`}>
-            <strong>第 {index + 1} 天 · {String(item.title ?? '旅行日程')}</strong>
+            <strong>{item.stageType === 'preparation' ? '出发前准备' : `第 ${index + 1} 天 · ${String(item.title ?? '旅行日程')}`}</strong>
             {item.dueDate != null && <small>{String(item.dueDate)}</small>}
             {tasks.map((task, taskIndex) => {
               if (!task || typeof task !== 'object') return null
@@ -191,33 +193,163 @@ function draftPlanPreview(action: AiDraft['actions'][number]) {
   )
 }
 
-function travelPlanPreview(data: Record<string, unknown>) {
-  const request = data.request && typeof data.request === 'object' ? data.request as Record<string, unknown> : {}
-  const days = Array.isArray(data.days) ? data.days : []
+const budgetCategoryLabels: Record<string, string> = {
+  accommodation: '住宿', transport: '往返交通', localTransit: '市内交通',
+  attractions: '景点门票', food: '餐饮', contingency: '机动预算',
+}
+
+const confidenceLabels: Record<string, string> = { high: '高可信', medium: '中等可信', low: '低可信' }
+
+function formatFetchedAt(value?: string) {
+  if (!value) return '抓取时间未知'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+function safeExternalUrl(value?: string) {
+  return value && /^https?:\/\//i.test(value) ? value : undefined
+}
+
+function activityName(activity: TravelActivity) {
+  return activity.attractionName || activity.title || activity.location || '自由活动'
+}
+
+function travelEditArguments(plan?: TravelPlanData): Record<string, unknown> | undefined {
+  const request = plan?.request
+  if (!request || typeof request !== 'object') return undefined
+  const argumentsValue = { ...request }
+  argumentsValue.previousTravelData = plan
+  return typeof argumentsValue.destination === 'string' && argumentsValue.destination.trim()
+    ? argumentsValue : undefined
+}
+
+const travelRiskLabels: Record<string, string> = {
+  MODEL_UNAVAILABLE: '旅行模型响应超时或暂时不可用，当前展示的是规则降级方案。',
+  DAILY_ACTIVITY_LIMIT_EXCEEDED: '当天活动总时长超过当前旅行节奏上限，建议减少活动或增加休息时间。',
+  WEATHER_UNAVAILABLE: '天气服务未配置或暂时不可用，将在服务恢复后或出发前刷新。',
+  QWEATHER_API_KEY_NOT_CONFIGURED: '天气服务尚未配置，将在配置完成后或出发前刷新。',
+  WEATHER_FORECAST_COVERAGE_INCOMPLETE: '部分日期超出当前天气预报范围，出发前会自动刷新。',
+  LOCATION_UNAVAILABLE: '当前位置暂时无法解析，请补充出发城市后核实往返交通。',
+  ATTRACTIONS_UNAVAILABLE: '景点实时资料暂时不可用，请在出发前核实开放时间和预约要求。',
+  RESEARCH_UNAVAILABLE: '攻略资料搜索暂时不可用，当前方案仅使用已有信息生成。',
+  ROUTING_UNAVAILABLE: '路线服务暂时不可用，景点间交通时间需要出发前核实。',
+  OPENING_HOURS_UNVERIFIED: '景点开放时间暂无可验证的数据源，请出发前通过官方渠道核实。',
+  UNVERIFIED_ATTRACTION: '部分景点资料尚未通过外部数据源核实。',
+  RAIN_OUTDOOR_CONFLICT: '部分户外活动可能受降雨影响，请准备室内备选方案。',
+  INTERCITY_TRANSPORT_VERIFICATION_REQUIRED: '城际交通班次需要在出发前通过官方渠道核实。',
+}
+
+function summarizeTravelRisks(risks: NonNullable<TravelPlanData['risks']>) {
+  const groups = new Map<string, { code: string; message: string; count: number; dates: Set<string> }>()
+  for (const risk of risks) {
+    const rawMessage = typeof risk === 'string' ? risk : risk.message || risk.code || '信息需要出发前核实'
+    const code = typeof risk === 'string' && /^[A-Z0-9_]+$/.test(risk) ? risk : typeof risk === 'string' ? '' : risk.code || ''
+    const message = typeof risk === 'string'
+      ? travelRiskLabels[code] || travelRiskLabels[rawMessage] || rawMessage
+      : risk.message && !/^[A-Z0-9_]+$/.test(risk.message) ? risk.message : travelRiskLabels[code] || travelRiskLabels[rawMessage] || rawMessage
+    const key = code || message
+    const current = groups.get(key) ?? { code, message, count: 0, dates: new Set<string>() }
+    current.count += 1
+    if (typeof risk !== 'string' && risk.date) current.dates.add(risk.date)
+    groups.set(key, current)
+  }
+  return Array.from(groups.values()).map((risk) => {
+    if (risk.code === 'DAILY_ACTIVITY_LIMIT_EXCEEDED' && risk.count > 1) {
+      return { ...risk, message: `有 ${risk.count} 天的活动总时长超过当前旅行节奏上限，建议减少活动或增加休息时间。` }
+    }
+    return risk
+  })
+}
+
+function travelPlanPreview(data: TravelPlanData) {
+  const request = data.request ?? {}
+  const days = data.days ?? []
+  const weatherByDate = new Map((data.weather ?? []).map((item) => [item.date, item]))
+  const budget = data.budgetEstimate
+  const sources = data.sources ?? []
+  const risks = summarizeTravelRisks(data.risks ?? [])
+  const revisionDiff = data.revisionDiff ?? []
   return (
     <div className="ai-travel-plan-preview">
       <div className="ai-travel-plan-meta">
-        <strong>{String(request.destination ?? '旅行目的地')}旅行计划</strong>
-        <span>{String(request.startDate ?? '')}{request.endDate ? ` 至 ${String(request.endDate)}` : ''}</span>
+        <div><MapPin size={15} /><strong>{request.destination ?? '旅行目的地'}旅行计划</strong></div>
+        <span>{request.startDate ?? ''}{request.endDate ? ` 至 ${request.endDate}` : ''}</span>
       </div>
+      {revisionDiff.length > 0 && (
+        <section className="ai-travel-summary-block ai-travel-revision-diff">
+          <div className="ai-travel-section-title"><strong>本次修改</strong><span>{data.revisionSummary || '局部更新'}</span></div>
+          <ul className="ai-travel-risks">{revisionDiff.map((change, index) => {
+            const before = change.before ? activityName(change.before) : '未设置'
+            const after = change.after ? activityName(change.after) : '未设置'
+            const beforeTime = change.before?.startTime || ''
+            const afterTime = change.after?.startTime || ''
+            const beforeDuration = change.before?.durationMinutes
+            const afterDuration = change.after?.durationMinutes
+            const details = [
+              beforeTime !== afterTime && `${beforeTime || '未设置'} -> ${afterTime || '未设置'}`,
+              beforeDuration !== afterDuration && `${beforeDuration ?? '未设置'} -> ${afterDuration ?? '未设置'} 分钟`,
+            ].filter(Boolean).join(' · ')
+            return <li key={`${change.date ?? ''}-${change.activity ?? index}`}><strong>{`第 ${change.day ?? ''} 天`}</strong>{` ${before} -> ${after}`}{details && <small>{details}</small>}</li>
+          })}</ul>
+        </section>
+      )}
       {days.map((day, index) => {
-        if (!day || typeof day !== 'object') return null
-        const item = day as { title?: unknown; date?: unknown; activities?: unknown[] }
-        const activities = Array.isArray(item.activities) ? item.activities : []
+        const weather = weatherByDate.get(day.date)
+        const activities = day.activities ?? []
         return (
-          <div className="ai-travel-day" key={`${String(item.date ?? '')}-${index}`}>
-            <strong>第 {index + 1} 天 · {String(item.title ?? '旅行日程')}</strong>
-            <small>{String(item.date ?? '')}</small>
+          <section className="ai-travel-day" key={`${day.date ?? ''}-${index}`}>
+            <div className="ai-travel-day-heading">
+              <div><strong>第 {index + 1} 天 · {day.title ?? '旅行日程'}</strong><small>{day.date ?? ''}</small></div>
+              {weather && <span className="ai-travel-weather"><CloudRain size={13} />{weather.condition || '天气待更新'} {weather.tempLow != null && weather.tempHigh != null ? `${weather.tempLow}~${weather.tempHigh}℃` : ''}<em>{confidenceLabels[weather.forecastConfidence ?? ''] ?? '待核实'}</em></span>}
+            </div>
             <div className="ai-travel-activities">
               {activities.map((activity, activityIndex) => {
-                if (!activity || typeof activity !== 'object') return null
-                const value = activity as { startTime?: unknown; title?: unknown; location?: unknown; notes?: unknown }
-                return <p key={activityIndex}><b>{String(value.startTime || '安排')}</b>{String(value.title ?? '活动')}<em>{value.location ? ` · ${String(value.location)}` : ''}</em></p>
+                const transitMinutes = activity.transitFromPrevious?.durationMinutes
+                  ?? (activity.transitFromPrevious?.durationSeconds != null ? Math.round(activity.transitFromPrevious.durationSeconds / 60) : undefined)
+                const backup = activity.backupActivity
+                return (
+                  <div className="ai-travel-activity" key={`${activity.attractionId ?? activityName(activity)}-${activityIndex}`}>
+                    <time>{activity.startTime || '待定'}</time>
+                    <i aria-hidden="true" />
+                    <div>
+                      <strong>{activityName(activity)}</strong>
+                      <span>{activity.durationMinutes ? `${activity.durationMinutes} 分钟` : '时长待核实'}{transitMinutes != null ? ` · 路上 ${transitMinutes} 分钟` : ''}</span>
+                      {activity.requiresReservation === true && <em><ShieldCheck size={12} />需要预约</em>}
+                      {backup && (backup.title || backup.attractionName) && <small><Umbrella size={12} />雨天备选：{backup.attractionName || backup.title}</small>}
+                    </div>
+                  </div>
+                )
               })}
             </div>
-          </div>
+          </section>
         )
       })}
+      {budget && (
+        <section className="ai-travel-summary-block">
+          <div className="ai-travel-section-title"><WalletCards size={15} /><strong>预算估算</strong><span>{confidenceLabels[budget.confidence ?? ''] ?? '待核实'}</span></div>
+          <div className="ai-travel-budget-total">
+            <strong>{budget.minimum != null && budget.maximum != null ? `¥${budget.minimum.toLocaleString()} - ¥${budget.maximum.toLocaleString()}` : `¥${(budget.amount ?? 0).toLocaleString()}`}</strong>
+            <small>{budget.estimated === false ? '已核实金额' : '估算区间'}</small>
+          </div>
+          <div className="ai-travel-budget-grid">{(budget.breakdown ?? []).map((item, index) => <span key={`${item.category}-${index}`}><b>{budgetCategoryLabels[item.category ?? ''] ?? item.category ?? '其他'}</b><em>{item.minimum != null && item.maximum != null ? `¥${item.minimum.toLocaleString()} - ¥${item.maximum.toLocaleString()}` : `¥${(item.amount ?? 0).toLocaleString()}`}</em></span>)}</div>
+        </section>
+      )}
+      {risks.length > 0 && (
+        <section className="ai-travel-summary-block">
+          <div className="ai-travel-section-title"><CircleAlert size={15} /><strong>待核实风险</strong><span>{risks.length} 类</span></div>
+          <ul className="ai-travel-risks">{risks.map((risk) => <li key={risk.code || risk.message}>{risk.message}</li>)}</ul>
+        </section>
+      )}
+      {sources.length > 0 && (
+        <section className="ai-travel-summary-block">
+          <div className="ai-travel-section-title"><ExternalLink size={15} /><strong>数据来源</strong><span>{sources.length} 条</span></div>
+          <div className="ai-travel-sources">{sources.map((source, index) => {
+            const url = safeExternalUrl(source.sourceUrl || source.url)
+            const label = source.title || source.provider || '公开资料'
+            return <div key={`${url ?? label}-${index}`}><span>{url ? <a href={url} target="_blank" rel="noreferrer">{label}<ExternalLink size={11} /></a> : label}<small>{source.provider ?? '公开来源'} · {formatFetchedAt(source.fetchedAt)} · {confidenceLabels[source.confidence ?? source.sourceQuality ?? ''] ?? '待核实'}</small></span></div>
+          })}</div>
+        </section>
+      )}
     </div>
   )
 }
@@ -227,7 +359,9 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
   const [conversations, setConversations] = useState<AiConversation[]>([])
   const [selectedConversationIds, setSelectedConversationIds] = useState<string[]>([])
   const [draft, setDraft] = useState<AiDraft>()
-  const [planReview, setPlanReview] = useState<Record<string, unknown>>()
+  const [planReview, setPlanReview] = useState<TravelPlanData>()
+  const [lastTravelPlan, setLastTravelPlan] = useState<TravelPlanData>()
+  const [travelEditContext, setTravelEditContext] = useState<Record<string, unknown>>()
   const [inputRequirements, setInputRequirements] = useState<AgentInputRequirement[]>([])
   const [informationFormOpen, setInformationFormOpen] = useState(false)
   const [informationForm, setInformationForm] = useState<TravelInfoForm>(emptyTravelInfoForm)
@@ -240,6 +374,7 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
   const [waitSeconds, setWaitSeconds] = useState(0)
   const [pollFailureCount, setPollFailureCount] = useState(0)
   const [busy, setBusy] = useState(false)
+  const [locationState, setLocationState] = useState<DeviceLocationPermission | 'idle' | 'locating'>('idle')
   const [loadingConversation, setLoadingConversation] = useState(false)
   const [error, setError] = useState('')
   const [lastChangeSet, setLastChangeSet] = useState<string>()
@@ -252,6 +387,7 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
   const [editingMemoryId, setEditingMemoryId] = useState<string>()
   const [editingMemoryText, setEditingMemoryText] = useState('')
   const fileInput = useRef<HTMLInputElement>(null)
+  const composerInput = useRef<HTMLTextAreaElement>(null)
   const messageList = useRef<HTMLDivElement>(null)
   const activeConversationIdRef = useRef<string | undefined>(undefined)
 
@@ -305,7 +441,9 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
       ? session.messages.map(({ role, content, imageUrls }) => ({ role, content, imageUrls }))
       : welcomeMessages())
     setDraft(session.draft)
+    if (session.travelData) setLastTravelPlan(session.travelData)
     setPlanReview(session.planReview && session.travelData ? session.travelData : undefined)
+    setTravelEditContext(undefined)
     showInformationForm(session.inputRequirements, session.travelData)
     setLastChangeSet(undefined)
     setAttachments([])
@@ -340,7 +478,7 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
 
   useEffect(() => {
     messageList.current?.scrollTo({ top: messageList.current.scrollHeight, behavior: 'smooth' })
-  }, [messages, busy, draft])
+  }, [messages, busy, draft, planReview])
 
   const runningKey = conversations
     .filter((conversation) => conversation.runStatus === 'RUNNING' && conversation.runId)
@@ -356,16 +494,19 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
     if (!running.length) return
     let stopped = false
     let timer: number | undefined
+    let consecutiveFailures = 0
     const poll = async () => {
       try {
         const states = await Promise.all(running.map(async (conversation) => ({
           conversation,
           state: await plannerApi.loadAgentRun(conversation.runId),
         })))
+        consecutiveFailures = 0
         setPollFailureCount(0)
         const currentState = states.find(({ conversation }) => conversation.id === activeConversationIdRef.current)?.state
         if (currentState?.steps?.length) setRunSteps(currentState.steps)
           const currentTravelData = currentState?.travelData ?? currentState?.data
+          if (currentTravelData) setLastTravelPlan(currentTravelData)
           if (currentState?.planReview && currentTravelData) setPlanReview(currentTravelData)
           showInformationForm(currentState?.inputRequirements, currentTravelData)
         if (currentState?.status === 'RUNNING') setWaitSeconds((seconds) => seconds + 1)
@@ -385,6 +526,7 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
             applySession(detail)
             if (currentResult?.state.steps?.length) setRunSteps(currentResult.state.steps)
               const completedTravelData = currentResult?.state.travelData ?? currentResult?.state.data
+              if (completedTravelData) setLastTravelPlan(completedTravelData)
               if (currentResult?.state.planReview && completedTravelData) setPlanReview(completedTravelData)
               showInformationForm(currentResult?.state.inputRequirements, completedTravelData)
             if (currentResult?.state.status === 'FAILED') setError(currentResult.state.lastError || 'Agent 执行失败')
@@ -398,9 +540,12 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
         }
       } catch {
         // 短暂轮询失败时保持运行状态，下次继续查询；连续多次失败则给用户可见提示。
-        setPollFailureCount((count) => count + 1)
+        consecutiveFailures += 1
+        setPollFailureCount(consecutiveFailures)
       }
-      if (!stopped) timer = window.setTimeout(() => void poll(), 1000)
+      const retryDelay = consecutiveFailures === 0
+        ? 1000 : Math.min(30_000, 1000 * 2 ** Math.min(consecutiveFailures - 1, 5))
+      if (!stopped) timer = window.setTimeout(() => void poll(), retryDelay)
     }
     timer = window.setTimeout(() => void poll(), 500)
     return () => { stopped = true; if (timer) window.clearTimeout(timer) }
@@ -554,9 +699,18 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
       ? `${message}\n\n附件：${attachments.map((item) => item.fileName).join('、')}` : message
     setMessages((current) => [...current, { role: 'user', content: displayMessage }])
     setInput('')
-      setBusy(true)
+    setBusy(true)
     setError('')
     try {
+      let requestArguments = argumentsOverride ?? travelEditContext
+      if (!requestArguments?.deviceLocation && isTravelRequest(message, requestArguments)) {
+        setLocationState('locating')
+        const deviceLocation = await collectDeviceLocation()
+        setLocationState(deviceLocation.permission)
+        requestArguments = { ...requestArguments, deviceLocation }
+      } else {
+        setLocationState('idle')
+      }
       let activeConversationId = conversationId
       if (!activeConversationId) {
         const created = await plannerApi.createAiConversation()
@@ -568,8 +722,8 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
       const targetRunId = runId
       const targetRunStatus = runStatus
       const response = targetRunId && (targetRunStatus === 'WAITING_USER' || targetRunStatus === 'FAILED')
-        ? await plannerApi.resumeAgent(targetRunId, message, documentIds, argumentsOverride)
-        : await plannerApi.startAgent(message, activeConversationId, documentIds, argumentsOverride)
+        ? await plannerApi.resumeAgent(targetRunId, message, documentIds, requestArguments)
+        : await plannerApi.startAgent(message, activeConversationId, documentIds, requestArguments)
       setConversations((current) => current.map((conversation) => conversation.id === activeConversationId
         ? { ...conversation, runId: response.runId, runStatus: 'RUNNING' }
         : conversation))
@@ -580,6 +734,7 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
         setWaitSeconds(0)
         setPollFailureCount(0)
         setAttachments([])
+        setTravelEditContext(undefined)
       }
       await refreshConversations()
     } catch (cause) {
@@ -643,19 +798,23 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
     } finally { setBusy(false) }
   }
 
-  const cancel = async () => {
+  const editDraft = async () => {
     if (!draft || busy) return
+    const editablePlan = lastTravelPlan
+    const editableArguments = travelEditArguments(editablePlan)
     setBusy(true)
     setError('')
     try {
       await plannerApi.cancelAgentDraft(draft.id)
-      setMessages((current) => [...current, { role: 'assistant', content: '草案已取消，计划数据没有变化。' }])
+      setMessages((current) => [...current, { role: 'assistant', content: '写入草案已取消，原旅行方案已恢复。请在输入框中说明需要修改的日期、景点或节奏。' }])
       setRunStatus('CANCELLED')
       setDraft(undefined)
-      setPlanReview(undefined)
+      setPlanReview(editablePlan)
+      setTravelEditContext(editableArguments)
       await refreshConversations()
+      window.requestAnimationFrame(() => composerInput.current?.focus())
     } catch (cause) {
-      setError(cause instanceof Error ? '草案无法取消：' + cause.message : '草案无法取消。')
+      setError(cause instanceof Error ? '无法重新编辑：' + cause.message : '无法重新编辑当前草案。')
     } finally { setBusy(false) }
   }
 
@@ -751,39 +910,40 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
             </section>
           )}
           <div className="ai-chat-messages" ref={messageList} aria-live="polite">
-              {messages.map((message, index) => <article className={`ai-chat-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === 'assistant' ? 'AI' : '你'}</span><div className="ai-chat-message-body"><p>{message.content}</p>{message.imageUrls?.map((url) => <a className="ai-generated-image-link" href={url} target="_blank" rel="noreferrer" key={url}><img className="ai-generated-image" src={url} alt="AI 生成图片" loading="lazy" /></a>)}</div></article>)}
+            {messages.map((message, index) => <article className={`ai-chat-message ${message.role}`} key={`${message.role}-${index}`}><span>{message.role === 'assistant' ? 'AI' : '你'}</span><div className="ai-chat-message-body"><p>{message.content}</p>{message.imageUrls?.map((url) => <a className="ai-generated-image-link" href={url} target="_blank" rel="noreferrer" key={url}><img className="ai-generated-image" src={url} alt="AI 生成图片" loading="lazy" /></a>)}</div></article>)}
             {(currentConversationRunning || busy || loadingConversation) && <article className="ai-chat-message assistant loading"><span>AI</span><p><LoaderCircle className="spin" size={14} />{currentConversationRunning ? `后台处理中${pollFailureCount >= 4 ? '，连接后端暂时中断，正在自动重试' : waitSeconds >= 3 ? `，已等待 ${waitSeconds} 秒` : ''}${waitSeconds >= 190 ? '，超过预期时长仍未返回，可稍后刷新查看' : ''}，可切换其他对话` : busy ? '正在处理…' : '正在加载'}</p></article>}
-          </div>
-          {planReview && !draft && (
-            <section className="ai-travel-plan-review">
-              <div className="ai-change-heading"><div><strong>旅行计划（待确认）</strong><span>先确认行程，再生成写入草案</span></div><span>可以直接在下方输入修改意见</span></div>
-              {travelPlanPreview(planReview)}
-              <div className="ai-draft-actions">
-                <button className="primary-button" type="button" disabled={busy || currentConversationRunning} onClick={() => void approveTravelPlan()}><Check size={16} />确认行程，生成草案</button>
-              </div>
-            </section>
-          )}
-          {draft && (
-            <section className="ai-change-draft">
-              <div className="ai-change-heading"><div><strong>待确认草案</strong><span>编号：{draft.code}</span></div><span>确认后才会写入计划和日程</span></div>
-              {draft.actions.map((action, index) => <article key={`${action.type}-${index}`}>
-                <span>{draftActionLabels[action.type] ?? action.type}</span>
-                <div className="ai-draft-action-body">
-                  <strong>{action.summary || draftActionLabels[action.type] || action.type}</strong>
-                  <div className="ai-draft-details">{draftActionDetails(action).map((detail) => <small key={detail}>{detail}</small>)}</div>
-                  {draftPlanPreview(action)}
+            {planReview && !draft && (
+              <section className="ai-travel-plan-review" role="region" aria-label="待确认旅行计划">
+                <div className="ai-change-heading"><div><strong>旅行计划（待确认）</strong><span>先确认行程，再生成写入草案</span></div><span>可以直接在下方输入修改意见</span></div>
+                {travelPlanPreview(planReview)}
+                <div className="ai-draft-actions">
+                  <button className="primary-button" type="button" disabled={busy || currentConversationRunning} onClick={() => void approveTravelPlan()}><Check size={16} />确认行程，生成草案</button>
                 </div>
-              </article>)}
-              <div className="ai-draft-actions">
-                <button className="primary-button" type="button" disabled={busy} onClick={() => void confirm()}><Check size={16} />确认执行</button>
-                <button className="secondary-button" type="button" disabled={busy} onClick={() => void cancel()}><X size={16} />取消草案并修改行程</button>
-              </div>
-            </section>
-          )}
+              </section>
+            )}
+            {draft && (
+              <section className="ai-change-draft" role="region" aria-label="待再次确认的写入草案">
+                <div className="ai-draft-ready"><CheckCircle2 size={18} /><div><strong>写入草案已生成</strong><span>请再次确认后写入计划和日程</span></div><small>编号：{draft.code}</small></div>
+                {draft.actions.map((action, index) => <article key={`${action.type}-${index}`}>
+                  <span>{draftActionLabels[action.type] ?? action.type}</span>
+                  <div className="ai-draft-action-body">
+                    <strong>{action.summary || draftActionLabels[action.type] || action.type}</strong>
+                    <div className="ai-draft-details">{draftActionDetails(action).map((detail) => <small key={detail}>{detail}</small>)}</div>
+                    {draftPlanPreview(action)}
+                  </div>
+                </article>)}
+                <div className="ai-draft-actions">
+                  <button className="primary-button" type="button" disabled={busy} onClick={() => void confirm()}><Check size={16} />再次确认并写入</button>
+                  <button className="secondary-button" type="button" disabled={busy} onClick={() => void editDraft()}><Pencil size={16} />重新编辑</button>
+                </div>
+              </section>
+            )}
+          </div>
           <div className="ai-composer-zone">
+            {locationState !== 'idle' && <div className={`agent-location-status ${locationState}`} role="status" aria-live="polite"><MapPin size={14} />{locationState === 'locating' ? <><LoaderCircle className="spin" size={13} />正在获取当前位置，最多等待 5 秒</> : locationState === 'granted' ? '已使用本次授权位置规划出发路线' : locationState === 'denied' ? '未获得定位授权，将继续规划并询问出发城市' : '当前位置不可用，将继续规划并询问出发城市'}</div>}
             {attachments.length > 0 && <div className="agent-attachments">{attachments.map((item) => <span className="agent-attachment" key={item.id}><FileText size={14} /><span><strong>{item.fileName}</strong><small>{item.vectorIndexed ? '已索引' : '已解析'}</small></span><button type="button" title="移除附件" aria-label={`移除 ${item.fileName}`} onClick={() => setAttachments((current) => current.filter((file) => file.id !== item.id))}><X size={13} /></button></span>)}</div>}
             <div className="ai-chat-composer">
-              <textarea value={input} disabled={Boolean(draft) || currentConversationRunning} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() } }} placeholder={draft ? '请先取消草案，再修改旅行行程' : planReview ? '输入修改意见，或点击“确认行程，生成草案”' : currentConversationRunning ? '当前对话正在后台处理，可切换到其他对话' : '输入消息'} rows={1} />
+              <textarea ref={composerInput} value={input} disabled={Boolean(draft) || currentConversationRunning} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() } }} placeholder={draft ? '请先选择“重新编辑”，或再次确认写入' : planReview ? '输入修改意见，或点击“确认行程，生成草案”' : currentConversationRunning ? '当前对话正在后台处理，可切换到其他对话' : '输入消息'} rows={1} />
               <div className="ai-composer-actions">
                 <input ref={fileInput} type="file" multiple hidden accept=".pdf,.doc,.docx,.txt,.md,.csv,.xls,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg" onChange={(event) => void selectFiles(event.target.files)} />
                 <button className="icon-button" type="button" disabled={busy || uploading || Boolean(draft) || currentConversationRunning} title="添加附件" aria-label="添加附件" onClick={() => fileInput.current?.click()}>{uploading ? <LoaderCircle className="spin" size={17} /> : <Paperclip size={17} />}</button>

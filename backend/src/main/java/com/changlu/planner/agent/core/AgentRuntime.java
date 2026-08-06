@@ -178,7 +178,8 @@ public final class AgentRuntime implements AutoCloseable {
     input.addProperty("message", run.goal());
     input.addProperty("conversationId", run.conversationId().toString());
     JsonObject arguments = state.taskData.getAsJsonObject("request").deepCopy();
-    if (!"batch".equals(string(arguments, "mode", "")) && arguments.get("count").getAsInt() <= 1) {
+    // A failed command can belong to any subagent. Only image requests have count/mode.
+    if (!"batch".equals(string(arguments, "mode", "")) && integer(arguments, "count", 1) <= 1) {
       return null;
     }
     arguments.addProperty("confirmed", true);
@@ -255,36 +256,49 @@ public final class AgentRuntime implements AutoCloseable {
   }
 
   private void addRunState(JsonObject result, UUID conversationId, Database.Context identity) throws SQLException {
+    UUID runId = null;
+    String status = null;
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
-        "SELECT id,status,result FROM agent_runs WHERE workspace_id=? AND user_id=? AND conversation_id=? "
-            + "ORDER BY updated_at DESC LIMIT 1")) {
+        "SELECT id,status FROM agent_runs WHERE workspace_id=? AND user_id=? AND conversation_id=? "
+            + "ORDER BY updated_at DESC,id DESC LIMIT 1")) {
       p.setBytes(1, Database.uuidBytes(identity.workspaceId()));
       p.setBytes(2, Database.uuidBytes(identity.userId()));
       p.setBytes(3, Database.uuidBytes(conversationId));
       try (ResultSet rs = p.executeQuery()) {
         if (rs.next()) {
-          UUID runId = Database.bytesUuid(rs.getBytes("id"));
-          String status = rs.getString("status");
-          // 兼容旧版本：草案已被确认/取消后，旧运行记录可能仍停在待确认。
-          if ("WAITING_CONFIRMATION".equals(status) && !hasPendingDraft(runId, identity)) {
-            markCompletedIfStale(runId, identity);
-            status = "COMPLETED";
-          }
-          result.addProperty("runId", runId.toString());
-          result.addProperty("runStatus", status);
-          if (rs.getString("result") != null) {
-            JsonObject runResult = JsonParser.parseString(rs.getString("result")).getAsJsonObject();
-            if (runResult.has("planReview")) result.add("planReview", runResult.get("planReview").deepCopy());
-            if (runResult.has("data") && runResult.get("data").isJsonObject()) {
-              result.add("travelData", runResult.get("data").deepCopy());
-            }
-            JsonObject runData = runResult.has("data") && runResult.get("data").isJsonObject()
-                ? runResult.getAsJsonObject("data") : runResult;
-            if (runData.has("inputRequirements")) result.add("inputRequirements", runData.get("inputRequirements").deepCopy());
-            if (runData.has("formTitle")) result.add("formTitle", runData.get("formTitle").deepCopy());
-          }
+          runId = Database.bytesUuid(rs.getBytes("id"));
+          status = rs.getString("status");
         }
       }
+    }
+    if (runId == null) return;
+    // 兼容旧版本：草案已被确认/取消后，旧运行记录可能仍停在待确认。
+    if ("WAITING_CONFIRMATION".equals(status) && !hasPendingDraft(runId, identity)) {
+      markCompletedIfStale(runId, identity);
+      status = "COMPLETED";
+    }
+    result.addProperty("runId", runId.toString());
+    result.addProperty("runStatus", status);
+    String rawResult = runResult(runId, identity);
+    if (rawResult == null) return;
+    JsonObject runResult = JsonParser.parseString(rawResult).getAsJsonObject();
+    if (runResult.has("planReview")) result.add("planReview", runResult.get("planReview").deepCopy());
+    if (runResult.has("data") && runResult.get("data").isJsonObject()) {
+      result.add("travelData", runResult.get("data").deepCopy());
+    }
+    JsonObject runData = runResult.has("data") && runResult.get("data").isJsonObject()
+        ? runResult.getAsJsonObject("data") : runResult;
+    if (runData.has("inputRequirements")) result.add("inputRequirements", runData.get("inputRequirements").deepCopy());
+    if (runData.has("formTitle")) result.add("formTitle", runData.get("formTitle").deepCopy());
+  }
+
+  private String runResult(UUID runId, Database.Context identity) throws SQLException {
+    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
+        "SELECT result FROM agent_runs WHERE id=? AND workspace_id=? AND user_id=?")) {
+      p.setBytes(1, Database.uuidBytes(runId));
+      p.setBytes(2, Database.uuidBytes(identity.workspaceId()));
+      p.setBytes(3, Database.uuidBytes(identity.userId()));
+      try (ResultSet rs = p.executeQuery()) { return rs.next() ? rs.getString("result") : null; }
     }
   }
 
@@ -341,14 +355,19 @@ public final class AgentRuntime implements AutoCloseable {
       }
       updateRunning(runId, iteration);
       state.iteration = iteration;
-      workflow("收到消息", "用户消息", "待判断", goal);
+      // The persisted goal contains prior turns after a resume. Only the latest turn may
+      // authorize side effects such as creating a travel write draft.
+      String latestMessage = currentTurn;
+      workflow("收到消息", "用户消息", "待判断", latestMessage);
       AgentRouter.Decision decision;
       if (!state.pendingQuestions.isEmpty() && !state.steps.isEmpty()) {
         // WAITING_USER 恢复：用户在回答上一轮提问（如“选1”）。直接回到提问的执行器继续，
         // 避免模型路由器把简短回答误路由到无关 Subagent 而丢失对话上下文。
         decision = resumePendingExecutor(state);
       } else {
-        decision = router.route(goal, documents.hasAttachments(input), tools, subagents, state);
+        JsonObject routeArguments = input.has("arguments") && input.get("arguments").isJsonObject()
+            ? input.getAsJsonObject("arguments") : new JsonObject();
+        decision = router.route(latestMessage, documents.hasAttachments(input), tools, subagents, state, routeArguments);
       }
       String route = routeName(decision.executorName());
       workflow("路由完成", "路由决策", route, compact(decision.reason()));
@@ -380,7 +399,7 @@ public final class AgentRuntime implements AutoCloseable {
 
       String toolCallId = runId + ":" + iteration;
       JsonObject arguments = new JsonObject();
-      arguments.addProperty("message", goal);
+      arguments.addProperty("message", latestMessage);
       boolean requiresConfirmation = "tool".equals(decision.executorType())
           && tools.require(decision.executorName()).definition().requiresConfirmation();
       UUID stepId = stepRecorder.start(runId, null, "main", decision.executorType(),
@@ -392,15 +411,15 @@ public final class AgentRuntime implements AutoCloseable {
         if ("subagent".equals(decision.executorType())) {
           stepRecorder.setCurrentStepId(stepId);
           try {
-            result = executeSubagent(decision, goal, input, runId, identity, channel, state);
+            result = executeSubagent(decision, latestMessage, input, runId, identity, channel, state);
           } finally {
             stepRecorder.setCurrentStepId(null);
           }
         } else {
           JsonObject commandInput = input.deepCopy();
-          commandInput.addProperty("message", goal);
+          commandInput.addProperty("message", latestMessage);
           commandInput.addProperty("skipPersistence", true);
-          String documentContext = documents.planningContext(commandInput, identity, goal);
+          String documentContext = documents.planningContext(commandInput, identity, latestMessage);
           if (!documentContext.isBlank()) commandInput.addProperty("knowledgeContext", documentContext);
           String orchestrationContext = orchestrationContext(state);
           if (!orchestrationContext.isBlank()) commandInput.addProperty("orchestrationContext", orchestrationContext);
@@ -607,6 +626,8 @@ public final class AgentRuntime implements AutoCloseable {
         && arguments.getAsJsonObject("budget").keySet().isEmpty()) arguments.remove("budget");
     if (arguments.has("pace") && arguments.get("pace").isJsonPrimitive()
         && arguments.get("pace").getAsString().isBlank()) arguments.remove("pace");
+    if (arguments.has("preferredTransport") && arguments.get("preferredTransport").isJsonPrimitive()
+        && arguments.get("preferredTransport").getAsString().isBlank()) arguments.remove("preferredTransport");
     request.add("arguments", arguments);
   }
 
@@ -785,7 +806,7 @@ public final class AgentRuntime implements AutoCloseable {
   private RunRow runByPendingDraft(UUID draftId, Database.Context identity) throws SQLException {
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
         "SELECT id,conversation_id,channel,goal,status,iteration,result,last_error,state FROM agent_runs "
-            + "WHERE pending_draft_id=? AND workspace_id=? AND user_id=? ORDER BY updated_at DESC LIMIT 1")) {
+            + "WHERE pending_draft_id=? AND workspace_id=? AND user_id=? ORDER BY updated_at DESC,id DESC LIMIT 1")) {
       p.setBytes(1, Database.uuidBytes(draftId));
       p.setBytes(2, Database.uuidBytes(identity.workspaceId()));
       p.setBytes(3, Database.uuidBytes(identity.userId()));
@@ -965,7 +986,7 @@ public final class AgentRuntime implements AutoCloseable {
       throws SQLException {
     try (Connection c = database.connection(); PreparedStatement find = c.prepareStatement(
         "SELECT id,result FROM agent_runs WHERE pending_draft_id=? AND workspace_id=? AND user_id=? "
-            + "ORDER BY updated_at DESC LIMIT 1")) {
+            + "ORDER BY updated_at DESC,id DESC LIMIT 1")) {
       find.setBytes(1, Database.uuidBytes(draftId));
       find.setBytes(2, Database.uuidBytes(identity.workspaceId()));
       find.setBytes(3, Database.uuidBytes(identity.userId()));
@@ -1011,6 +1032,14 @@ public final class AgentRuntime implements AutoCloseable {
 
   private String string(JsonObject input, String name, String fallback) {
     return input.has(name) && !input.get(name).isJsonNull() ? input.get(name).getAsString() : fallback;
+  }
+
+  private int integer(JsonObject input, String name, int fallback) {
+    try {
+      return input.has(name) && !input.get(name).isJsonNull() ? input.get(name).getAsInt() : fallback;
+    } catch (RuntimeException ignored) {
+      return fallback;
+    }
   }
 
   private record RunRow(UUID id, UUID conversationId, String channel, String goal, String status,

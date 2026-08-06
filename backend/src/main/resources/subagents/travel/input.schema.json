@@ -24,6 +24,24 @@
         "pace": { "type": "string", "enum": ["relaxed", "balanced", "intensive"] },
         "interests": { "type": "array", "items": { "type": "string" } },
         "constraints": { "type": "array", "items": { "type": "string" } },
+        "previousTravelData": { "type": "object" },
+        "attractionQuery": { "type": "string" },
+        "deviceLocation": {
+          "type": "object",
+          "properties": {
+            "lat": { "type": "number" },
+            "lng": { "type": "number" },
+            "accuracyMeters": { "type": "number", "minimum": 0 },
+            "timezone": { "type": "string" },
+            "capturedAt": { "type": "string" },
+            "permission": { "type": "string", "enum": ["granted", "denied", "unavailable"] }
+          }
+        },
+        "preferredTransport": { "type": "string", "enum": ["highSpeedRail", "flight", "selfDrive", "publicTransit", "any"] },
+        "hotelStarRating": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "avoidEarlyMorning": { "type": "boolean" },
+        "elderlyTravel": { "type": "boolean" },
+        "beachPreference": { "type": "boolean" },
         "saveToPlanner": { "type": "boolean" }
       }
     },

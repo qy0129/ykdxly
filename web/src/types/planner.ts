@@ -69,6 +69,70 @@ export interface CalendarItem {
   priority?: '高' | '中' | '低'
   reminder?: string
   version?: number
+  locationName?: string
+  latitude?: number
+  longitude?: number
+  coordinateSystem?: string
+  timezoneId?: string
+  sourceUrl?: string
+  reservationRequired?: boolean | null
+}
+
+export interface TravelTransit {
+  mode?: string
+  durationMinutes?: number
+  durationSeconds?: number
+  distanceMeters?: number
+  verificationRequired?: boolean
+}
+
+export interface TravelActivity {
+  attractionId?: string
+  attractionName?: string
+  title?: string
+  location?: string
+  startTime?: string
+  durationMinutes?: number
+  indoor?: boolean
+  requiresReservation?: boolean | null
+  openingHours?: string
+  transitFromPrevious?: TravelTransit
+  backupActivity?: { title?: string; attractionName?: string; reason?: string }
+}
+
+export interface TravelDay {
+  date?: string
+  title?: string
+  activities?: TravelActivity[]
+}
+
+export interface TravelWeather {
+  date?: string
+  condition?: string
+  tempHigh?: number | null
+  tempLow?: number | null
+  precipitationProbability?: number | null
+  warnings?: string[]
+  forecastConfidence?: 'high' | 'medium' | 'low'
+  provider?: string
+  fetchedAt?: string
+}
+
+export interface TravelPlanData extends Record<string, unknown> {
+  request?: Record<string, unknown> & { destination?: string; startDate?: string; endDate?: string }
+  days?: TravelDay[]
+  weather?: TravelWeather[]
+  budgetEstimate?: {
+    amount?: number; minimum?: number; maximum?: number; currency?: string
+    confidence?: 'high' | 'medium' | 'low'; estimated?: boolean
+    breakdown?: Array<{ category?: string; amount?: number; minimum?: number; maximum?: number; source?: string }>
+  }
+  sources?: Array<{ provider?: string; title?: string; sourceUrl?: string; url?: string; fetchedAt?: string; confidence?: string; sourceQuality?: string }>
+  risks?: Array<{ code?: string; message?: string; date?: string; detail?: string; verificationRequired?: boolean } | string>
+  alternativePlans?: Array<{ title?: string; reason?: string }>
+  revisionMode?: 'localized'
+  revisionSummary?: string
+  revisionDiff?: Array<{ date?: string; day?: number; activity?: number; before?: TravelActivity; after?: TravelActivity }>
 }
 
 export interface TodoItem {

@@ -1,7 +1,7 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { addMonths, eachDayOfInterval, endOfMonth, endOfWeek, format, isSameDay, isSameMonth, parseISO, startOfMonth, startOfWeek, subMonths } from 'date-fns'
 import { zhCN } from 'date-fns/locale'
-import { CalendarDays, CheckCircle2, ChevronLeft, ChevronRight, Circle, Clock3, Plus, X } from 'lucide-react'
+import { CalendarDays, CheckCircle2, ChevronLeft, ChevronRight, Circle, Clock3, Plus, Trash2, X } from 'lucide-react'
 import type { CalendarItem, Plan } from '../../types/planner'
 import { getCalendarProgress, weekLabels } from './calendarModel'
 
@@ -13,6 +13,10 @@ export function DayDrawer({
   onClose,
   onToggleItem,
   onOpenItem,
+  selectedIds,
+  onToggleSelected,
+  onToggleAll,
+  onDeleteMany,
   onAdd,
 }: {
   date: Date
@@ -21,11 +25,17 @@ export function DayDrawer({
   onClose: () => void
   onToggleItem: (id: string) => void
   onOpenItem: (item: CalendarItem) => void
+  selectedIds: Set<string>
+  onToggleSelected: (id: string) => void
+  onToggleAll: () => void
+  onDeleteMany: (ids: string[]) => void
   onAdd: () => void
 }) {
   const dateLabel = format(date, 'M月d日 EEEE', { locale: zhCN })
   const completed = items.filter((item) => item.status === 'done').length
   const totalMinutes = items.reduce((total, item) => total + item.duration, 0)
+  const schedules = items.filter((item) => item.kind !== 'todo')
+  const selectedSchedules = schedules.filter((item) => selectedIds.has(item.id))
 
   return (
     <aside className="day-drawer">
@@ -43,6 +53,20 @@ export function DayDrawer({
         <div><strong>{completed}</strong><span>已完成</span></div>
         <div><strong>{Math.round(totalMinutes / 30) / 2}</strong><span>预计小时</span></div>
       </div>
+      {schedules.length > 0 && (
+        <div className="agenda-bulk-toolbar">
+          <label>
+            <input type="checkbox" checked={selectedSchedules.length === schedules.length} onChange={onToggleAll} />
+            <span>全选日程</span>
+          </label>
+          <span>{selectedSchedules.length > 0 ? `已选 ${selectedSchedules.length} 条` : '可批量删除'}</span>
+          {selectedSchedules.length > 0 && (
+            <button className="icon-button danger-button" type="button" title="删除选中日程" onClick={() => onDeleteMany(selectedSchedules.map((item) => item.id))}>
+              <Trash2 size={16} />
+            </button>
+          )}
+        </div>
+      )}
       <div className="day-agenda">
         {items.length === 0 ? (
           <div className="empty-day">
@@ -55,6 +79,16 @@ export function DayDrawer({
             <button type="button" onClick={() => onToggleItem(item.id)} aria-label="切换完成状态">
               {item.status === 'done' ? <CheckCircle2 size={20} /> : <Circle size={20} />}
             </button>
+            {item.kind !== 'todo' ? (
+              <input
+                className="agenda-checkbox"
+                type="checkbox"
+                aria-label="选择日程"
+                checked={selectedIds.has(item.id)}
+                onChange={() => onToggleSelected(item.id)}
+                onClick={(event) => event.stopPropagation()}
+              />
+            ) : <span className="agenda-select-spacer" />}
             <button className="agenda-open" type="button" onClick={() => onOpenItem(item)}>
               <span className="agenda-title"><strong>{item.title}</strong><b>{getCalendarProgress(item, plansData)}%</b></span>
               <span className="agenda-progress"><i style={{ width: getCalendarProgress(item, plansData) + '%', backgroundColor: item.color }} /></span>
@@ -76,17 +110,25 @@ export function CalendarPage({
   plansData,
   onToggleItem,
   onOpenItem,
+  onDeleteMany,
   onAdd,
 }: {
   items: CalendarItem[]
   plansData: Plan[]
   onToggleItem: (id: string) => void
   onOpenItem: (item: CalendarItem) => void
+  onDeleteMany: (ids: string[]) => void
   onAdd: (date: Date) => void
 }) {
   const today = new Date()
   const [month, setMonth] = useState(() => new Date())
   const [selectedDate, setSelectedDate] = useState<Date | null>(() => new Date())
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
+
+  useEffect(() => {
+    const visibleIds = new Set(items.filter((item) => item.kind !== 'todo').map((item) => item.id))
+    setSelectedIds((current) => new Set([...current].filter((id) => visibleIds.has(id))))
+  }, [items])
 
   const days = useMemo(() => {
     const start = startOfWeek(startOfMonth(month), { weekStartsOn: 1 })
@@ -98,6 +140,18 @@ export function CalendarPage({
     items.filter((item) => isSameDay(parseISO(item.date), date))
 
   const selectedItems = selectedDate ? itemsForDate(selectedDate) : []
+  const selectedSchedules = selectedItems.filter((item) => item.kind !== 'todo')
+  const toggleSelected = (id: string) => setSelectedIds((current) => {
+    const next = new Set(current)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
+  const toggleAllSelected = () => setSelectedIds((current) => {
+    const next = new Set(current)
+    const allSelected = selectedSchedules.every((item) => next.has(item.id))
+    selectedSchedules.forEach((item) => allSelected ? next.delete(item.id) : next.add(item.id))
+    return next
+  })
   return (
     <div className="calendar-page">
       <div className="calendar-toolbar">
@@ -164,6 +218,13 @@ export function CalendarPage({
             onClose={() => setSelectedDate(null)}
             onToggleItem={onToggleItem}
             onOpenItem={onOpenItem}
+            selectedIds={selectedIds}
+            onToggleSelected={toggleSelected}
+            onToggleAll={toggleAllSelected}
+            onDeleteMany={(ids) => {
+              onDeleteMany(ids)
+              setSelectedIds((current) => new Set([...current].filter((id) => !ids.includes(id))))
+            }}
             onAdd={() => onAdd(selectedDate)}
           />
         )}
