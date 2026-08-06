@@ -129,7 +129,7 @@ final class DietSafetyTest {
           {"type":"breakfast","title":"燕麦鸡蛋杯","foodItems":["燕麦"],"estimatedKcal":350,"notes":""}]}],
         "shoppingList":[],"recipes":[],"tips":[],"risks":[],"questions":[],"planningInstruction":""}
         """).getAsJsonObject();
-    return new DietSubagent((request, sources, targets, missing) -> generated.deepCopy(),
+    return new DietSubagent((request, sources, targets, missing, shared) -> generated.deepCopy(),
         tools, new DietPolicy(), new JsonObject(), new JsonObject());
   }
 

@@ -20,6 +20,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -103,6 +104,7 @@ public final class AgentRuntime implements AutoCloseable {
     saveState(runId, state);
     JsonObject request = input.deepCopy();
     reuseTaskArguments(request, state);
+    restoreDocumentIds(request, state);
     request.addProperty("conversationId", run.conversationId().toString());
     return execute(runId, request, identity, run.channel(), run.iteration());
   }
@@ -119,6 +121,7 @@ public final class AgentRuntime implements AutoCloseable {
     markRunning(runId);
     JsonObject request = input.deepCopy();
     reuseTaskArguments(request, state);
+    restoreDocumentIds(request, state);
     request.addProperty("conversationId", run.conversationId().toString());
     submit(runId, () -> execute(runId, request, identity, run.channel(), run.iteration()));
     return accepted(runId, run.conversationId(), run.iteration());
@@ -178,7 +181,12 @@ public final class AgentRuntime implements AutoCloseable {
     input.addProperty("message", run.goal());
     input.addProperty("conversationId", run.conversationId().toString());
     JsonObject arguments = state.taskData.getAsJsonObject("request").deepCopy();
-    if (!"batch".equals(string(arguments, "mode", "")) && arguments.get("count").getAsInt() <= 1) {
+    // 非图片类草案（如 diet）的 request 没有 count 字段：视为单张，直接返回 null 让原始错误抛出，
+    // 避免 confirmImageDraft 对缺失字段 getAsInt() 抛 NPE 掩盖真实失败原因。
+    int count = arguments.has("count") && arguments.get("count").isJsonPrimitive()
+        && arguments.get("count").getAsJsonPrimitive().isNumber()
+        ? arguments.get("count").getAsInt() : 1;
+    if (!"batch".equals(string(arguments, "mode", "")) && count <= 1) {
       return null;
     }
     arguments.addProperty("confirmed", true);
@@ -234,6 +242,29 @@ public final class AgentRuntime implements AutoCloseable {
       p.executeUpdate();
     }
     return result;
+  }
+
+  /**
+   * 草案确认前修改：作废旧草案，把修改意见追加到运行目标，重新执行让执行器（如 learning Subagent）
+   * 按新要求重新生成草案。返回新的运行结果（含新 draft），前端据此替换草案卡片。
+   */
+  public JsonObject modifyDraft(String draftReference, JsonObject input, Database.Context identity) throws Exception {
+    UUID draftId = UUID.fromString(draftReference);
+    String message = required(input, "message");
+    RunRow run = runByPendingDraft(draftId, identity);
+    if (run == null) throw new IllegalArgumentException("draft_not_found");
+    // 旧草案作废，防止误确认；随后重新生成一份新草案。
+    commands.cancel(draftReference, identity);
+    appendGoal(run.id(), "\n用户要求修改：" + message);
+    AgentLoopState state = loadState(run);
+    state.userTurns.add(message);
+    state.pendingDraftId = null;
+    state.clearPendingQuestions();
+    saveState(run.id(), state);
+    JsonObject request = new JsonObject();
+    request.addProperty("message", message);
+    request.addProperty("conversationId", run.conversationId().toString());
+    return execute(run.id(), request, identity, run.channel(), run.iteration());
   }
 
   public JsonObject session(Database.Context identity, String channel) throws Exception {
@@ -352,7 +383,8 @@ public final class AgentRuntime implements AutoCloseable {
         // 避免模型路由器把简短回答误路由到无关 Subagent 而丢失对话上下文。
         decision = resumePendingExecutor(state);
       } else {
-        decision = router.route(goal, documents.hasAttachments(input), tools, subagents, state);
+        decision = router.route(goal, documents.hasAttachments(input), tools, subagents, state,
+            object(input, "arguments"));
       }
       String route = routeName(decision.executorName());
       workflow("路由完成", "路由决策", route, compact(decision.reason()));
@@ -365,6 +397,9 @@ public final class AgentRuntime implements AutoCloseable {
         finalResult.add("actions", new JsonArray());
         // 子 Agent 的结果会先合并到 taskData；结束时必须把图片结果带回调用方。
         mergeImageData(state, finalResult);
+        // subagent 返回 COMPLETED（无草案/无追问）后循环继续、路由 COMPLETE 时会把其结构化数据丢掉
+        // （如 diet 的 mealPlan/shoppingList）。把累积的执行结果数据带回最终响应，保证前端能渲染。
+        mergeAccumulatedData(state, finalResult);
         UUID stepId = stepRecorder.start(runId, null, "main", "complete", "complete", "任务完成", null);
         stepRecorder.finish(stepId, "COMPLETED", finalResult, reply, 0);
         state.appendStep("complete", "complete", "任务完成", "COMPLETED", reply);
@@ -488,8 +523,16 @@ public final class AgentRuntime implements AutoCloseable {
     String traceId = runId.toString();
     // Subagent 调模型时不读 ai_messages，这里统一注入长期记忆 + 最近对话，保证专业执行器也能结合上文。
     String sharedContext = commands.sharedContext(conversationId, identity);
+    // 子代理权限 = 基础权限 + 其允许工具的声明权限（如 diet:read / planning:write），
+    // 避免新增 subagent 或工具时漏配导致 PERMISSION_DENIED。
+    Set<String> permissions = new HashSet<>(Set.of("travel:read", "planning:write", "image.generate", "learning:read"));
+    for (String toolName : subagent.definition().allowedTools()) {
+      if (tools.contains(toolName)) {
+        permissions.addAll(tools.require(toolName).definition().requiredPermissions());
+      }
+    }
     var context = new com.changlu.planner.agent.core.contract.AgentContext(runId, conversationId, traceId,
-        identity, channel, Set.of("travel:read", "planning:write", "image.generate"),
+        identity, channel, permissions,
         Instant.now().plus(subagent.definition().timeout()), state.toJson(), sharedContext);
     var request = new com.changlu.planner.agent.core.contract.SubagentRequest(message,
         object(input, "arguments"), documentIds(input));
@@ -564,6 +607,17 @@ public final class AgentRuntime implements AutoCloseable {
     }
   }
 
+  /** 把已执行器累积的结构化数据（如 diet 的 mealPlan）带回到最终响应。 */
+  private void mergeAccumulatedData(AgentLoopState state, JsonObject result) {
+    if (state.taskData.size() == 0) return;
+    JsonObject data = new JsonObject();
+    for (String key : state.taskData.keySet()) data.add(key, state.taskData.get(key).deepCopy());
+    if (!result.has("data")) result.add("data", data);
+    for (String key : state.taskData.keySet()) {
+      if (!result.has(key)) result.add(key, state.taskData.get(key).deepCopy());
+    }
+  }
+
   /** 将文生图子 Agent 产生的结果暴露到最终响应，供网页和微信发送真实图片。 */
   private void mergeImageData(AgentLoopState state, JsonObject result) {
     String[] keys = {"imageUrl", "images", "requestId", "size", "style", "durationMillis"};
@@ -612,6 +666,13 @@ public final class AgentRuntime implements AutoCloseable {
     if (arguments.has("pace") && arguments.get("pace").isJsonPrimitive()
         && arguments.get("pace").getAsString().isBlank()) arguments.remove("pace");
     request.add("arguments", arguments);
+  }
+
+  /** WAITING_USER 追问后 resume 时，如果客户端没重发附件，从 run 状态恢复上次的 documentIds。 */
+  private void restoreDocumentIds(JsonObject request, AgentLoopState state) {
+    if (request.has("documentIds") || !state.taskData.has("documentIds")
+        || !state.taskData.get("documentIds").isJsonArray()) return;
+    request.add("documentIds", state.taskData.getAsJsonArray("documentIds").deepCopy());
   }
 
   private void workflow(String step, String type, String route, String content) {
@@ -944,7 +1005,7 @@ public final class AgentRuntime implements AutoCloseable {
     JsonArray result = new JsonArray();
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
         "SELECT tool_call_id,executor_type,tool_name,arguments,result,status,requires_confirmation,attempt_count,error "
-            + "FROM agent_tool_calls WHERE run_id=? ORDER BY started_at,id")) {
+            + "FROM agent_tool_calls WHERE run_id=? ORDER BY created_at,id")) {
       p.setBytes(1, Database.uuidBytes(runId));
       try (ResultSet rs = p.executeQuery()) {
         while (rs.next()) {

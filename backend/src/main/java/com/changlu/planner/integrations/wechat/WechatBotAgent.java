@@ -1,5 +1,7 @@
 package com.changlu.planner.integrations.wechat;
 
+import com.changlu.planner.agent.core.ModelClient;
+import com.changlu.planner.agent.subagents.memory.MemorySubagent;
 import com.changlu.planner.shared.config.EnvironmentConfig;
 import com.changlu.planner.shared.database.Database;
 import com.changlu.planner.features.reminder.ReminderService;
@@ -75,7 +77,10 @@ WechatBotAgent implements AutoCloseable {
   public WechatBotAgent(Database database) {
     this.database = database;
     this.resumeStore = new ResumeContextStore(database);
-    this.reminders = new ReminderService(database);
+    // 微信提醒用鼓励型个性化文案：结合该用户的长期记忆生成；模型不可用/失败时回退固定模板。
+    ModelClient model = new ModelClient();
+    MemorySubagent memory = new MemorySubagent(database, model);
+    this.reminders = new ReminderService(database, model, memory::context);
   }
 
   public void start() {
@@ -261,9 +266,23 @@ WechatBotAgent implements AutoCloseable {
     String briefing = planner.briefing(userId);
     // 简报使用 Markdown 链接；普通命令仍保留完整 URL，便于不支持 Markdown 的客户端复制。
     String message = (briefing.isBlank() ? "今日简报暂时没有生成。" : briefing) + "\n\n" + markdownWebLink();
-    current.sendText(userId, message);
+    sendTextWithRetry(current, userId, message);
     pendingGreetingUserId = "";
     LOG.info("[微信简报反馈] 用户={} 内容={}", userId, logText(message));
+  }
+
+  /**
+   * 发送文本并做一次延时重试。微信协议错误（如 errmsg=prepare failed）多为发送通道刚就绪/微信侧瞬态，
+   * 隔 2 秒重试一次通常能成功；仍失败则抛给上层记录 ERROR，pendingGreetingUserId 不清空，下次触发会再推。
+   */
+  private void sendTextWithRetry(ILinkClient current, String userId, String message) throws Exception {
+    try {
+      current.sendText(userId, message);
+    } catch (Exception error) {
+      LOG.warn("[微信简报发送失败] 首次发送失败，2 秒后重试，用户={} 原因={}", userId, rootMessage(error));
+      Thread.sleep(2000);
+      current.sendText(userId, message);
+    }
   }
 
   private void schedulePendingGreeting(ILinkClient current, String userId) {

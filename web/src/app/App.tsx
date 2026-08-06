@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { endOfWeek, format, isWithinInterval, parseISO, startOfWeek } from 'date-fns'
 import { Bell, X } from 'lucide-react'
-import type { CalendarItem, Note, Plan, PlanItem, PlanTask, TodoItem } from '../types/planner'
+import type { CalendarItem, Note, Plan, TodoItem } from '../types/planner'
 import '../styles/app.css'
 import { plannerApi, type PlannerStats, type TodoReminder, type TrashItem } from '../services/plannerApi'
-import { ConfirmDeleteDialog, PlanDialog, ScheduleDialog, TodoDialog, type NoteDraftFields, type TaskDraftFields } from '../components/dialogs/PlannerDialogs'
+import { ConfirmDeleteDialog, PlanDialog, ScheduleDialog, TodoDialog, type NoteDraftFields } from '../components/dialogs/PlannerDialogs'
 import {
   type GlobalSearchItem,
   type NotificationEntry,
@@ -21,7 +21,6 @@ import { StatsPage } from '../features/stats/StatsPage'
 import { AgentPage } from '../features/agent/AgentPage'
 import { ReviewPage } from '../features/review/ReviewPage'
 import { TrashPage } from '../features/trash/TrashPage'
-import { LearningPage } from '../features/learning/LearningPage'
 const initialStats: PlannerStats = {
   daily: [],
   heatmap: [],
@@ -29,7 +28,7 @@ const initialStats: PlannerStats = {
   metrics: { completion: 0, completed: 0, planned: 0, focusHours: 0, streak: 0 },
 }
 
-const routeViews = new Set<View>(['calendar', 'plans', 'todos', 'notes', 'stats', 'agent', 'review', 'trash', 'schedule', 'learning'])
+const routeViews = new Set<View>(['calendar', 'plans', 'todos', 'notes', 'stats', 'agent', 'review', 'trash', 'schedule'])
 
 function readRoute() {
   const value = window.location.hash.replace(/^#\/?/, '')
@@ -46,7 +45,7 @@ function App() {
   // App 只保留跨页面状态和数据同步；表单和通用视觉组件已下沉到独立模块。
   const initialRoute = readRoute()
   const [activeView, setActiveView] = useState<View>(initialRoute.view)
-  const [activePlanId, setActivePlanId] = useState('product')
+  const [pendingPlanId, setPendingPlanId] = useState<string | null>(null)
   const [plansData, setPlansData] = useState<Plan[]>([])
   const [calendarItems, setCalendarItems] = useState<CalendarItem[]>([])
   const [todoItems, setTodoItems] = useState<TodoItem[]>([])
@@ -61,7 +60,7 @@ function App() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [dataError, setDataError] = useState('')
   const [dataRevision, setDataRevision] = useState(0)
-  const [agentSeed, setAgentSeed] = useState('')
+  const [agentSeed] = useState('')
   const [reminderQueue, setReminderQueue] = useState<TodoReminder[]>([])
   const [restoringTrashId, setRestoringTrashId] = useState<string | null>(null)
   const [deleteConfirmation, setDeleteConfirmation] = useState<{ message: string; resolve: (confirmed: boolean) => void } | null>(null)
@@ -104,7 +103,6 @@ function App() {
       setTrashItems(data.trash)
       setStatsData(data.stats)
       setDataError('')
-      setActivePlanId((current) => data.plans.some((plan) => plan.id === current) ? current : (data.plans[0]?.id ?? ''))
     } catch (cause) {
       setDataError(cause instanceof Error ? cause.message : '无法读取真实数据，请检查后端和数据库连接。')
     }
@@ -186,12 +184,11 @@ function App() {
     agent: { title: 'AI 对话', subtitle: '让 Agent 帮你推进计划' },
     review: { title: 'AI 复盘', subtitle: '基于真实完成记录' },
     trash: { title: '回收站', subtitle: '恢复 30 天内删除的数据' },
-    schedule: { title: '安排详情', subtitle: '把资料、学习和笔记放在一起' },
-    learning: { title: '学习目标', subtitle: '管理学习目标与进度' },
+    schedule: { title: '安排详情', subtitle: '把资料、行动和小记放在一起' },
   }
 
   const openPlan = (planId: string) => {
-    setActivePlanId(planId)
+    setPendingPlanId(planId)
     navigate('plans')
     setMobileNavOpen(false)
   }
@@ -241,42 +238,21 @@ function App() {
 
   const createPlan = async (plan: Plan) => {
     setDataError('')
-    try { const created = await plannerApi.createPlan(plan); await refreshData(); setActivePlanId(created.id); setPlanDialogOpen(false); navigate('plans'); return true }
+    try { const created = await plannerApi.createPlan(plan); await refreshData(); setPendingPlanId(created.id); setPlanDialogOpen(false); navigate('plans'); return true }
     catch (cause) { setDataError(cause instanceof Error ? cause.message : '计划创建失败'); return false }
   }
 
   const updatePlan = (next: Plan) => mutation(plannerApi.updatePlan(next))
   const deletePlans = (ids: string[]) => bulkDelete('计划', ids.length, () => ids.map((id) => plannerApi.deletePlan(id)))
-  const createStage = (planId: string, item: PlanItem) => { void mutation(plannerApi.createPlanStage(planId, item)) }
-  const updateStage = (planId: string, item: PlanItem) => { void mutation(plannerApi.updatePlanStage(planId, item)) }
-  const deleteStage = (planId: string, item: PlanItem) => { void confirmDelete('确认是否删除这个阶段？阶段及其任务将进入回收站。').then((confirmed) => { if (confirmed) void mutation(plannerApi.deletePlanStage(planId, item.id, item.version)) }) }
-
-  const createTask = (planId: string, stageId: string, fields: TaskDraftFields) =>
-    mutation(plannerApi.createTask({
-      planId,
-      stageId,
-      title: fields.title,
-      estimatedMinutes: fields.estimatedMinutes,
-      dueAt: fields.dueAt,
-      recurrenceType: fields.recurrenceType,
-      scheduleStartDate: fields.scheduleStartDate,
-      recurrenceEndDate: fields.recurrenceEndDate,
-      scheduledTime: fields.scheduledTime,
-      priority: 'medium',
-    }))
-  const updateTask = (task: PlanTask) => mutation(plannerApi.updateTask(task))
-  const deleteTask = (task: PlanTask) => { void confirmDelete('确认是否删除这个任务？任务将进入回收站 30 天。').then((confirmed) => { if (confirmed) void mutation(plannerApi.deleteTask(task)) }) }
-  const deleteTasks = (tasks: PlanTask[]) => bulkDelete('任务', tasks.length, () => tasks.map((task) => plannerApi.deleteTask(task)))
-
   const saveSchedule = async (item: CalendarItem) => {
     setDataError('')
     try { if (calendarItems.some((value) => value.id === item.id)) await plannerApi.updateSchedule(item); else await plannerApi.createSchedule(item); await refreshData(); setScheduleDialog(null); navigate('calendar') }
     catch (cause) { setDataError(cause instanceof Error ? cause.message : '日程保存失败') }
   }
-  const deleteSchedule = (id: string) => { void confirmDelete('确认是否删除这条日程？日程将进入回收站 30 天。').then((confirmed) => { if (confirmed) void mutation(plannerApi.deleteSchedule(id)).then(() => navigate('calendar')) }) }
+  const deleteSchedule = (id: string) => { void confirmDelete('确认是否删除这条日程？日程将进入回收站 30 天。').then((confirmed) => { if (confirmed) { setCalendarItems((current) => current.filter((item) => item.id !== id)); void mutation(plannerApi.deleteSchedule(id)).then(() => navigate('calendar')) } }) }
   const createTodo = (item: TodoItem) => { void mutation(plannerApi.createTodo(item)) }
   const updateTodo = (item: TodoItem) => { void mutation(plannerApi.updateTodo(item)) }
-  const deleteTodo = (id: string) => { void confirmDelete('确认是否删除这个待办？待办将进入回收站 30 天。').then((confirmed) => { if (confirmed) void mutation(plannerApi.deleteTodo(id)) }) }
+  const deleteTodo = (id: string) => { void confirmDelete('确认是否删除这个待办？待办将进入回收站 30 天。').then((confirmed) => { if (confirmed) { setTodoItems((current) => current.filter((todo) => todo.id !== id)); void mutation(plannerApi.deleteTodo(id)) } }) }
   const deleteTodos = (ids: string[]) => bulkDelete('待办', ids.length, () => ids.map((id) => plannerApi.deleteTodo(id)))
   const restoreTrashItem = async (item: TrashItem) => {
     setRestoringTrashId(item.id)
@@ -411,14 +387,13 @@ function App() {
         {dataError && <p className="ai-chat-error">{dataError}</p>}
         <div className="page-content">
           {activeView === 'calendar' && <CalendarPage items={calendarEntries} plansData={plansData} onToggleItem={toggleCalendarItem} onOpenItem={openSchedule} onAdd={(date) => setScheduleDialog({ date: format(date, 'yyyy-MM-dd') })} />}
-          {activeView === 'plans' && <PlansPage activePlanId={activePlanId} plansData={plansData} calendarItems={calendarItems} onPlanChange={setActivePlanId} onUpdatePlan={updatePlan} onDeletePlans={deletePlans} onCreateStage={createStage} onUpdateStage={updateStage} onDeleteStage={deleteStage} onCreateTask={createTask} onUpdateTask={updateTask} onDeleteTask={deleteTask} onDeleteTasks={deleteTasks} onAddSchedule={(planId) => setScheduleDialog({ planId })} onOpenSchedule={openSchedule} onAiAdjust={(plan) => { setAgentSeed(`请调整计划“${plan.title}”（计划 ID：${plan.id}）`); navigate('agent') }} />}
+          {activeView === 'plans' && <PlansPage plansData={plansData} calendarItems={calendarItems} onUpdatePlan={updatePlan} onDeletePlans={deletePlans} onAddSchedule={(planId) => setScheduleDialog({ planId })} onOpenSchedule={openSchedule} onToggle={toggleCalendarItem} onCreatePlan={() => setPlanDialogOpen(true)} pendingPlanId={pendingPlanId} onConsumePendingPlan={() => setPendingPlanId(null)} />}
           {activeView === 'todos' && <TodosPage todoItems={todoItems} onCreate={createTodo} onUpdate={updateTodo} onDelete={deleteTodo} onDeleteMany={deleteTodos} onToggle={toggleCalendarItem} />}
           {activeView === 'notes' && <NotesPage noteItems={noteItems} onChange={saveNotes} onCreate={createNote} onDelete={deleteNote} onDeleteMany={deleteNotes} selectedNoteId={selectedNoteId} />}
           {activeView === 'stats' && <StatsPage stats={statsData} />}
           {activeView === 'agent' && <AgentPage seed={agentSeed} onDataChanged={() => setDataRevision((value) => value + 1)} />}
           {activeView === 'review' && <ReviewPage />}
           {activeView === 'trash' && <TrashPage items={trashItems} restoringId={restoringTrashId} onRestore={(item) => void restoreTrashItem(item)} onRestoreMany={(items) => runTrashBatch(items, 'restore')} onDeleteMany={(items) => runTrashBatch(items, 'purge')} />}
-          {activeView === 'learning' && <LearningPage />}
           {activeView === 'schedule' && openedSchedule && (
             <ScheduleDetailPage item={openedSchedule} plansData={plansData} noteItems={noteItems} onNotesChange={saveNotes} onDeleteNote={deleteNote} onOpenNote={(id) => { setSelectedNoteId(id); navigate('notes') }} onToggle={toggleCalendarItem} onEdit={(item) => setScheduleDialog({ item })} onDelete={deleteSchedule} onBack={() => changeView('calendar')} />
           )}

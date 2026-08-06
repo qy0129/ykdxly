@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { Brain, Check, CheckCircle2, ChevronDown, ChevronRight, Clock3, FileText, LoaderCircle, MessageSquare, Paperclip, Pencil, Plus, RefreshCw, Save, Send, Trash2, Workflow, X, XCircle } from 'lucide-react'
+import { Brain, Check, CheckCircle2, ChevronDown, ChevronRight, CircleAlert, Clock3, CloudRain, ExternalLink, FileText, LoaderCircle, MapPin, MessageSquare, Paperclip, Pencil, Plus, RefreshCw, Save, Send, ShieldCheck, Trash2, Umbrella, WalletCards, Workflow, X, XCircle } from 'lucide-react'
 import {
   plannerApi,
   type AgentDocument,
@@ -11,6 +11,7 @@ import {
   type AiMemory,
   type AiSession,
 } from '../../services/plannerApi'
+import type { TravelActivity, TravelPlanData } from '../../types/planner'
 
 type ChatMessage = { role: 'user' | 'assistant'; content: string; imageUrls?: string[] }
 
@@ -168,20 +169,32 @@ function draftActionDetails(action: AiDraft['actions'][number]) {
     .map(([key, value]) => `${draftFieldLabels[key]}：${formatDraftValue(value)}`)
 }
 
+function formatScheduleTime(value?: unknown) {
+  const text = typeof value === 'string' ? value : ''
+  if (!text) return '未设置'
+  // 2026-08-06T10:00:00 → 10:00（日期在阶段标题上已显示）
+  const full = text.match(/T(\d{2}:\d{2})/)
+  if (full) return full[1]
+  return text.slice(0, 5)
+}
+
 function draftPlanPreview(action: AiDraft['actions'][number]) {
   if (action.type !== 'create_plan') return null
   const fields = action.fields ?? {}
   const stages = Array.isArray(fields.stages) ? fields.stages : []
   if (!stages.length) return null
+  let dayCount = 0
   return (
     <div className="ai-draft-plan-preview">
       {stages.map((stage, index) => {
         if (!stage || typeof stage !== 'object') return null
-        const item = stage as { title?: unknown; dueDate?: unknown; tasks?: unknown[] }
+        const item = stage as { title?: unknown; dueDate?: unknown; stageType?: unknown; tasks?: unknown[] }
+        const isPreparation = item.stageType === 'preparation'
         const tasks = Array.isArray(item.tasks) ? item.tasks : []
+        const dayNumber = isPreparation ? null : ++dayCount
         return (
           <div className="ai-draft-stage" key={`${String(item.dueDate ?? '')}-${index}`}>
-            <strong>第 {index + 1} 天 · {String(item.title ?? '旅行日程')}</strong>
+            <strong>{isPreparation ? '出发前准备' : `第 ${dayNumber} 天 · ${String(item.title ?? '旅行日程')}`}</strong>
             {item.dueDate != null && <small>{String(item.dueDate)}</small>}
             {tasks.map((task, taskIndex) => {
               if (!task || typeof task !== 'object') return null
@@ -194,7 +207,7 @@ function draftPlanPreview(action: AiDraft['actions'][number]) {
                   {schedules.map((schedule, scheduleIndex) => {
                     if (!schedule || typeof schedule !== 'object') return null
                     const item = schedule as { startAt?: unknown; durationMinutes?: unknown }
-                    return <small key={scheduleIndex}>日程：{String(item.startAt ?? value.dueAt ?? '未设置')}{item.durationMinutes ? ` · ${String(item.durationMinutes)} 分钟` : ''}</small>
+                    return <small key={scheduleIndex}>日程：{formatScheduleTime(item.startAt ?? value.dueAt)}{item.durationMinutes ? ` · ${String(item.durationMinutes)} 分钟` : ''}</small>
                   })}
                 </div>
               )
@@ -206,33 +219,205 @@ function draftPlanPreview(action: AiDraft['actions'][number]) {
   )
 }
 
-function travelPlanPreview(data: Record<string, unknown>) {
-  const request = data.request && typeof data.request === 'object' ? data.request as Record<string, unknown> : {}
-  const days = Array.isArray(data.days) ? data.days : []
+function learningPlanPreview(action: AiDraft['actions'][number]) {
+  if (action.type !== 'create_learning_plan') return null
+  const fields = action.fields ?? {}
+  const goal = (fields.learningGoal ?? {}) as Record<string, unknown>
+  const metrics = Array.isArray(goal.targetMetrics) ? goal.targetMetrics as Array<{ label?: unknown; value?: unknown; unit?: unknown }> : []
+  const milestones = Array.isArray(goal.milestones) ? goal.milestones as unknown[] : []
+  const stages = Array.isArray(fields.stages) ? fields.stages : []
+  const title = String(goal.title ?? fields.title ?? '')
   return (
-    <div className="ai-travel-plan-preview">
-      <div className="ai-travel-plan-meta">
-        <strong>{String(request.destination ?? '旅行目的地')}旅行计划</strong>
-        <span>{String(request.startDate ?? '')}{request.endDate ? ` 至 ${String(request.endDate)}` : ''}</span>
-      </div>
-      {days.map((day, index) => {
-        if (!day || typeof day !== 'object') return null
-        const item = day as { title?: unknown; date?: unknown; activities?: unknown[] }
-        const activities = Array.isArray(item.activities) ? item.activities : []
+    <div className="ai-draft-plan-preview ai-learning-preview">
+      {title && (
+        <div className="ai-learning-goal">
+          <strong>{title}</strong>
+          <span>目标日期 {goal.targetDate ? String(goal.targetDate) : '未设置'}{goal.weeklyHours ? ` · 每周 ${String(goal.weeklyHours)} 小时` : ''}</span>
+        </div>
+      )}
+      {metrics.length > 0 && (
+        <div className="ai-learning-metrics">目标：{metrics.map((m) => `${String(m.label ?? '')} ${String(m.value ?? '')}${m.unit != null ? String(m.unit) : ''}`).join('、')}</div>
+      )}
+      {milestones.length > 0 && (
+        <ul className="ai-learning-milestones">{milestones.slice(0, 5).map((m, i) => <li key={`${String(m)}-${i}`}>· {String(m)}</li>)}</ul>
+      )}
+      {stages.map((stage, index) => {
+        if (!stage || typeof stage !== 'object') return null
+        const item = stage as { title?: unknown; dueDate?: unknown; tasks?: unknown[] }
+        const tasks = Array.isArray(item.tasks) ? item.tasks : []
+        if (!tasks.length) return null
         return (
-          <div className="ai-travel-day" key={`${String(item.date ?? '')}-${index}`}>
-            <strong>第 {index + 1} 天 · {String(item.title ?? '旅行日程')}</strong>
-            <small>{String(item.date ?? '')}</small>
-            <div className="ai-travel-activities">
-              {activities.map((activity, activityIndex) => {
-                if (!activity || typeof activity !== 'object') return null
-                const value = activity as { startTime?: unknown; title?: unknown; location?: unknown; notes?: unknown }
-                return <p key={activityIndex}><b>{String(value.startTime || '安排')}</b>{String(value.title ?? '活动')}<em>{value.location ? ` · ${String(value.location)}` : ''}</em></p>
-              })}
-            </div>
+          <div className="ai-draft-stage" key={`${String(item.dueDate ?? '')}-${index}`}>
+            <strong>阶段 {index + 1} · {String(item.title ?? '')} · {tasks.length} 天</strong>
+            {tasks.map((task, taskIndex) => {
+              if (!task || typeof task !== 'object') return null
+              const value = task as { title?: unknown; description?: unknown; dueAt?: unknown; schedules?: unknown[] }
+              const schedules = Array.isArray(value.schedules) ? value.schedules : []
+              const schedule = schedules.length && typeof schedules[0] === 'object'
+                ? schedules[0] as { startAt?: unknown; durationMinutes?: unknown } : null
+              return (
+                <div className="ai-draft-task" key={`${String(value.title ?? '')}-${taskIndex}`}>
+                  <span>{String(value.title ?? '')}</span>
+                  {value.description != null && String(value.description) !== '' && <p>{String(value.description)}</p>}
+                  {schedule && <small>日程：{String(schedule.startAt ?? value.dueAt ?? '未设置')}{schedule.durationMinutes ? ` · ${String(schedule.durationMinutes)} 分钟` : ''}</small>}
+                </div>
+              )
+            })}
           </div>
         )
       })}
+    </div>
+  )
+}
+
+const budgetCategoryLabels: Record<string, string> = {
+  accommodation: '住宿', transport: '往返交通', localTransit: '市内交通',
+  attractions: '景点门票', food: '餐饮', contingency: '机动预算',
+}
+
+const confidenceLabels: Record<string, string> = { high: '高可信', medium: '中等可信', low: '低可信' }
+
+function formatFetchedAt(value?: string) {
+  if (!value) return '抓取时间未知'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+function safeExternalUrl(value?: string) {
+  return value && /^https?:\/\//i.test(value) ? value : undefined
+}
+
+function activityName(activity: TravelActivity) {
+  return activity.attractionName || activity.title || activity.location || '自由活动'
+}
+
+const travelRiskLabels: Record<string, string> = {
+  MODEL_UNAVAILABLE: '旅行模型响应超时或暂时不可用，当前展示的是规则降级方案。',
+  DAILY_ACTIVITY_LIMIT_EXCEEDED: '当天活动总时长超过当前旅行节奏上限，建议减少活动或增加休息时间。',
+  WEATHER_UNAVAILABLE: '天气服务未配置或暂时不可用，将在服务恢复后或出发前刷新。',
+  QWEATHER_API_KEY_NOT_CONFIGURED: '天气服务尚未配置，将在配置完成后或出发前刷新。',
+  WEATHER_FORECAST_COVERAGE_INCOMPLETE: '部分日期超出当前天气预报范围，出发前会自动刷新。',
+  LOCATION_UNAVAILABLE: '当前位置暂时无法解析，请补充出发城市后核实往返交通。',
+  ATTRACTIONS_UNAVAILABLE: '景点实时资料暂时不可用，请在出发前核实开放时间和预约要求。',
+  RESEARCH_UNAVAILABLE: '攻略资料搜索暂时不可用，当前方案仅使用已有信息生成。',
+  ROUTING_UNAVAILABLE: '路线服务暂时不可用，景点间交通时间需要出发前核实。',
+  OPENING_HOURS_UNVERIFIED: '景点开放时间暂无可验证的数据源，请出发前通过官方渠道核实。',
+  UNVERIFIED_ATTRACTION: '部分景点资料尚未通过外部数据源核实。',
+  RAIN_OUTDOOR_CONFLICT: '部分户外活动可能受降雨影响，请准备室内备选方案。',
+  INTERCITY_TRANSPORT_VERIFICATION_REQUIRED: '城际交通班次需要在出发前通过官方渠道核实。',
+}
+
+function summarizeTravelRisks(risks: NonNullable<TravelPlanData['risks']>) {
+  const groups = new Map<string, { code: string; message: string; count: number; dates: Set<string> }>()
+  for (const risk of risks) {
+    const rawMessage = typeof risk === 'string' ? risk : risk.message || risk.code || '信息需要出发前核实'
+    const code = typeof risk === 'string' && /^[A-Z0-9_]+$/.test(risk) ? risk : typeof risk === 'string' ? '' : risk.code || ''
+    const message = typeof risk === 'string'
+      ? travelRiskLabels[code] || travelRiskLabels[rawMessage] || rawMessage
+      : risk.message && !/^[A-Z0-9_]+$/.test(risk.message) ? risk.message : travelRiskLabels[code] || travelRiskLabels[rawMessage] || rawMessage
+    const key = code || message
+    const current = groups.get(key) ?? { code, message, count: 0, dates: new Set<string>() }
+    current.count += 1
+    if (typeof risk !== 'string' && risk.date) current.dates.add(risk.date)
+    groups.set(key, current)
+  }
+  return Array.from(groups.values()).map((risk) => {
+    if (risk.code === 'DAILY_ACTIVITY_LIMIT_EXCEEDED' && risk.count > 1) {
+      return { ...risk, message: `有 ${risk.count} 天的活动总时长超过当前旅行节奏上限，建议减少活动或增加休息时间。` }
+    }
+    return risk
+  })
+}
+
+function travelPlanPreview(data: TravelPlanData) {
+  const request = data.request ?? {}
+  const days = data.days ?? []
+  const weatherByDate = new Map((data.weather ?? []).map((item) => [item.date, item]))
+  const budget = data.budgetEstimate
+  const sources = data.sources ?? []
+  const risks = summarizeTravelRisks(data.risks ?? [])
+  const revisionDiff = data.revisionDiff ?? []
+  return (
+    <div className="ai-travel-plan-preview">
+      <div className="ai-travel-plan-meta">
+        <div><MapPin size={15} /><strong>{request.destination ?? '旅行目的地'}旅行计划</strong></div>
+        <span>{request.startDate ?? ''}{request.endDate ? ` 至 ${request.endDate}` : ''}</span>
+      </div>
+      {revisionDiff.length > 0 && (
+        <section className="ai-travel-summary-block ai-travel-revision-diff">
+          <div className="ai-travel-section-title"><strong>本次修改</strong><span>{data.revisionSummary || '局部更新'}</span></div>
+          <ul className="ai-travel-risks">{revisionDiff.map((change, index) => {
+            const before = change.before ? activityName(change.before) : '未设置'
+            const after = change.after ? activityName(change.after) : '未设置'
+            const beforeTime = change.before?.startTime || ''
+            const afterTime = change.after?.startTime || ''
+            const beforeDuration = change.before?.durationMinutes
+            const afterDuration = change.after?.durationMinutes
+            const details = [
+              beforeTime !== afterTime && `${beforeTime || '未设置'} -> ${afterTime || '未设置'}`,
+              beforeDuration !== afterDuration && `${beforeDuration ?? '未设置'} -> ${afterDuration ?? '未设置'} 分钟`,
+            ].filter(Boolean).join(' · ')
+            return <li key={`${change.date ?? ''}-${change.activity ?? index}`}><strong>{`第 ${change.day ?? ''} 天`}</strong>{` ${before} -> ${after}`}{details && <small>{details}</small>}</li>
+          })}</ul>
+        </section>
+      )}
+      {days.map((day, index) => {
+        const weather = weatherByDate.get(day.date ?? '')
+        const activities = day.activities ?? []
+        return (
+          <section className="ai-travel-day" key={`${day.date ?? ''}-${index}`}>
+            <div className="ai-travel-day-heading">
+              <div><strong>第 {index + 1} 天 · {day.title ?? '旅行日程'}</strong><small>{day.date ?? ''}</small></div>
+              {weather && <span className="ai-travel-weather"><CloudRain size={13} />{weather.condition || '天气待更新'} {weather.tempLow != null && weather.tempHigh != null ? `${weather.tempLow}~${weather.tempHigh}℃` : ''}<em>{confidenceLabels[weather.forecastConfidence ?? ''] ?? '待核实'}</em></span>}
+            </div>
+            <div className="ai-travel-activities">
+              {activities.map((activity, activityIndex) => {
+                const transitMinutes = activity.transitFromPrevious?.durationMinutes
+                  ?? (activity.transitFromPrevious?.durationSeconds != null ? Math.round(activity.transitFromPrevious.durationSeconds / 60) : undefined)
+                const backup = activity.backupActivity
+                return (
+                  <div className="ai-travel-activity" key={`${activity.attractionId ?? activityName(activity)}-${activityIndex}`}>
+                    <time>{activity.startTime || '待定'}</time>
+                    <i aria-hidden="true" />
+                    <div>
+                      <strong>{activityName(activity)}</strong>
+                      <span>{activity.durationMinutes ? `${activity.durationMinutes} 分钟` : '时长待核实'}{transitMinutes != null ? ` · 路上 ${transitMinutes} 分钟` : ''}</span>
+                      {activity.requiresReservation === true && <em><ShieldCheck size={12} />需要预约</em>}
+                      {backup && (backup.title || backup.attractionName) && <small><Umbrella size={12} />雨天备选：{backup.attractionName || backup.title}</small>}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </section>
+        )
+      })}
+      {budget && (
+        <section className="ai-travel-summary-block">
+          <div className="ai-travel-section-title"><WalletCards size={15} /><strong>预算估算</strong><span>{confidenceLabels[budget.confidence ?? ''] ?? '待核实'}</span></div>
+          <div className="ai-travel-budget-total">
+            <strong>{budget.minimum != null && budget.maximum != null ? `¥${budget.minimum.toLocaleString()} - ¥${budget.maximum.toLocaleString()}` : `¥${(budget.amount ?? 0).toLocaleString()}`}</strong>
+            <small>{budget.estimated === false ? '已核实金额' : '估算区间'}</small>
+          </div>
+          <div className="ai-travel-budget-grid">{(budget.breakdown ?? []).map((item, index) => <span key={`${item.category}-${index}`}><b>{budgetCategoryLabels[item.category ?? ''] ?? item.category ?? '其他'}</b><em>{item.minimum != null && item.maximum != null ? `¥${item.minimum.toLocaleString()} - ¥${item.maximum.toLocaleString()}` : `¥${(item.amount ?? 0).toLocaleString()}`}</em></span>)}</div>
+        </section>
+      )}
+      {risks.length > 0 && (
+        <section className="ai-travel-summary-block">
+          <div className="ai-travel-section-title"><CircleAlert size={15} /><strong>待核实风险</strong><span>{risks.length} 类</span></div>
+          <ul className="ai-travel-risks">{risks.map((risk) => <li key={risk.code || risk.message}>{risk.message}</li>)}</ul>
+        </section>
+      )}
+      {sources.length > 0 && (
+        <section className="ai-travel-summary-block">
+          <div className="ai-travel-section-title"><ExternalLink size={15} /><strong>数据来源</strong><span>{sources.length} 条</span></div>
+          <div className="ai-travel-sources">{sources.map((source, index) => {
+            const url = safeExternalUrl(source.sourceUrl || source.url)
+            const label = source.title || source.provider || '公开资料'
+            return <div key={`${url ?? label}-${index}`}><span>{url ? <a href={url} target="_blank" rel="noreferrer">{label}<ExternalLink size={11} /></a> : label}<small>{source.provider ?? '公开来源'} · {formatFetchedAt(source.fetchedAt)} · {confidenceLabels[source.confidence ?? source.sourceQuality ?? ''] ?? '待核实'}</small></span></div>
+          })}</div>
+        </section>
+      )}
     </div>
   )
 }
@@ -322,8 +507,30 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
   const [messages, setMessages] = useState<ChatMessage[]>(welcomeMessages)
   const [conversations, setConversations] = useState<AiConversation[]>([])
   const [selectedConversationIds, setSelectedConversationIds] = useState<string[]>([])
+  // 浏览器定位：由用户主动点击"获取我的位置"授权后再获取，随请求传给后端，旅行 subagent 据此推断出发地。
+  const [deviceLocation, setDeviceLocation] = useState<Record<string, unknown> | null>(null)
+  const [locationStatus, setLocationStatus] = useState<'idle' | 'granted' | 'denied' | 'unavailable' | 'requesting'>('idle')
+
+  const requestLocation = () => {
+    if (typeof navigator === 'undefined' || !('geolocation' in navigator)) { setLocationStatus('unavailable'); return }
+    setLocationStatus('requesting')
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setDeviceLocation({
+          lat: position.coords.latitude,
+          lng: position.coords.longitude,
+          permission: 'granted',
+          capturedAt: new Date().toISOString(),
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        })
+        setLocationStatus('granted')
+      },
+      () => setLocationStatus('denied'),
+      { enableHighAccuracy: false, timeout: 8000, maximumAge: 600000 },
+    )
+  }
   const [draft, setDraft] = useState<AiDraft>()
-  const [planReview, setPlanReview] = useState<Record<string, unknown>>()
+  const [planReview, setPlanReview] = useState<TravelPlanData>()
   const [dietData, setDietData] = useState<Record<string, unknown>>()
   const [inputRequirements, setInputRequirements] = useState<AgentInputRequirement[]>([])
   const [informationFormOpen, setInformationFormOpen] = useState(false)
@@ -645,10 +852,21 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
   }
 
   const send = async (messageOverride?: string, argumentsOverride?: Record<string, unknown>) => {
-    const message = messageOverride?.trim() || input.trim() || (attachments.length ? '请分析这些文件' : '')
+    const message = messageOverride?.trim() || input.trim()
     const currentRunning = conversations.some((conversation) => conversation.id === conversationId && conversation.runStatus === 'RUNNING')
       || runStatus === 'RUNNING'
-    if (!message || busy || uploading || loadingConversation || draft || currentRunning) return
+    if (busy || uploading || loadingConversation || draft || currentRunning) return
+    if (!message) {
+      // 只上传了文件、没说要做什么：先询问用户需求，不直接分析，附件保留在输入区。
+      if (attachments.length) {
+        setMessages((current) => [...current, {
+          role: 'assistant',
+          content: `已收到附件：${attachments.map((item) => item.fileName).join('、')}。你希望对它做什么？例如：总结内容、提取要点、回答我的问题、根据文件制定计划或任务。`,
+        }])
+        setInput('')
+      }
+      return
+    }
     const documentIds = attachments.map((item) => item.id)
     const displayMessage = attachments.length
       ? `${message}\n\n附件：${attachments.map((item) => item.fileName).join('、')}` : message
@@ -668,9 +886,12 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
       }
       const targetRunId = runId
       const targetRunStatus = runStatus
+      const mergedArguments = deviceLocation
+        ? { ...argumentsOverride, deviceLocation }
+        : argumentsOverride
       const response = targetRunId && (targetRunStatus === 'WAITING_USER' || targetRunStatus === 'FAILED')
-        ? await plannerApi.resumeAgent(targetRunId, message, documentIds, argumentsOverride)
-        : await plannerApi.startAgent(message, activeConversationId, documentIds, argumentsOverride)
+        ? await plannerApi.resumeAgent(targetRunId, message, documentIds, mergedArguments)
+        : await plannerApi.startAgent(message, activeConversationId, documentIds, mergedArguments)
       setConversations((current) => current.map((conversation) => conversation.id === activeConversationId
         ? { ...conversation, runId: response.runId, runStatus: 'RUNNING' }
         : conversation))
@@ -757,6 +978,29 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
       await refreshConversations()
     } catch (cause) {
       setError(cause instanceof Error ? '草案无法取消：' + cause.message : '草案无法取消。')
+    } finally { setBusy(false) }
+  }
+
+  const modifyDraft = async () => {
+    const message = input.trim()
+    if (!message || busy || !draft) return
+    setBusy(true)
+    setError('')
+    setMessages((current) => [...current, { role: 'user', content: `修改草案：${message}` }])
+    setInput('')
+    try {
+      const result = await plannerApi.modifyAgentDraft(draft.id, message)
+      if (result.draft) {
+        setDraft(result.draft)
+      } else {
+        setDraft(undefined)
+        setPlanReview(undefined)
+      }
+      setMessages((current) => [...current, { role: 'assistant', content: result.reply || '已按你的修改意见重新生成草案。' }])
+      if (result.runId) setRunId(result.runId)
+      await refreshConversations()
+    } catch (cause) {
+      setError(cause instanceof Error ? '草案修改失败：' + cause.message : '草案修改失败。')
     } finally { setBusy(false) }
   }
 
@@ -874,22 +1118,37 @@ export function AgentPage({ seed, onDataChanged }: { seed?: string; onDataChange
                   <strong>{action.summary || draftActionLabels[action.type] || action.type}</strong>
                   <div className="ai-draft-details">{draftActionDetails(action).map((detail) => <small key={detail}>{detail}</small>)}</div>
                   {draftPlanPreview(action)}
+                  {learningPlanPreview(action)}
                 </div>
               </article>)}
               <div className="ai-draft-actions">
                 <button className="primary-button" type="button" disabled={busy} onClick={() => void confirm()}><Check size={16} />确认执行</button>
-                <button className="secondary-button" type="button" disabled={busy} onClick={() => void cancel()}><X size={16} />取消草案并修改行程</button>
+                <button className="secondary-button" type="button" disabled={busy} onClick={() => void cancel()}><X size={16} />取消草案</button>
               </div>
             </section>
           )}
           <div className="ai-composer-zone">
+            <button
+              className={`agent-location-status${locationStatus === 'denied' ? ' denied' : ''}`}
+              type="button"
+              onClick={requestLocation}
+              disabled={locationStatus === 'requesting'}
+              title="先获取你的位置，之后旅行规划会按你的位置推断出发地"
+            >
+              <MapPin size={12} />
+              {locationStatus === 'granted' ? '已定位 · 旅行按你的位置出发（点击刷新）'
+                : locationStatus === 'requesting' ? '定位中…'
+                : locationStatus === 'denied' ? '点击重新授权定位'
+                : locationStatus === 'unavailable' ? '浏览器不支持定位'
+                : '点击获取我的位置'}
+            </button>
             {attachments.length > 0 && <div className="agent-attachments">{attachments.map((item) => <span className="agent-attachment" key={item.id}><FileText size={14} /><span><strong>{item.fileName}</strong><small>{item.vectorIndexed ? '已索引' : '已解析'}</small></span><button type="button" title="移除附件" aria-label={`移除 ${item.fileName}`} onClick={() => setAttachments((current) => current.filter((file) => file.id !== item.id))}><X size={13} /></button></span>)}</div>}
             <div className="ai-chat-composer">
-              <textarea value={input} disabled={Boolean(draft) || currentConversationRunning} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() } }} placeholder={draft ? '请先取消草案，再修改旅行行程' : planReview ? '输入修改意见，或点击“确认行程，生成草案”' : currentConversationRunning ? '当前对话正在后台处理，可切换到其他对话' : '输入消息'} rows={1} />
+              <textarea value={input} disabled={currentConversationRunning} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (draft) void modifyDraft(); else void send() } }} placeholder={draft ? '输入修改意见，重新生成草案（如：把每天改成 2 小时）' : planReview ? '输入修改意见，或点击“确认行程，生成草案”' : currentConversationRunning ? '当前对话正在后台处理，可切换到其他对话' : attachments.length ? '告诉 AI 你想对附件做什么，或留空直接发送让我先询问你' : '输入消息'} rows={1} />
               <div className="ai-composer-actions">
                 <input ref={fileInput} type="file" multiple hidden accept=".pdf,.doc,.docx,.txt,.md,.csv,.xls,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg" onChange={(event) => void selectFiles(event.target.files)} />
                 <button className="icon-button" type="button" disabled={busy || uploading || Boolean(draft) || currentConversationRunning} title="添加附件" aria-label="添加附件" onClick={() => fileInput.current?.click()}>{uploading ? <LoaderCircle className="spin" size={17} /> : <Paperclip size={17} />}</button>
-                <button className="icon-button ai-send-button" type="button" disabled={busy || uploading || Boolean(draft) || currentConversationRunning || (!input.trim() && !attachments.length)} title="发送" aria-label="发送" onClick={() => void send()}><Send size={17} /></button>
+                <button className="icon-button ai-send-button" type="button" disabled={busy || uploading || currentConversationRunning || (!input.trim() && !attachments.length)} title="发送" aria-label="发送" onClick={() => { if (draft) void modifyDraft(); else void send() }}><Send size={17} /></button>
               </div>
             </div>
           </div>

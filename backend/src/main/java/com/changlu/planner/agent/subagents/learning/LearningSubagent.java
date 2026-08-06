@@ -7,8 +7,10 @@ import com.changlu.planner.agent.core.contract.AgentStatus;
 import com.changlu.planner.agent.core.contract.Subagent;
 import com.changlu.planner.agent.core.contract.SubagentDefinition;
 import com.changlu.planner.agent.core.contract.SubagentRequest;
+import com.changlu.planner.agent.core.tool.ToolCall;
 import com.changlu.planner.features.learning.LearningService;
 import com.changlu.planner.features.command.AiCommandService;
+import com.changlu.planner.agent.subagents.learning.tools.LearningResearchTool;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -55,20 +57,28 @@ public final class LearningSubagent implements Subagent {
   private final StudyPlanSuggestionTool suggestionTool;
   private final KnowledgeGapTool gapTool;
   private final AiCommandService commands;
+  private final com.changlu.planner.agent.core.tool.ToolRegistry tools;
   private final Gson gson = new Gson();
   private final SubagentDefinition definition = new SubagentDefinition(
       "learning", "1.0.0", "学习目标管理、学习进度分析、学习计划建议和知识领域梳理",
       List.of("学习目标", "学习进度", "学习计划", "课程", "知识梳理"), List.of(),
-      new JsonObject(), new JsonObject(), Set.of(), false, true, Duration.ofSeconds(120), 2);
+      new JsonObject(), new JsonObject(), Set.of(LearningResearchTool.NAME), true, true,
+      Duration.ofSeconds(180), 2);
 
   public LearningSubagent(LearningService service, ModelClient model) {
-    this(service, model, null);
+    this(service, model, null, null);
   }
 
   public LearningSubagent(LearningService service, ModelClient model, AiCommandService commands) {
+    this(service, model, commands, null);
+  }
+
+  public LearningSubagent(LearningService service, ModelClient model, AiCommandService commands,
+                          com.changlu.planner.agent.core.tool.ToolRegistry tools) {
     this.service = service;
     this.model = model;
     this.commands = commands;
+    this.tools = tools;
     this.progressTool = new LearningProgressTool(service);
     this.suggestionTool = new StudyPlanSuggestionTool(service, model);
     this.gapTool = new KnowledgeGapTool(service);
@@ -156,6 +166,21 @@ public final class LearningSubagent implements Subagent {
         || normalized.contains("设立")) {
       return "create_goal";
     }
+    // 没有"创建"字样但表达"想学/要学X，达到/考到Y分"的创建目标意图。
+    // 例如「我现在想要学高数，学7天，希望实现期末考试达到95分」→ create_goal，
+    // 否则会落到 handleGeneral 只输出散文、不真正建草案，用户确认时丢失上下文。
+    boolean wantsLearn = normalized.contains("想学") || normalized.contains("要学")
+        || normalized.contains("打算学") || normalized.contains("准备学")
+        || normalized.contains("开始学") || normalized.contains("想考")
+        || normalized.contains("要考");
+    boolean hasTarget = normalized.contains("达到") || normalized.contains("考到")
+        || normalized.contains("分") || normalized.contains("目标");
+    boolean isQuestion = normalized.contains("怎么学") || normalized.contains("怎么")
+        || normalized.contains("如何") || normalized.contains("吗")
+        || normalized.endsWith("？") || normalized.endsWith("?");
+    if (wantsLearn && hasTarget && !isQuestion) {
+      return "create_goal";
+    }
     if (normalized.contains("修改") || normalized.contains("更新") || normalized.contains("调整目标")
         || normalized.contains("改到") || normalized.contains("改成") || normalized.contains("改一下")
         || normalized.contains("提前") || normalized.contains("推迟") || normalized.contains("顺延")) {
@@ -197,7 +222,11 @@ public final class LearningSubagent implements Subagent {
     addRequirement(requirements, input, "domain", "学习领域", "text", true);
     addRequirement(requirements, input, "targetDate", "目标日期", "date", true);
     addRequirement(requirements, input, "weeklyHours", "每周学习时长（小时）", "number", true);
-    if (!requirements.isEmpty()) return informationForm(input, requirements);
+    if (!requirements.isEmpty()) {
+      // 创建目标时会自动生成每日学习计划，引导用户走创建目标，避免前端无法提交的学习表单死路。
+      return waitingQuestion(
+          "请先创建一个学习目标（例如「创建学习目标：明年 6 月雅思 7 分，每周 10 小时」），创建时会自动联网调研并生成每日学习计划。");
+    }
     if (commands != null) {
       JsonObject fields = learningPlanFields(input);
       JsonObject action = new JsonObject(); action.addProperty("type", "create_learning_plan");
@@ -233,8 +262,8 @@ public final class LearningSubagent implements Subagent {
   }
 
   /**
-   * 创建学习目标——生成待确认草案。
-   * 结构化参数已带 title 时直接建草案；否则走模型解析自然语言，再落库可确认草案。
+   * 创建学习目标——联网调研领域，模型生成量化指标与课程大纲，逐日展开成每日学习计划，一并写入规划。
+   * 全部走待确认草案，用户确认后落库。
    */
   private LearningResult handleCreateGoal(SubagentRequest request, AgentContext context) throws Exception {
     String requestText = request.message();
@@ -242,11 +271,17 @@ public final class LearningSubagent implements Subagent {
     if (commands == null) {
       return LearningResult.error("学习规划服务不可用", "LEARNING_SERVICE_UNAVAILABLE");
     }
-    // 结构化输入已带 title → 直接建草案
+    // 结构化输入已带 title → 直接建目标草案（不含每日计划）
     if (input.has("title") && !input.get("title").isJsonNull()
         && !input.get("title").getAsString().isBlank()) {
+      String title = input.get("title").getAsString();
+      LearningService.LearningGoal existing = findDuplicateGoal(context, title,
+          string(input, "domain", ""), parseDate(input, "targetDate"));
+      if (existing != null) {
+        return LearningResult.success(existingGoalNotice(existing), new JsonObject());
+      }
       JsonObject action = goalAction("create_learning_goal",
-          "创建学习目标：" + input.get("title").getAsString(), whitelistGoalFields(input), null);
+          "创建学习目标：" + title, whitelistGoalFields(input), null);
       return createGoalDraft(context, requestText, "已生成学习目标草案，请确认后写入。", action);
     }
     if (!model.configured()) {
@@ -254,26 +289,38 @@ public final class LearningSubagent implements Subagent {
           "请配置 PLANNER_AI_API_KEY 后重试");
     }
     try {
-      JsonObject modelContext = goalDraftContext(requestText, context);
-      JsonArray draftMessages = LearningPrompt.goalDraftMessages(modelContext);
-      appendSharedContext(draftMessages, context);
-      // 默认 60s 超时 + 2 次重试，避免慢模型在 25s 内未返回被误判为失败。
-      JsonObject aiResult = model.completeJson("learning-goal-draft",
-          draftMessages, 0.3, 1200);
-      JsonObject goal = aiResult.has("draft") && aiResult.get("draft").isJsonObject()
-          ? aiResult.getAsJsonObject("draft") : aiResult;
+      // 1. 联网调研目标领域，拿公开资料
+      JsonArray sources = researchSources(requestText, context);
+      // 2. 模型生成课程大纲（量化指标 + 里程碑 + 阶段 + 每日模板）
+      JsonObject curriculum = requestCurriculum(requestText, input, sources, context);
+      JsonObject goal = curriculum.has("goal") && curriculum.get("goal").isJsonObject()
+          ? curriculum.getAsJsonObject("goal") : curriculum;
       String title = string(goal, "title", "");
       if (title.isBlank()) {
         return waitingQuestion(
             "请描述你想创建的学习目标，包括名称和学习领域，例如「创建学习目标：今年把英语四级考到 600 分」。");
       }
-      JsonObject fields = whitelistGoalFields(goal);
-      if (!fields.has("title")) fields.addProperty("title", title);
-      if (aiResult.has("rationale") && !aiResult.get("rationale").isJsonNull()) {
-        fields.addProperty("reason", aiResult.get("rationale").getAsString());
+      LocalDate targetDate = parseDate(goal, "targetDate");
+      // 2.5. 已有同主题活跃目标时不重复创建，避免确认时每日日程互相冲突（schedule_conflict）。
+      LearningService.LearningGoal existing = findDuplicateGoal(context, title,
+          string(goal, "domain", ""), targetDate);
+      if (existing != null) {
+        return LearningResult.success(existingGoalNotice(existing), new JsonObject());
       }
-      JsonObject action = goalAction("create_learning_goal", "创建学习目标：" + title, fields, null);
-      return createGoalDraft(context, requestText, "已生成学习目标草案：「" + title + "」，请确认后写入。", action);
+      // 3a. 没有明确目标日期 → 只创建目标草案（不生成每日计划）
+      if (targetDate == null || targetDate.isBefore(LocalDate.now())) {
+        JsonObject fields = whitelistGoalFields(goal);
+        if (!fields.has("title")) fields.addProperty("title", title);
+        if (curriculum.has("targetMetrics")) fields.add("targetMetrics", curriculum.get("targetMetrics").deepCopy());
+        if (curriculum.has("milestones")) fields.add("milestones", curriculum.get("milestones").deepCopy());
+        JsonObject action = goalAction("create_learning_goal", "创建学习目标：" + title, fields, null);
+        return createGoalDraft(context, requestText, "已生成学习目标草案：「" + title + "」，请确认后写入。", action);
+      }
+      // 3b. 有目标日期 → 逐日展开每日学习计划，写入规划
+      JsonObject planFields = dailyPlanFields(curriculum, goal, title, targetDate, input);
+      JsonObject action = goalAction("create_learning_plan", "创建学习计划：" + title, planFields, null);
+      String reply = "已生成学习目标与每日学习计划草案：「" + title + "」，确认后写入计划并按天推进。";
+      return createGoalDraft(context, requestText, reply, action);
     } catch (Exception e) {
       LOG.warn("[学习规划] AI草案生成失败 原因={}", e.getMessage());
       return LearningResult.error("生成学习目标草案失败，请重试", e.getMessage());
@@ -435,6 +482,39 @@ public final class LearningSubagent implements Subagent {
     return LearningResult.waitingUser("请先补充学习信息。", data);
   }
 
+  /**
+   * 检测是否已存在同主题的活跃学习目标。
+   * 命中条件：目标日期相近（±90 天）且（领域一致 或 标题共享片段 ≥3 字）。
+   * 避免重复创建目标+每日计划，否则确认时 330 条每日日程会与旧计划重叠，被 schedule_conflict 整单拦截。
+   */
+  private LearningService.LearningGoal findDuplicateGoal(AgentContext context, String title,
+                                                         String domain, LocalDate targetDate) throws Exception {
+    if (title == null || title.isBlank() || targetDate == null) return null;
+    var goals = service.listGoals(context.identity());
+    if (goals.isEmpty()) return null;
+    String normalizedTitle = normalize(title);
+    String normalizedDomain = normalize(domain);
+    for (var goal : goals) {
+      if (!"active".equals(goal.status()) || goal.targetDate() == null) continue;
+      long days = Math.abs(java.time.temporal.ChronoUnit.DAYS.between(targetDate, goal.targetDate()));
+      if (days > 90) continue;
+      String goalDomain = normalize(goal.domain());
+      boolean sameDomain = !normalizedDomain.isBlank() && !goalDomain.isBlank()
+          && (goalDomain.contains(normalizedDomain) || normalizedDomain.contains(goalDomain));
+      boolean similarTitle = longestShared(normalizedTitle, normalize(goal.title())) >= 3;
+      if (sameDomain || similarTitle) return goal;
+    }
+    return null;
+  }
+
+  /** 已有目标时的提示文案，指引用户修改而不是重复创建。 */
+  private String existingGoalNotice(LearningService.LearningGoal goal) {
+    return "你已有一个活跃的学习目标「" + goal.title() + "」"
+        + (goal.targetDate() != null ? "（目标日期 " + goal.targetDate() + "）" : "")
+        + (goal.weeklyHours() != null ? "，每周 " + goal.weeklyHours() + " 小时" : "")
+        + "。为避免生成重复的计划和日程，我没有重复创建；如需调整可以说「修改" + goal.title() + "」。";
+  }
+
   /** 通过 createStructuredDraft 落库可确认草案，返回带真实 draft.id 的待确认结果。 */
   private LearningResult createGoalDraft(AgentContext context, String requestText, String reply,
                                          JsonObject action) throws Exception {
@@ -454,21 +534,44 @@ public final class LearningSubagent implements Subagent {
     return action;
   }
 
-  /** 只保留学习目标动作允许的字段，丢弃模型输出里的扩展键（如 milestones）。 */
+  /** 只保留学习目标动作允许的字段，丢弃模型输出里的无关扩展键。 */
   private JsonObject whitelistGoalFields(JsonObject source) {
     JsonObject fields = new JsonObject();
     for (String key : List.of("title", "description", "domain", "priority", "targetDate",
-        "weeklyHours", "status", "planId", "reason")) {
+        "weeklyHours", "status", "planId", "reason", "targetMetrics", "milestones")) {
       if (source.has(key) && !source.get(key).isJsonNull()) fields.add(key, source.get(key).deepCopy());
     }
     return fields;
   }
 
-  private JsonObject goalDraftContext(String requestText, AgentContext context) throws Exception {
+  /** 联网调研目标领域，失败时返回空数组不阻塞流程。 */
+  private JsonArray researchSources(String requestText, AgentContext context) {
+    JsonArray sources = new JsonArray();
+    if (tools == null) return sources;
+    try {
+      JsonObject arguments = new JsonObject();
+      arguments.addProperty("query", requestText + " 学习方法 备考资料 课程阶段 最新");
+      AgentResult research = tools.execute(new ToolCall(context.runId() + ":learning:research", null,
+          LearningResearchTool.NAME, arguments), context);
+      if (research.data().has("sources") && research.data().get("sources").isJsonArray()) {
+        sources = research.data().getAsJsonArray("sources");
+      }
+    } catch (Exception error) {
+      LOG.warn("[学习规划] 调研失败，按无资料继续：{}", error.getMessage());
+    }
+    return sources;
+  }
+
+  /** 让模型基于请求与调研资料生成课程大纲（量化指标 + 里程碑 + 阶段 + 每日模板）。 */
+  private JsonObject requestCurriculum(String requestText, JsonObject input, JsonArray sources,
+                                       AgentContext context) throws Exception {
     JsonObject modelContext = new JsonObject();
     modelContext.addProperty("request", requestText);
-    // 让模型知道"今天"，避免把"今年/年底"等相对时间算成训练期年份。
     modelContext.addProperty("currentDate", LocalDate.now().toString());
+    if (input.has("targetDate") && !input.get("targetDate").isJsonNull()) {
+      modelContext.addProperty("targetDate", input.get("targetDate").getAsString());
+    }
+    modelContext.add("sources", sources);
     JsonArray existing = new JsonArray();
     for (var goal : service.listGoals(context.identity())) {
       JsonObject g = new JsonObject();
@@ -478,10 +581,176 @@ public final class LearningSubagent implements Subagent {
       existing.add(g);
     }
     modelContext.add("existingGoals", existing);
-    JsonArray knownAreas = new JsonArray();
-    for (var area : service.listKnowledgeAreas(context.identity())) knownAreas.add(area.name());
-    modelContext.add("knownAreas", knownAreas);
-    return modelContext;
+    JsonArray messages = LearningPrompt.curriculumMessages(modelContext);
+    appendSharedContext(messages, context);
+    // 逐日 dailyPlan 会显著增加输出长度：max_tokens 从 4000 提到 8000，并放宽超时到 170 秒。
+    return model.completeJson("learning-curriculum", messages, 0.3, 8000, 170, 2);
+  }
+
+  /** 把课程大纲展开成 create_learning_plan 的 fields：阶段 → 每日任务 → 每日日程。 */
+  private JsonObject dailyPlanFields(JsonObject curriculum, JsonObject goal, String title,
+                                     LocalDate targetDate, JsonObject input) {
+    JsonObject fields = new JsonObject();
+    fields.addProperty("title", string(curriculum, "planTitle", title + "学习计划"));
+    fields.addProperty("description", "由学习规划 Agent 联网调研后生成的每日学习计划，每天一个任务按计划推进。");
+    fields.addProperty("color", "#72806A");
+    fields.addProperty("dueDate", targetDate.toString());
+    fields.addProperty("reason", "learning_agent");
+    // 内嵌学习目标（含量化指标与里程碑），落库时关联 plan_id
+    JsonObject goalFields = goal.deepCopy();
+    if (curriculum.has("targetMetrics")) goalFields.add("targetMetrics", curriculum.get("targetMetrics").deepCopy());
+    if (curriculum.has("milestones")) goalFields.add("milestones", curriculum.get("milestones").deepCopy());
+    if (input.has("weeklyHours") && input.get("weeklyHours").isJsonPrimitive()) {
+      goalFields.addProperty("weeklyHours", input.get("weeklyHours").getAsDouble());
+    }
+    if (input.has("domain") && input.get("domain").isJsonPrimitive()) {
+      goalFields.addProperty("domain", input.get("domain").getAsString());
+    }
+    fields.add("learningGoal", goalFields);
+
+    int totalDays = (int) java.time.temporal.ChronoUnit.DAYS.between(LocalDate.now(), targetDate) + 1;
+    JsonArray modelStages = array(curriculum, "stages");
+    if (modelStages.isEmpty()) {
+      JsonObject fallback = new JsonObject();
+      fallback.addProperty("title", "系统学习");
+      fallback.addProperty("days", totalDays);
+      fallback.addProperty("dailyMinutes", 90);
+      JsonArray topics = new JsonArray(); topics.add("当日学习内容");
+      fallback.add("topics", topics);
+      fallback.addProperty("dailyTemplate", "完成{topic}并记录学习结果");
+      modelStages.add(fallback);
+    }
+
+    JsonArray stages = new JsonArray();
+    LocalDate date = LocalDate.now();
+    int dayIndex = 1;
+    int allocated = 0;
+    JsonArray lastDailyPlan = new JsonArray();
+    for (int s = 0; s < modelStages.size() && !date.isAfter(targetDate); s++) {
+      JsonObject ms = modelStages.get(s).getAsJsonObject();
+      int stageDays = s == modelStages.size() - 1 ? totalDays - allocated : intValue(ms, "days", 0);
+      if (stageDays <= 0) stageDays = totalDays - allocated;
+      if (stageDays <= 0) break;
+      String stageTitle = string(ms, "title", "阶段" + (s + 1));
+      int minutes = Math.max(25, intValue(ms, "dailyMinutes", 90));
+      JsonArray topics = array(ms, "topics");
+      String template = string(ms, "dailyTemplate", "完成{topic}并记录学习结果");
+      String priority = string(ms, "priority", s == 0 ? "high" : "medium");
+      // 逐日具体任务：模型生成的 dailyPlan 条目数应等于 days，第 i 条对应阶段第 i 天；缺失时退回 topics 轮换。
+      JsonArray dailyPlan = array(ms, "dailyPlan");
+      lastDailyPlan = dailyPlan;
+
+      JsonObject stage = new JsonObject();
+      stage.addProperty("title", stageTitle);
+      stage.addProperty("dueDate", date.plusDays(stageDays - 1L).toString());
+      JsonArray tasks = new JsonArray();
+      for (int d = 0; d < stageDays && !date.isAfter(targetDate); d++, date = date.plusDays(1), dayIndex++) {
+        JsonObject planItem = dailyPlanItem(dailyPlan, d);
+        String dayTitle = planItem == null ? "" : string(planItem, "title", "");
+        String dayContent = planItem == null ? "" : string(planItem, "content", "");
+        if (dayTitle.isBlank()) {
+          // 没有逐日安排时退回轮换主题，保证每天仍有具体内容而非泛化阶段名。
+          String topic = topicFor(dayIndex, topics);
+          dayTitle = "当日学习内容".equals(topic) ? stageTitle : topic;
+        }
+        if (dayContent.isBlank()) {
+          dayContent = template.replace("{topic}", dayTitle);
+        }
+        if (dayTitle.length() > 50) dayTitle = dayTitle.substring(0, 50) + "…";
+        JsonObject task = new JsonObject();
+        task.addProperty("title", "Day " + dayIndex + " · " + dayTitle);
+        task.addProperty("description", dayContent);
+        task.addProperty("priority", priority);
+        task.addProperty("estimatedMinutes", minutes);
+        task.addProperty("dueAt", date + "T23:00:00");
+        JsonArray schedules = new JsonArray();
+        JsonObject schedule = new JsonObject();
+        schedule.addProperty("title", stageTitle + " · 每日学习");
+        schedule.addProperty("startAt", date + "T20:00:00");
+        schedule.addProperty("durationMinutes", minutes);
+        schedules.add(schedule);
+        task.add("schedules", schedules);
+        tasks.add(task);
+      }
+      allocated += stageDays;
+      stage.add("tasks", tasks);
+      stages.add(stage);
+    }
+    // 兜底：阶段覆盖不足时补齐到目标日期，尽量复用最后一个阶段的逐日安排，避免泛化成"冲刺巩固"。
+    while (!date.isAfter(targetDate)) {
+      JsonObject stage = new JsonObject();
+      stage.addProperty("title", "冲刺巩固");
+      stage.addProperty("dueDate", targetDate.toString());
+      JsonArray tasks = new JsonArray();
+      while (!date.isAfter(targetDate)) {
+        JsonObject planItem = dailyPlanItem(lastDailyPlan, dayIndex - 1);
+        String dayTitle = planItem == null ? "" : string(planItem, "title", "");
+        String dayContent = planItem == null ? "" : string(planItem, "content", "");
+        if (dayTitle.isBlank()) dayTitle = "冲刺巩固";
+        if (dayContent.isBlank()) dayContent = "按计划完成当日学习并复盘";
+        if (dayTitle.length() > 50) dayTitle = dayTitle.substring(0, 50) + "…";
+        JsonObject task = new JsonObject();
+        task.addProperty("title", "Day " + dayIndex + " · " + dayTitle);
+        task.addProperty("description", dayContent);
+        task.addProperty("priority", "medium");
+        task.addProperty("estimatedMinutes", 90);
+        task.addProperty("dueAt", date + "T23:00:00");
+        JsonArray schedules = new JsonArray();
+        JsonObject schedule = new JsonObject();
+        schedule.addProperty("title", "冲刺巩固 · 每日学习");
+        schedule.addProperty("startAt", date + "T20:00:00");
+        schedule.addProperty("durationMinutes", 90);
+        schedules.add(schedule);
+        task.add("schedules", schedules);
+        tasks.add(task);
+        date = date.plusDays(1); dayIndex++;
+      }
+      stage.add("tasks", tasks);
+      stages.add(stage);
+    }
+    fields.add("stages", stages);
+    return fields;
+  }
+
+  /** 取 dailyPlan 的第 index 条（超出条数时按天轮换复用）；支持 {title,content} 对象或纯字符串，无效时返回 null。 */
+  private JsonObject dailyPlanItem(JsonArray dailyPlan, int index) {
+    if (dailyPlan == null || dailyPlan.isEmpty()) return null;
+    JsonElement element = dailyPlan.get(index % dailyPlan.size());
+    if (element.isJsonPrimitive() && element.getAsJsonPrimitive().isString()) {
+      String text = element.getAsString();
+      if (text.isBlank()) return null;
+      JsonObject item = new JsonObject();
+      item.addProperty("title", "");
+      item.addProperty("content", text);
+      return item;
+    }
+    if (!element.isJsonObject()) return null;
+    JsonObject item = element.getAsJsonObject();
+    boolean hasTitle = item.has("title") && !item.get("title").isJsonNull()
+        && !item.get("title").getAsString().isBlank();
+    boolean hasContent = item.has("content") && !item.get("content").isJsonNull()
+        && !item.get("content").getAsString().isBlank();
+    return (hasTitle || hasContent) ? item : null;
+  }
+
+  private String topicFor(int dayIndex, JsonArray topics) {
+    if (topics == null || topics.isEmpty()) return "当日学习内容";
+    JsonElement element = topics.get((dayIndex - 1) % topics.size());
+    return element.isJsonPrimitive() ? element.getAsString() : "当日学习内容";
+  }
+
+  private JsonArray array(JsonObject object, String name) {
+    return object.has(name) && object.get(name).isJsonArray() ? object.get(name).getAsJsonArray() : new JsonArray();
+  }
+
+  private int intValue(JsonObject object, String name, int fallback) {
+    return object.has(name) && object.get(name).isJsonPrimitive() ? object.get(name).getAsInt() : fallback;
+  }
+
+  private LocalDate parseDate(JsonObject object, String name) {
+    String value = string(object, name, "");
+    if (value.isBlank()) return null;
+    try { return LocalDate.parse(value); } catch (java.time.format.DateTimeParseException ignored) { return null; }
   }
 
   /** 按显式 goalId、标题/领域模糊匹配或序号解析目标；0 个或多个命中时返回 null 由调用方追问。 */

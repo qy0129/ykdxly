@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 import com.changlu.planner.features.learning.LearningService;
 import com.changlu.planner.shared.database.Database;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import org.junit.jupiter.api.Test;
 
@@ -31,8 +32,8 @@ class LearningProgressToolTest {
     // 由于 assessGoal 是 private，这里通过构建不同状态的目标数据间接验证
     // 实际上测试的是 LearningService record 的构造
     LearningService.LearningGoal activeGoal = new LearningService.LearningGoal(
-        "id1", "测试目标", "描述", "programming", "high", null, 5.0,
-        "active", 85.0, 10, 8, 480, 1,
+        "id1", null, "测试目标", "描述", "programming", "high", null, 5.0,
+        "active", new JsonArray(), new JsonArray(), 85.0, 10, 8, 480, 1,
         java.time.LocalDateTime.now(), java.time.LocalDateTime.now());
 
     assertEquals("active", activeGoal.status());
@@ -112,8 +113,8 @@ class LearningProgressToolTest {
   @Test
   void learningGoalTargetDateCanBeNull() {
     LearningService.LearningGoal goal = new LearningService.LearningGoal(
-        "id1", "无截止日期目标", "", "general", "medium", null, null,
-        "active", 0, 0, 0, 0, 1,
+        "id1", null, "无截止日期目标", "", "general", "medium", null, null,
+        "active", new JsonArray(), new JsonArray(), 0, 0, 0, 0, 1,
         java.time.LocalDateTime.now(), java.time.LocalDateTime.now());
 
     assertNull(goal.targetDate());

@@ -12,6 +12,10 @@ import com.google.gson.JsonObject;
  * saveToPlanner 等）。契约：只返回能从消息中确认的字段，未提及的省略，绝不编造。
  */
 public interface DietArgumentExtractor {
-  /** 从自然语言消息提取结构化参数；无法确认时返回空对象，调用方可安全合并。 */
-  JsonObject extract(String message) throws Exception;
+  /**
+   * 从自然语言消息提取结构化参数；无法确认时返回空对象，调用方可安全合并。
+   *
+   * @param sharedContext 用户长期记忆与最近对话；提取器可从中补全用户本人已明确陈述过的稳定资料
+   */
+  JsonObject extract(String message, String sharedContext) throws Exception;
 }

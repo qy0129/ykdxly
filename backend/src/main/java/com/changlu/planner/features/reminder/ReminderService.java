@@ -1,6 +1,8 @@
 package com.changlu.planner.features.reminder;
 
+import com.changlu.planner.agent.core.ModelClient;
 import com.changlu.planner.shared.database.Database;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.sql.Connection;
@@ -13,16 +15,34 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 提醒的唯一业务入口：把待办提醒写入 outbox，再分别投递到网页和微信。
  * outbox 的 dedup_key 保证修改后的新提醒可以重新生成，已发送的提醒不会重复发送。
+ * 微信提醒支持结合长期记忆生成鼓励型个性化文案；模型不可用或生成失败时回退固定模板。
  */
 public final class ReminderService {
+  private static final Logger LOG = LoggerFactory.getLogger(ReminderService.class);
   private static final DateTimeFormatter DISPLAY_TIME = DateTimeFormatter.ofPattern("M月d日 HH:mm");
   private final Database database;
+  private final ModelClient model;
+  private final MemoryProvider memoryProvider;
 
-  public ReminderService(Database database) { this.database = database; }
+  public ReminderService(Database database) { this(database, null, null); }
+
+  public ReminderService(Database database, ModelClient model, MemoryProvider memoryProvider) {
+    this.database = database;
+    this.model = model;
+    this.memoryProvider = memoryProvider;
+  }
+
+  /** 长期记忆读取提供者；允许抛异常，由调用方兜底。 */
+  @FunctionalInterface
+  public interface MemoryProvider {
+    String load(Database.Context context) throws Exception;
+  }
 
   /** 网页轮询到期提醒，并在返回前标记为已投递，避免刷新页面重复弹窗。 */
   public List<JsonObject> dueForWeb(Database.Context context) throws SQLException {
@@ -46,7 +66,7 @@ public final class ReminderService {
       syncOutbox(connection, context, "wechat");
       for (Outbox item : claimDue(connection, context.userId(), "wechat")) {
         try {
-          sender.send(formatMessage(item.payload()));
+          sender.send(personalizedMessage(context, item.payload()));
           markSent(connection, item.id());
         } catch (Exception error) {
           markRetry(connection, item.id(), error.getMessage());
@@ -163,6 +183,41 @@ public final class ReminderService {
     String display = dueAt;
     try { display = LocalDateTime.parse(dueAt).format(DISPLAY_TIME); } catch (RuntimeException ignored) { }
     return "提醒：" + item.get("title").getAsString() + "\n截止时间：" + display + "\n请打开长路计划完成它。";
+  }
+
+  /** 鼓励型个性化提醒：结合长期记忆让模型写一句有温度的话；模型不可用或生成失败时回退固定模板。 */
+  private String personalizedMessage(Database.Context context, String value) {
+    JsonObject item = payload(value);
+    String title = item.get("title").getAsString();
+    String display = item.get("dueAt").getAsString();
+    try { display = LocalDateTime.parse(item.get("dueAt").getAsString()).format(DISPLAY_TIME); } catch (RuntimeException ignored) { }
+    String fallback = formatMessage(value);
+    if (model == null || !model.configured()) return fallback;
+    try {
+      String memory = memoryProvider == null ? "" : safeMemory(memoryProvider, context);
+      JsonArray messages = new JsonArray();
+      messages.add(ModelClient.message("system", """
+          你是长路计划的好友式提醒助手。根据用户的长期记忆和待办信息，生成一句简短、真诚、鼓励型的提醒。
+          要求：
+          - 自然地包含待办标题和截止时间，让用户知道要做什么、什么时候截止。
+          - 语气像关心你的朋友，真诚温暖、有鼓励感；不油腻、不肉麻、不夸张浪漫。
+          - 只使用用户长期记忆里明确存在的信息；不知道的事（年龄、称呼等）不要虚构。
+          - 不超过 60 字，只输出提醒正文，不要加标题或引号，至多一个轻量表情符号。
+          """));
+      messages.add(ModelClient.message("user", "用户长期记忆：\n" + (memory.isBlank() ? "（暂无）" : memory)
+          + "\n\n待办标题：" + title + "\n截止时间：" + display));
+      String text = model.completeText("reminder-encouraging", messages, 0.8, 200, 20, 1).trim();
+      if (text.isBlank()) return fallback;
+      if (text.length() > 120) text = text.substring(0, 117) + "...";
+      return text;
+    } catch (Exception error) {
+      LOG.warn("[提醒文案生成失败，回退固定模板] 原因={}", error.getMessage());
+      return fallback;
+    }
+  }
+
+  private String safeMemory(MemoryProvider provider, Database.Context context) {
+    try { return provider.load(context); } catch (Exception ignored) { return ""; }
   }
 
   private record Outbox(UUID id, String payload) {}

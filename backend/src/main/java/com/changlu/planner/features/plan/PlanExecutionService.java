@@ -33,7 +33,7 @@ public final class PlanExecutionService {
     String sql = "SELECT t.*, COALESCE(occ.total_count,0) schedule_count, COALESCE(occ.done_count,0) completed_schedule_count "
         + "FROM plan_tasks t JOIN plans p ON p.id = t.plan_id "
         + "LEFT JOIN (SELECT task_id,COUNT(*) total_count,SUM(status='done') done_count FROM schedule_items "
-        + "WHERE deleted_at IS NULL AND source_type='task_recurrence' AND status<>'cancelled' GROUP BY task_id) occ ON occ.task_id=t.id "
+        + "WHERE deleted_at IS NULL AND status<>'cancelled' GROUP BY task_id) occ ON occ.task_id=t.id "
         + "WHERE t.plan_id = ? AND p.workspace_id = ? AND t.deleted_at IS NULL AND p.deleted_at IS NULL "
         + "ORDER BY t.stage_id, t.sort_order, t.created_at";
     JsonArray rows = new JsonArray();
@@ -321,13 +321,16 @@ public final class PlanExecutionService {
     }
     UUID id = UUID.randomUUID();
     try (PreparedStatement p = c.prepareStatement(
-        "INSERT INTO schedule_items (id, workspace_id, plan_id, stage_id, task_id, created_by, title, description, start_at, duration_minutes, source_type) "
-            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+        "INSERT INTO schedule_items (id, workspace_id, plan_id, stage_id, task_id, created_by, title, description, start_at, duration_minutes, source_type, location_name, latitude, longitude, coordinate_system, timezone_id, source_url, reservation_required) "
+            + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
       p.setBytes(1, Database.uuidBytes(id)); p.setBytes(2, Database.uuidBytes(context.workspaceId()));
       p.setBytes(3, bytes(planId)); p.setBytes(4, bytes(stageId)); p.setBytes(5, bytes(taskId));
       p.setBytes(6, Database.uuidBytes(context.userId())); p.setString(7, required(fields, "title"));
       p.setString(8, nullable(fields, "description")); p.setTimestamp(9, Timestamp.valueOf(start));
-      p.setInt(10, duration); p.setString(11, source); p.executeUpdate();
+      p.setInt(10, duration); p.setString(11, source); p.setString(12, nullable(fields, "locationName"));
+      p.setObject(13, decimal(fields, "latitude")); p.setObject(14, decimal(fields, "longitude"));
+      p.setString(15, nullable(fields, "coordinateSystem")); p.setString(16, nullable(fields, "timezoneId"));
+      p.setString(17, nullable(fields, "sourceUrl")); p.setObject(18, nullableBoolean(fields, "reservationRequired")); p.executeUpdate();
     }
     JsonObject after = schedule(c, context.workspaceId(), id, false);
     record(c, context, draftId, changeSetId, "schedule", id, "create_schedule", null, after,
@@ -362,11 +365,15 @@ public final class PlanExecutionService {
         "UPDATE schedule_items SET title = COALESCE(?, title), description = COALESCE(?, description), "
             + "start_at = ?, duration_minutes = ?, status = COALESCE(?, status), "
             + "completed_at = CASE WHEN ? = 'done' AND completed_at IS NULL THEN NOW() WHEN ? IS NOT NULL AND ? <> 'done' THEN NULL ELSE completed_at END, "
-            + "version = version + 1 WHERE id = ? AND version = ? AND workspace_id = ? AND deleted_at IS NULL")) {
+            + "location_name=COALESCE(?,location_name),latitude=COALESCE(?,latitude),longitude=COALESCE(?,longitude),"
+            + "coordinate_system=COALESCE(?,coordinate_system),timezone_id=COALESCE(?,timezone_id),source_url=COALESCE(?,source_url),"
+            + "reservation_required=COALESCE(?,reservation_required),version = version + 1 WHERE id = ? AND version = ? AND workspace_id = ? AND deleted_at IS NULL")) {
       p.setString(1, nullable(fields, "title")); p.setString(2, nullable(fields, "description"));
       p.setTimestamp(3, Timestamp.valueOf(start)); p.setInt(4, duration); p.setString(5, status);
       p.setString(6, status); p.setString(7, status); p.setString(8, status);
-      p.setBytes(9, Database.uuidBytes(scheduleId)); p.setInt(10, expected); p.setBytes(11, Database.uuidBytes(context.workspaceId()));
+      p.setString(9, nullable(fields, "locationName")); p.setObject(10, decimal(fields, "latitude")); p.setObject(11, decimal(fields, "longitude"));
+      p.setString(12, nullable(fields, "coordinateSystem")); p.setString(13, nullable(fields, "timezoneId")); p.setString(14, nullable(fields, "sourceUrl"));
+      p.setObject(15, nullableBoolean(fields, "reservationRequired")); p.setBytes(16, Database.uuidBytes(scheduleId)); p.setInt(17, expected); p.setBytes(18, Database.uuidBytes(context.workspaceId()));
       if (p.executeUpdate() == 0) throw new IllegalStateException("schedule_version_conflict");
     }
     JsonObject after = schedule(c, context.workspaceId(), scheduleId, false);
@@ -456,7 +463,7 @@ public final class PlanExecutionService {
   private void syncLinkedTask(Connection c, UUID workspaceId, UUID taskId) throws SQLException {
     String summarySql = "SELECT t.plan_id,COUNT(s.id) total_count,COALESCE(SUM(s.status='done'),0) done_count "
         + "FROM plan_tasks t JOIN plans p ON p.id=t.plan_id LEFT JOIN schedule_items s ON s.task_id=t.id "
-        + "AND s.source_type='task_recurrence' AND s.deleted_at IS NULL AND s.status<>'cancelled' "
+        + "AND s.deleted_at IS NULL AND s.status<>'cancelled' "
         + "WHERE t.id=? AND p.workspace_id=? AND t.deleted_at IS NULL GROUP BY t.plan_id";
     try (PreparedStatement summary = c.prepareStatement(summarySql)) {
       summary.setBytes(1, Database.uuidBytes(taskId)); summary.setBytes(2, Database.uuidBytes(workspaceId));
@@ -527,6 +534,21 @@ public final class PlanExecutionService {
     if (!withinAvailability(preference.getAsJsonObject("availability"), start, end)) throw new IllegalArgumentException("outside_availability");
   }
 
+  /** 返回与给定时段重叠的已有日程标题（用于草案创建前的冲突询问，不抛异常）。 */
+  public List<String> findScheduleConflicts(Database.Context context, LocalDateTime start, int durationMinutes) throws SQLException {
+    LocalDateTime end = start.plusMinutes(durationMinutes);
+    List<String> conflicts = new ArrayList<>();
+    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
+        "SELECT id, title FROM schedule_items WHERE workspace_id = ? AND deleted_at IS NULL AND status <> 'cancelled' "
+            + "AND start_at < ? AND DATE_ADD(start_at, INTERVAL duration_minutes MINUTE) > ?")) {
+      p.setBytes(1, Database.uuidBytes(context.workspaceId()));
+      p.setTimestamp(2, Timestamp.valueOf(end));
+      p.setTimestamp(3, Timestamp.valueOf(start));
+      try (ResultSet rs = p.executeQuery()) { while (rs.next()) conflicts.add(rs.getString("title")); }
+    }
+    return conflicts;
+  }
+
   public void recomputeProgress(Connection c, UUID planId) throws SQLException {
     String occurrenceJoin = " LEFT JOIN (SELECT task_id,COUNT(*) total_count,SUM(status='done') done_count FROM schedule_items "
         + "WHERE deleted_at IS NULL AND source_type='task_recurrence' AND status<>'cancelled' GROUP BY task_id) occ ON occ.task_id=t.id ";
@@ -552,14 +574,26 @@ public final class PlanExecutionService {
         + "WHERE t.plan_id = ? AND t.deleted_at IS NULL AND t.status <> 'cancelled' GROUP BY t.plan_id) x ON x.plan_id = p.id "
         + "SET p.task_progress = COALESCE(x.task_pct, 0), p.effort_progress = COALESCE(x.effort_pct, 0), p.progress = COALESCE(x.task_pct, 0) "
         + "WHERE p.id = ? AND p.deleted_at IS NULL AND EXISTS (SELECT 1 FROM plan_tasks history WHERE history.plan_id=p.id)";
-    try (PreparedStatement p = c.prepareStatement(planSql)) { p.setBytes(1, Database.uuidBytes(planId)); p.setBytes(2, Database.uuidBytes(planId)); p.executeUpdate(); }
+     try (PreparedStatement p = c.prepareStatement(planSql)) { p.setBytes(1, Database.uuidBytes(planId)); p.setBytes(2, Database.uuidBytes(planId)); p.executeUpdate(); }
+     syncLearningGoalProgress(c, planId);
+   }
+
+  /** 计划任务是学习目标的执行来源时，同步学习目标上的展示进度。 */
+  private void syncLearningGoalProgress(Connection c, UUID planId) throws SQLException {
+    try (PreparedStatement p = c.prepareStatement(
+        "UPDATE learning_goals SET progress=(SELECT progress FROM plans WHERE id=?), version=version+1 "
+            + "WHERE plan_id=? AND deleted_at IS NULL")) {
+      p.setBytes(1, Database.uuidBytes(planId));
+      p.setBytes(2, Database.uuidBytes(planId));
+      p.executeUpdate();
+    }
   }
 
   private JsonObject task(Connection c, UUID workspaceId, UUID taskId, boolean includeDeleted) throws SQLException {
     String sql = "SELECT t.*,COALESCE(occ.total_count,0) schedule_count,COALESCE(occ.done_count,0) completed_schedule_count "
         + "FROM plan_tasks t JOIN plans p ON p.id=t.plan_id "
         + "LEFT JOIN (SELECT task_id,COUNT(*) total_count,SUM(status='done') done_count FROM schedule_items "
-        + "WHERE deleted_at IS NULL AND source_type='task_recurrence' AND status<>'cancelled' GROUP BY task_id) occ ON occ.task_id=t.id "
+        + "WHERE deleted_at IS NULL AND status<>'cancelled' GROUP BY task_id) occ ON occ.task_id=t.id "
         + "WHERE t.id = ? AND p.workspace_id = ?" + (includeDeleted ? "" : " AND t.deleted_at IS NULL AND p.deleted_at IS NULL");
     try (PreparedStatement p = c.prepareStatement(sql)) {
       p.setBytes(1, Database.uuidBytes(taskId)); p.setBytes(2, Database.uuidBytes(workspaceId));
@@ -596,6 +630,10 @@ public final class PlanExecutionService {
         JsonObject row = new JsonObject(); row.addProperty("id", Database.id(rs, "id")); row.addProperty("title", rs.getString("title"));
         row.addProperty("description", rs.getString("description")); row.addProperty("status", rs.getString("status"));
         row.addProperty("startAt", rs.getTimestamp("start_at").toLocalDateTime().toString()); row.addProperty("durationMinutes", rs.getInt("duration_minutes"));
+        row.addProperty("locationName", rs.getString("location_name")); row.addProperty("latitude", rs.getObject("latitude") == null ? null : rs.getBigDecimal("latitude"));
+        row.addProperty("longitude", rs.getObject("longitude") == null ? null : rs.getBigDecimal("longitude")); row.addProperty("coordinateSystem", rs.getString("coordinate_system"));
+        row.addProperty("timezoneId", rs.getString("timezone_id")); row.addProperty("sourceUrl", rs.getString("source_url"));
+        if (rs.getObject("reservation_required") == null) row.add("reservationRequired", null); else row.addProperty("reservationRequired", rs.getBoolean("reservation_required"));
         addUuid(row, "planId", rs.getBytes("plan_id")); addUuid(row, "stageId", rs.getBytes("stage_id")); addUuid(row, "taskId", rs.getBytes("task_id"));
         row.addProperty("version", rs.getInt("version"));
         row.addProperty("deletedAt", rs.getTimestamp("deleted_at") == null ? null : rs.getTimestamp("deleted_at").toLocalDateTime().toString());
@@ -707,6 +745,8 @@ public final class PlanExecutionService {
   private java.sql.Date sqlDate(LocalDate value) { return value == null ? null : java.sql.Date.valueOf(value); }
   private java.sql.Date date(JsonObject value, String name) { String text = nullable(value, name); return text == null || text.isBlank() ? null : java.sql.Date.valueOf(text); }
   private UUID uuid(JsonObject value, String name) { String text = nullable(value, name); return text == null || text.isBlank() ? null : UUID.fromString(text); }
+  private java.math.BigDecimal decimal(JsonObject value, String name) { return value.has(name) && !value.get(name).isJsonNull() ? value.get(name).getAsBigDecimal() : null; }
+  private Boolean nullableBoolean(JsonObject value, String name) { return value.has(name) && !value.get(name).isJsonNull() ? value.get(name).getAsBoolean() : null; }
   private byte[] bytes(UUID value) { return value == null ? null : Database.uuidBytes(value); }
   private void addUuid(JsonObject row, String name, byte[] value) { row.addProperty(name, value == null ? null : Database.bytesUuid(value).toString()); }
   private String required(JsonObject value, String name) { String result = string(value, name, "").trim(); if (result.isBlank()) throw new IllegalArgumentException(name + "_required"); return result; }

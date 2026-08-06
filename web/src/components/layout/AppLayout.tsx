@@ -229,6 +229,17 @@ export function AppHeader({
   const [searchOpen, setSearchOpen] = useState(false)
   const [notificationOpen, setNotificationOpen] = useState(false)
   const [query, setQuery] = useState('')
+  const createWrapRef = useRef<HTMLDivElement>(null)
+
+  // 没选择任何项时，点击「新建」下拉之外的地方把它关闭。
+  useEffect(() => {
+    if (!createOpen) return
+    const onDocumentMouseDown = (event: MouseEvent) => {
+      if (createWrapRef.current && !createWrapRef.current.contains(event.target as Node)) setCreateOpen(false)
+    }
+    document.addEventListener('mousedown', onDocumentMouseDown)
+    return () => document.removeEventListener('mousedown', onDocumentMouseDown)
+  }, [createOpen])
 
   const filteredSearchItems = searchItems
     .filter((item) => !query.trim() || (item.title + item.meta).toLowerCase().includes(query.trim().toLowerCase()))
@@ -315,7 +326,7 @@ export function AppHeader({
             </section>
           )}
         </div>
-        <div className="create-menu-wrap">
+        <div className="create-menu-wrap" ref={createWrapRef}>
           <button className="primary-button" type="button" onClick={() => { setCreateOpen((value) => !value); setSearchOpen(false); setNotificationOpen(false) }} aria-haspopup="menu" aria-expanded={createOpen}>
             <Plus size={17} /> 新建
           </button>

@@ -19,10 +19,18 @@ public final class ModelDietArgumentExtractor implements DietArgumentExtractor {
   }
 
   @Override
-  public JsonObject extract(String message) throws Exception {
+  public JsonObject extract(String message, String sharedContext) throws Exception {
     if (message == null || message.isBlank()) return new JsonObject();
+    String system = SYSTEM_PROMPT;
+    if (sharedContext != null && !sharedContext.isBlank()) {
+      system += "\n\n以下是用户长期记忆与最近对话，可用于补全用户本人已明确陈述过的稳定资料"
+          + "（年龄/性别/身高/体重/目标体重/活动量等）：\n" + sharedContext
+          + "\n\n补充规则（必须遵守）：当前消息未提及用户本人资料时，必须从上面的记忆/最近对话中补全"
+          + "用户本人已明确陈述的稳定资料——只要上下文能确认是用户本人的年龄/性别/身高/体重/活动量，就填入对应字段，不要省略；"
+          + "对假设、示例、为他人设计的参数、一次性数值一律忽略；拿不准才省略。";
+    }
     JsonArray messages = new JsonArray();
-    messages.add(ModelClient.message("system", SYSTEM_PROMPT));
+    messages.add(ModelClient.message("system", system));
     messages.add(ModelClient.message("user", message));
     JsonObject parsed = model.completeJson("diet-argument-extract", messages, 0.0, 600, 45, 2);
     return parsed == null ? new JsonObject() : parsed;

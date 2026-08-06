@@ -2,6 +2,7 @@ package com.changlu.planner.agent.subagents.diet;
 
 import com.changlu.planner.agent.core.contract.SubagentRequest;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import java.util.ArrayList;
 import java.util.List;
@@ -22,6 +23,17 @@ public final class DietPolicy {
       Set.of("balanced", "vegetarian", "vegan", "halal", "pescatarian", "none");
   private static final Set<String> ACTIVITY_LEVELS =
       Set.of("sedentary", "light", "moderate", "active", "very_active");
+  /** 从 sharedContext 兜底解析用户本人资料的确定性正则（见 fillProfileFromContext）。 */
+  private static final java.util.regex.Pattern USER_LINE =
+      java.util.regex.Pattern.compile("\\[用户\\]\\s*(.+)");
+  private static final java.util.regex.Pattern AGE_IN_TEXT =
+      java.util.regex.Pattern.compile("(\\d{1,3})\\s*岁");
+  private static final java.util.regex.Pattern HEIGHT_IN_TEXT =
+      java.util.regex.Pattern.compile("身高[:：]?\\s*(\\d{2,3})|(\\d{2,3})\\s*(?:cm|厘米)");
+  private static final java.util.regex.Pattern WEIGHT_IN_TEXT =
+      java.util.regex.Pattern.compile("体重[:：]?\\s*(\\d{2,3})|(\\d{2,3})\\s*(?:kg|公斤|千克)");
+  private static final java.util.regex.Pattern WEEKLY_TIMES =
+      java.util.regex.Pattern.compile("每周[^\\d]{0,4}([1-7])");
 
   /** 输入参数类型 / 枚举 / 取值范围校验。缺失即跳过（可选字段或待追问字段）。 */
   public void validateInput(SubagentRequest request) {
@@ -46,6 +58,153 @@ public final class DietPolicy {
       try { UUID.fromString(documentId); }
       catch (IllegalArgumentException error) { throw new IllegalArgumentException("INVALID_ARGUMENT:documentIds"); }
     }
+  }
+
+  /**
+   * 清洗合并/提取后的参数（设计 §5.1 / §8.4 防御）：Diet 参数提取器是模型，偶尔会幻觉枚举、越界数值或畸形嵌套对象。
+   * 直接删除非法字段并视同未提供——既避免后续 schema 校验 / validateInput 抛 INVALID_ARGUMENT 中断整个请求，
+   * 也避免非法值被写入 taskData.request 在 WAITING_USER 回放时二次触发崩溃。不修改任何合法参数。
+   */
+  public void sanitize(JsonObject arguments) {
+    if (arguments == null) return;
+    removeIfInvalidEnum(arguments, "dietaryType", DIETARY_TYPES);
+    removeIfInvalidNumber(arguments, "mealsPerDay", 2, 6, true);
+    removeIfInvalidNumber(arguments, "cookTimeMinutes", 0, 180, true);
+    if (arguments.has("weeklyBudget")) {
+      JsonElement budget = arguments.get("weeklyBudget");
+      if (!budget.isJsonObject() || !validBudget(budget.getAsJsonObject())) arguments.remove("weeklyBudget");
+    }
+    if (!arguments.has("profile") || !arguments.get("profile").isJsonObject()) return;
+    JsonObject profile = arguments.getAsJsonObject("profile");
+    removeIfInvalidEnum(profile, "sex", Set.of("male", "female"));
+    removeIfInvalidEnum(profile, "activityLevel", ACTIVITY_LEVELS);
+    removeIfInvalidNumber(profile, "age", 18, 120, true);
+    removeIfInvalidNumber(profile, "heightCm", 100, 250, false);
+    removeIfInvalidNumber(profile, "weightKg", 30, 300, false);
+    removeIfInvalidNumber(profile, "targetWeightKg", 30, 300, false);
+  }
+
+  /**
+   * 补齐所有能从上下文确定性恢复的必需字段（目标 + profile）：
+   * 参数提取器是 LLM，偶发漏提取 goal 或记忆里的 profile，导致 requiredFields 反复追问同一批字段
+   * （"已知您为男性21岁…请确认"或"确认目标是减脂还是增肌"）。此兜底不依赖 LLM。
+   */
+  public void fillMissingFromContext(JsonObject arguments, String message, String sharedContext) {
+    fillGoalFromContext(arguments, message, sharedContext);
+    fillProfileFromContext(arguments, sharedContext);
+  }
+
+  /**
+   * 目标兜底：先解析当前消息（用户最新意图优先），再回退到记忆/最近对话；已有 goal 不覆盖。
+   */
+  public void fillGoalFromContext(JsonObject arguments, String message, String sharedContext) {
+    if (arguments == null) return;
+    if (arguments.has("goal") && arguments.get("goal").isJsonPrimitive()
+        && !arguments.get("goal").getAsString().isBlank()) {
+      return;
+    }
+    String goal = detectGoal(message);
+    if (goal.isBlank()) goal = detectGoal(sharedContext);
+    if (!goal.isBlank()) arguments.addProperty("goal", goal);
+  }
+
+  private String detectGoal(String text) {
+    if (text == null || text.isBlank()) return "";
+    if (containsAny(text, "减脂", "减肥", "减重", "瘦身")) return "减脂";
+    if (containsAny(text, "增肌", "健身")) return "增肌";
+    if (containsAny(text, "控糖", "血糖")) return "控糖";
+    if (containsAny(text, "保持健康", "均衡营养", "健康饮食")) return "保持健康";
+    return "";
+  }
+
+  /**
+   * 从长期记忆/最近对话中确定性补全缺失的 profile 必需字段（防御设计 §5.1 / §8.4）：
+   * Diet 参数提取器是 LLM，偶发不把记忆里的用户资料转成结构化 profile，导致 requiredFields 反复追问同一批字段。
+   * 此方法只填充仍缺失的字段，且只从「用户长期记忆段」与「[用户] 本人发言行」解析，
+   * 不读 AI 回复、不读他人内容，避免误取；解析不到就保持缺失（照常追问一次）。
+   */
+  public void fillProfileFromContext(JsonObject arguments, String sharedContext) {
+    if (arguments == null || sharedContext == null || sharedContext.isBlank()) return;
+    JsonObject profile = arguments.has("profile") && arguments.get("profile").isJsonObject()
+        ? arguments.getAsJsonObject("profile") : null;
+    if (profile != null && profile.has("age") && profile.has("sex") && profile.has("heightCm")
+        && profile.has("weightKg") && profile.has("activityLevel")) {
+      return;
+    }
+    StringBuilder candidates = new StringBuilder();
+    int divider = sharedContext.indexOf("最近对话");
+    if (divider >= 0) candidates.append(sharedContext, 0, divider); else candidates.append(sharedContext);
+    java.util.regex.Matcher userLine = USER_LINE.matcher(sharedContext);
+    while (userLine.find()) candidates.append('\n').append(userLine.group(1));
+    String text = candidates.toString();
+    if (text.isBlank()) return;
+    if (profile == null) profile = new JsonObject();
+    if (!profile.has("age")) fillNumber(profile, "age", AGE_IN_TEXT, text);
+    if (!profile.has("sex")) fillSex(profile, text);
+    if (!profile.has("heightCm")) fillNumber(profile, "heightCm", HEIGHT_IN_TEXT, text);
+    if (!profile.has("weightKg")) fillNumber(profile, "weightKg", WEIGHT_IN_TEXT, text);
+    if (!profile.has("activityLevel")) fillActivity(profile, text);
+    if (profile.size() > 0) arguments.add("profile", profile);
+  }
+
+  private void fillNumber(JsonObject profile, String name, java.util.regex.Pattern pattern, String text) {
+    java.util.regex.Matcher matcher = pattern.matcher(text);
+    if (!matcher.find()) return;
+    String group = matcher.group(1) != null ? matcher.group(1) : matcher.group(2);
+    if (group == null) return;
+    try { profile.addProperty(name, Double.parseDouble(group.trim())); }
+    catch (NumberFormatException ignored) { }
+  }
+
+  private void fillSex(JsonObject profile, String text) {
+    int male = text.indexOf("男");
+    int female = text.indexOf("女");
+    if (male >= 0 && (female < 0 || male < female)) profile.addProperty("sex", "male");
+    else if (female >= 0) profile.addProperty("sex", "female");
+  }
+
+  private void fillActivity(JsonObject profile, String text) {
+    if (containsAny(text, "久坐", "办公", "几乎不运动", "不怎么运动", "少动", "不运动")) {
+      profile.addProperty("activityLevel", "sedentary");
+      return;
+    }
+    java.util.regex.Matcher weekly = WEEKLY_TIMES.matcher(text);
+    if (weekly.find()) {
+      profile.addProperty("activityLevel",
+          Integer.parseInt(weekly.group(1)) >= 3 ? "moderate" : "light");
+      return;
+    }
+    if (containsAny(text, "高强度", "每天训练", "每天运动", "大量运动", "健身")) {
+      profile.addProperty("activityLevel", "active");
+    } else if (containsAny(text, "剧烈", "职业运动员", "专业运动员")) {
+      profile.addProperty("activityLevel", "very_active");
+    } else if (containsAny(text, "中度", "每周三次", "每周三到五次")) {
+      profile.addProperty("activityLevel", "moderate");
+    } else if (containsAny(text, "轻度", "偶尔", "偶尔运动")) {
+      profile.addProperty("activityLevel", "light");
+    }
+  }
+
+  private boolean containsAny(String text, String... keywords) {
+    for (String keyword : keywords) if (text.contains(keyword)) return true;
+    return false;
+  }
+
+  private void removeIfInvalidEnum(JsonObject object, String name, Set<String> allowed) {
+    if (!object.has(name) || object.get(name).isJsonNull()) return;
+    JsonElement element = object.get(name);
+    if (!element.isJsonPrimitive() || !element.getAsJsonPrimitive().isString()
+        || !allowed.contains(element.getAsString())) {
+      object.remove(name);
+    }
+  }
+
+  private void removeIfInvalidNumber(JsonObject object, String name, double minimum, double maximum, boolean integerOnly) {
+    if (!object.has(name) || object.get(name).isJsonNull()) return;
+    JsonElement element = object.get(name);
+    if (!element.isJsonPrimitive() || !element.getAsJsonPrimitive().isNumber()) { object.remove(name); return; }
+    double value = element.getAsDouble();
+    if ((integerOnly && value != Math.rint(value)) || value < minimum || value > maximum) object.remove(name);
   }
 
   private void validateProfile(JsonObject arguments) {
@@ -95,6 +254,14 @@ public final class DietPolicy {
         || normalized.contains("化疗") || normalized.contains("手术") || normalized.contains("绝食")
         || normalized.contains("断食") || normalized.contains("只喝水")
         || normalized.contains("代替医生") || normalized.contains("营养师开");
+  }
+
+  /** 原文级别的安全拦截：孕妇/哺乳等表述可能在参数提取时丢失，直接按消息文本拦截（设计 §8.1）。 */
+  public boolean unsupportedMessageText(String message) {
+    String normalized = message == null ? "" : message.replaceAll("\\s", "");
+    return normalized.contains("孕妇") || normalized.contains("怀孕") || normalized.contains("妊娠")
+        || normalized.contains("哺乳") || normalized.contains("备孕")
+        || normalized.contains("未成年人") || normalized.contains("未成年");
   }
 
   /** 未成年人（age &lt; 18）与孕妇 / 哺乳期（medicalConditions 命中）→ 拒绝（设计 §2.2 / §8.1）。 */
@@ -251,16 +418,20 @@ public final class DietPolicy {
 
   private void validateBudget(JsonObject arguments) {
     if (!arguments.has("weeklyBudget") || arguments.get("weeklyBudget").isJsonNull()) return;
-    if (!arguments.get("weeklyBudget").isJsonObject()) {
+    if (!arguments.get("weeklyBudget").isJsonObject()
+        || !validBudget(arguments.getAsJsonObject("weeklyBudget"))) {
       throw new IllegalArgumentException("INVALID_ARGUMENT:weeklyBudget");
     }
-    JsonObject budget = arguments.getAsJsonObject("weeklyBudget");
+  }
+
+  private boolean validBudget(JsonObject budget) {
     if (!budget.has("amount") || !budget.has("currency")
         || !budget.get("amount").isJsonPrimitive() || !budget.getAsJsonPrimitive("amount").isNumber()
         || budget.get("amount").getAsDouble() < 0
         || !budget.get("currency").isJsonPrimitive() || !budget.getAsJsonPrimitive("currency").isString()
         || budget.get("currency").getAsString().length() != 3) {
-      throw new IllegalArgumentException("INVALID_ARGUMENT:weeklyBudget");
+      return false;
     }
+    return true;
   }
 }

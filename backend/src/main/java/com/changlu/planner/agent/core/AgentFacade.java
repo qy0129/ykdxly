@@ -10,6 +10,7 @@ import com.changlu.planner.agent.subagents.memory.MemorySubagent;
 import com.changlu.planner.agent.subagents.research.ResearchSubagent;
 import com.changlu.planner.agent.subagents.research.WebSearchTool;
 import com.changlu.planner.agent.subagents.learning.LearningSubagent;
+import com.changlu.planner.agent.subagents.learning.tools.LearningResearchTool;
 import com.changlu.planner.agent.subagents.review.ReviewSubagent;
 import com.changlu.planner.agent.subagents.scheduling.ConflictTool;
 import com.changlu.planner.agent.subagents.scheduling.SchedulingSubagent;
@@ -52,7 +53,8 @@ public final class AgentFacade implements AutoCloseable {
     subagents.register(documents);
     subagents.register(memory);
     LearningService learningService = new LearningService(database);
-    subagents.register(new LearningSubagent(learningService, model, commands));
+    standardTools.register(new LearningResearchTool(webSearch));
+    subagents.register(new LearningSubagent(learningService, model, commands, standardTools));
 
     // New-contract module: registers the travel subagent and its tools into the standard tool registry.
     new TravelModule(model, commands, webSearch).register(subagents, standardTools);
@@ -82,6 +84,9 @@ public final class AgentFacade implements AutoCloseable {
   }
   public JsonObject confirm(String draftId, Database.Context context) throws Exception { return runtime.confirm(draftId, context); }
   public JsonObject cancel(String draftId, Database.Context context) throws Exception { return runtime.cancel(draftId, context); }
+  public JsonObject modifyDraft(String draftId, JsonObject input, Database.Context context) throws Exception {
+    return runtime.modifyDraft(draftId, input, context);
+  }
   public JsonObject session(Database.Context context, String channel) throws Exception { return runtime.session(context, channel); }
   public JsonArray conversations(Database.Context context, String channel) throws Exception {
     return commands.conversations(context, channel);
@@ -99,6 +104,8 @@ public final class AgentFacade implements AutoCloseable {
     commands.deleteConversation(id, context);
   }
   public JsonArray memories(Database.Context context) throws Exception { return memory.list(context); }
+  /** 供提醒等外部模块读取该用户的长期记忆上下文。 */
+  public String memoryContext(Database.Context context) throws Exception { return memory.context(context); }
   public JsonObject updateMemory(String id, JsonObject input, Database.Context context) throws Exception {
     return memory.update(id, input, context);
   }

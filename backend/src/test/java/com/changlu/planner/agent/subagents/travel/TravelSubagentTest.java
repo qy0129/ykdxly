@@ -50,7 +50,7 @@ final class TravelSubagentTest {
     AtomicInteger drafts = new AtomicInteger();
     try (ToolRegistry tools = tools(drafts)) {
       TravelSubagent subagent = subagent(toPlan("[]"), tools);
-      AgentResult result = subagent.execute(new SubagentRequest("推荐一个北京三日游", new JsonObject(), List.of()),
+      AgentResult result = subagent.execute(new SubagentRequest("推荐一个北京三日游", requestArgs(), List.of()),
           context(Set.of("travel:read", "planning:write")));
 
       assertEquals(AgentStatus.COMPLETED, result.status());
@@ -76,7 +76,7 @@ final class TravelSubagentTest {
     AtomicInteger drafts = new AtomicInteger();
     try (ToolRegistry tools = tools(drafts)) {
       AgentResult result = subagent(toPlan("[]"), tools).execute(
-          new SubagentRequest("创建一个北京旅行计划", new JsonObject(), List.of()),
+          new SubagentRequest("创建一个北京旅行计划", requestArgs(), List.of()),
           context(Set.of("travel:read", "planning:write")));
 
       assertEquals(AgentStatus.WAITING_USER, result.status());
@@ -90,7 +90,7 @@ final class TravelSubagentTest {
     AtomicInteger drafts = new AtomicInteger();
     try (ToolRegistry tools = tools(drafts)) {
       AgentResult result = subagent(toPlan("[]"), tools).execute(
-          new SubagentRequest("确认行程，生成写入计划和日历草案", new JsonObject(), List.of()),
+          new SubagentRequest("确认行程，生成写入计划和日历草案", requestArgs(), List.of()),
           context(Set.of("travel:read", "planning:write")));
 
       assertEquals(AgentStatus.WAITING_CONFIRMATION, result.status());
@@ -115,7 +115,7 @@ final class TravelSubagentTest {
   @Test void doesNotHidePermissionFailuresAsResearchDegradation() {
     try (ToolRegistry tools = tools(new AtomicInteger())) {
       assertThrows(SecurityException.class, () -> subagent(toPlan("[]"), tools).execute(
-          new SubagentRequest("推荐一个北京三日游", new JsonObject(), List.of()), context(Set.of())));
+          new SubagentRequest("推荐一个北京三日游", requestArgs(), List.of()), context(Set.of())));
     }
   }
 
@@ -167,6 +167,69 @@ final class TravelSubagentTest {
         "preparationTasks":[],"budgetEstimate":{"amount":3000,"currency":"CNY","estimated":true},
         "risks":[],"questions":%s,"planningInstruction":"创建北京三日旅行计划"}
         """.formatted(questions)).getAsJsonObject();
+  }
+
+  @Test void fallbackPlanRespectsRelaxedDailyActivityLimit() throws Exception {
+    try (ToolRegistry tools = tools(new AtomicInteger())) {
+      JsonObject arguments = requestArgs();
+      arguments.addProperty("pace", "relaxed");
+      TravelSubagent subagent = new TravelSubagent((request, sources, sharedContext) -> {
+        throw new IllegalStateException("model_timeout");
+      }, tools, new TravelPolicy(), new JsonObject(), new JsonObject());
+
+      AgentResult result = subagent.execute(new SubagentRequest("创建一个轻松的北京旅行计划", arguments, List.of()),
+          context(Set.of("travel:read", "planning:write")));
+
+      for (var dayElement : result.data().getAsJsonArray("days")) {
+        int minutes = 0;
+        for (var activityElement : dayElement.getAsJsonObject().getAsJsonArray("activities")) {
+          minutes += activityElement.getAsJsonObject().get("durationMinutes").getAsInt();
+        }
+        assertTrue(minutes <= 240);
+      }
+      JsonArray days = result.data().getAsJsonArray("days");
+      assertFalse(days.get(0).getAsJsonObject().get("title").getAsString()
+          .equals(days.get(1).getAsJsonObject().get("title").getAsString()));
+      assertFalse(result.data().getAsJsonArray("risks").asList().stream()
+          .anyMatch(risk -> risk.isJsonObject() && risk.getAsJsonObject().has("code")
+              && "DAILY_ACTIVITY_LIMIT_EXCEEDED".equals(risk.getAsJsonObject().get("code").getAsString())));
+      JsonObject modelRisk = result.data().getAsJsonArray("risks").asList().stream()
+          .filter(risk -> risk.isJsonObject() && risk.getAsJsonObject().has("code")
+              && "MODEL_UNAVAILABLE".equals(risk.getAsJsonObject().get("code").getAsString()))
+          .findFirst().orElseThrow().getAsJsonObject();
+      assertEquals("timeout", modelRisk.get("causeCategory").getAsString());
+    }
+  }
+
+  @Test void boundsExternalTextBeforeSendingFactsToTheModel() {
+    JsonObject facts = new JsonObject();
+    facts.add("locationContext", new JsonObject());
+    facts.add("weather", new JsonArray());
+    JsonArray attractions = new JsonArray();
+    JsonObject attraction = new JsonObject();
+    attraction.addProperty("attractionId", "poi-1");
+    attraction.addProperty("evidenceText", "景".repeat(500));
+    attractions.add(attraction);
+    facts.add("attractions", attractions);
+    JsonArray sources = new JsonArray();
+    JsonObject source = new JsonObject();
+    source.addProperty("summary", "攻".repeat(1000));
+    sources.add(source);
+    facts.add("sources", sources);
+
+    TravelSubagent subagent = new TravelSubagent(null, null, null, new JsonObject(), new JsonObject());
+    JsonObject compact = subagent.plannerFacts(facts);
+
+    assertEquals(243, compact.getAsJsonArray("attractions").get(0).getAsJsonObject()
+        .get("evidenceText").getAsString().length());
+    assertEquals(403, compact.getAsJsonArray("sources").get(0).getAsJsonObject()
+        .get("summary").getAsString().length());
+  }
+
+  private JsonObject requestArgs() {
+    JsonObject arguments = new JsonObject(); arguments.addProperty("destination", "北京");
+    arguments.addProperty("startDate", "2026-09-01"); arguments.addProperty("endDate", "2026-09-03");
+    return arguments;
   }
 
   private AgentContext context(Set<String> permissions) {

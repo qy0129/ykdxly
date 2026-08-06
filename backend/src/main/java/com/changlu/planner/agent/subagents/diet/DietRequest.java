@@ -31,19 +31,19 @@ public record DietRequest(
   public JsonObject toJson() {
     JsonObject value = new JsonObject();
     value.addProperty("goal", goal);
-    value.add("profile", profile.deepCopy());
-    value.addProperty("dietaryType", dietaryType);
-    value.add("allergies", allergies.deepCopy());
-    value.add("dislikes", dislikes.deepCopy());
-    value.add("medicalConditions", medicalConditions.deepCopy());
-    if (mealsPerDay == null) value.add("mealsPerDay", com.google.gson.JsonNull.INSTANCE);
-    else value.addProperty("mealsPerDay", mealsPerDay);
-    if (cookTimeMinutes == null) value.add("cookTimeMinutes", com.google.gson.JsonNull.INSTANCE);
-    else value.addProperty("cookTimeMinutes", cookTimeMinutes);
-    value.add("weeklyBudget", weeklyBudget.deepCopy());
-    value.add("preferences", preferences.deepCopy());
-    if (saveToPlanner == null) value.add("saveToPlanner", com.google.gson.JsonNull.INSTANCE);
-    else value.addProperty("saveToPlanner", saveToPlanner);
+    // 只序列化有实际值的可选字段：空串 / 空数组 / 空对象 / null 在 WAITING_USER resume 回放 taskData.request
+    // 时会被 input.schema 校验拒绝（dietaryType 枚举、weeklyBudget required、整数/布尔 type 等），
+    // 跳过它们让持久化参数始终 schema 合法（修复第二轮 INVALID_ARGUMENT:input.arguments.dietaryType 崩溃）。
+    if (profile.size() > 0) value.add("profile", profile.deepCopy());
+    if (!dietaryType.isBlank()) value.addProperty("dietaryType", dietaryType);
+    if (allergies.size() > 0) value.add("allergies", allergies.deepCopy());
+    if (dislikes.size() > 0) value.add("dislikes", dislikes.deepCopy());
+    if (medicalConditions.size() > 0) value.add("medicalConditions", medicalConditions.deepCopy());
+    if (mealsPerDay != null) value.addProperty("mealsPerDay", mealsPerDay);
+    if (cookTimeMinutes != null) value.addProperty("cookTimeMinutes", cookTimeMinutes);
+    if (weeklyBudget.size() > 0) value.add("weeklyBudget", weeklyBudget.deepCopy());
+    if (preferences.size() > 0) value.add("preferences", preferences.deepCopy());
+    if (saveToPlanner != null) value.addProperty("saveToPlanner", saveToPlanner);
     return value;
   }
 

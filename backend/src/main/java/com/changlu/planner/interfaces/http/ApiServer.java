@@ -4,6 +4,8 @@ import com.changlu.planner.agent.core.AgentFacade;
 import com.changlu.planner.agent.core.ModelClient;
 import com.changlu.planner.agent.subagents.briefing.BriefingResult;
 import com.changlu.planner.agent.subagents.document.DocumentResult;
+import com.changlu.planner.agent.subagents.travel.external.TravelApiClient;
+import com.changlu.planner.agent.subagents.travel.services.AmapWeatherForecastService;
 import com.changlu.planner.features.briefing.ScheduleMaterialService;
 import com.changlu.planner.features.export.StatsPdfGenerator;
 import com.changlu.planner.features.learning.LearningService;
@@ -73,8 +75,11 @@ public final class ApiServer {
   private final HttpClient imageClient = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(15)).build();
   private HttpServer server;
   private ExecutorService httpExecutor;
+  /** 日历天气缓存（Amap 有配额，30 分钟内不重复请求）。 */
+  private volatile JsonObject weatherCache;
+  private volatile long weatherCacheAt;
 
-  public ApiServer(Database database, int port) { this.database = database; this.port = port; this.agent = new AgentFacade(database); this.model = new ModelClient(); this.planExecution = new PlanExecutionService(database); this.reminders = new ReminderService(database); this.scheduleMaterials = new ScheduleMaterialService(database); this.learningService = new LearningService(database); }
+  public ApiServer(Database database, int port) { this.database = database; this.port = port; this.agent = new AgentFacade(database); this.model = new ModelClient(); this.planExecution = new PlanExecutionService(database); this.reminders = new ReminderService(database, model, ctx -> { try { return agent.memoryContext(ctx); } catch (Exception ignored) { return ""; } }); this.scheduleMaterials = new ScheduleMaterialService(database); this.learningService = new LearningService(database); }
   public int port() { return port; }
 
   public void start() throws IOException {
@@ -82,6 +87,7 @@ public final class ApiServer {
     // 路由按外部能力分组；静态文件由独立 handler 托管，避免和 API 逻辑混在一起。
     server.createContext("/api/health", logged(this::health));
     server.createContext("/api/profile", logged(this::profile));
+    server.createContext("/api/weather/daily", logged(this::weatherDaily));
     server.createContext("/api/plans", logged(exchange -> crud(exchange, "plans")));
     server.createContext("/api/plans/", logged(this::planSubresource));
     server.createContext("/api/schedules", logged(exchange -> crud(exchange, "schedule_items")));
@@ -111,6 +117,7 @@ public final class ApiServer {
     server.createContext("/api/review/facts", logged(this::reviewFacts));
     server.createContext("/api/review/today", logged(this::reviewToday));
     server.createContext("/api/learning/goals", logged(this::learningGoals));
+    server.createContext("/api/learning/goals/", logged(this::learningGoal));
     server.createContext("/api/stats", logged(this::stats));
     server.createContext("/api/export/xlsx", logged(this::excelExport));
     server.createContext("/api/export/pdf", logged(this::pdfExport));
@@ -176,6 +183,70 @@ public final class ApiServer {
   }
 
   private void health(HttpExchange e) throws IOException { json(e, 200, Map.of("ok", true, "service", "changlu-planner")); }
+
+  /** 日历用的逐日天气 + 出行建议：复用 Amap 天气服务，默认城市取配置，内存缓存 30 分钟。 */
+  private void weatherDaily(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if (!"GET".equals(e.getRequestMethod())) { error(e, 405, "method_not_allowed", "请求方法不支持", false); return; }
+      long now = System.currentTimeMillis();
+      if (weatherCache != null && now - weatherCacheAt < 30 * 60 * 1000L) {
+        json(e, 200, weatherCache); return;
+      }
+      String location = com.changlu.planner.shared.config.EnvironmentConfig
+          .value("BRIEFING_DEFAULT_LOCATION", "briefing.default.location", "杭州");
+      JsonObject request = new JsonObject();
+      request.addProperty("destination", location);
+      AmapWeatherForecastService weather = new AmapWeatherForecastService(new TravelApiClient());
+      JsonObject forecast = weather.forecast(request, "calendar-weather");
+      JsonArray days = new JsonArray();
+      for (JsonElement element : array(forecast, "weather")) {
+        if (!element.isJsonObject()) continue;
+        JsonObject day = element.getAsJsonObject();
+        JsonObject row = new JsonObject();
+        row.addProperty("date", text(day, "date", ""));
+        row.addProperty("condition", text(day, "condition", ""));
+        if (day.has("tempHigh") && !day.get("tempHigh").isJsonNull()) row.add("tempHigh", day.get("tempHigh"));
+        if (day.has("tempLow") && !day.get("tempLow").isJsonNull()) row.add("tempLow", day.get("tempLow"));
+        Double high = day.has("tempHigh") && day.get("tempHigh").isJsonPrimitive() && day.get("tempHigh").getAsJsonPrimitive().isNumber()
+            ? day.get("tempHigh").getAsDouble() : null;
+        row.addProperty("suggestion", travelSuggestion(text(day, "condition", ""), high));
+        days.add(row);
+      }
+      JsonObject result = new JsonObject();
+      result.addProperty("location", location);
+      result.add("days", days);
+      weatherCache = result;
+      weatherCacheAt = now;
+      json(e, 200, result);
+    } catch (Exception error) {
+      LOG.warn("[日历天气获取失败] 原因={}", error.getMessage());
+      json(e, 200, Map.of("location", "", "days", new JsonArray()));
+    }
+  }
+
+  /** 根据天气与高温推导一句话出行建议（先判雨雪，再看温度极端）。 */
+  private String travelSuggestion(String condition, Double tempHigh) {
+    String c = condition == null ? "" : condition;
+    if (c.contains("雷") || c.contains("暴雨") || c.contains("大雨") || c.contains("中雨")) return "带伞·少外出";
+    if (c.contains("雨") || c.contains("阵雨")) return "带伞";
+    if (c.contains("雪")) return "添衣防滑";
+    if (c.contains("雾") || c.contains("霾")) return "注意防护";
+    if (c.contains("晴")) return "适宜户外";
+    if (c.contains("多云")) return "适宜出行";
+    if (c.contains("阴")) return "宜室内活动";
+    if (tempHigh != null && tempHigh >= 33) return "注意防暑";
+    if (tempHigh != null && tempHigh <= 5) return "注意保暖";
+    return "正常出行";
+  }
+
+  private JsonArray array(JsonObject object, String name) {
+    return object.has(name) && object.get(name).isJsonArray() ? object.getAsJsonArray(name) : new JsonArray();
+  }
+
+  private String text(JsonObject object, String name, String fallback) {
+    return object.has(name) && !object.get(name).isJsonNull() ? object.get(name).getAsString() : fallback;
+  }
 
   private void profile(HttpExchange e) throws IOException {
     try {
@@ -541,6 +612,7 @@ public final class ApiServer {
       String action = parts[5];
       if ("POST".equals(e.getRequestMethod()) && "confirm".equals(action)) { json(e, 200, agent.confirm(draftId, context(e))); return; }
       if ("POST".equals(e.getRequestMethod()) && "cancel".equals(action)) { json(e, 200, agent.cancel(draftId, context(e))); return; }
+      if ("POST".equals(e.getRequestMethod()) && "modify".equals(action)) { json(e, 200, agent.modifyDraft(draftId, body(e), context(e))); return; }
       error(e, 405, "method_not_allowed", "请求方法不支持", false);
     } catch (IllegalArgumentException | IllegalStateException ex) { error(e, 409, "draft_rejected", ex.getMessage(), false); }
       catch (Exception ex) { ex.printStackTrace(); error(e, 500, "draft_error", ex.getMessage(), true); }
@@ -570,6 +642,46 @@ public final class ApiServer {
       json(e, 200, result);
     } catch (SQLException ex) { error(e, 500, "learning_goals_error", ex.getMessage(), true); }
       catch (Exception ex) { ex.printStackTrace(); error(e, 500, "learning_goals_error", ex.getMessage(), true); }
+  }
+
+  private void learningGoal(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if (!"GET".equals(e.getRequestMethod())) { error(e, 405, "method_not_allowed", "请求方法不支持", false); return; }
+      String[] parts = e.getRequestURI().getPath().split("/");
+      if (parts.length < 5 || parts[4].isBlank()) { error(e, 400, "goal_id_required", "缺少学习目标编号", false); return; }
+      Database.Context context = context(e);
+      var goal = learningService.getGoal(parts[4], context);
+      if (goal == null) { error(e, 404, "learning_goal_not_found", "学习目标不存在", false); return; }
+      JsonObject result = new JsonObject();
+      result.add("goal", goal.toJson());
+      JsonArray days = new JsonArray();
+      if (goal.planId() != null && !goal.planId().isBlank()) {
+        for (var task : learningService.planTasks(goal.planId(), context)) {
+          String date = task.dueAt() == null ? "未排期" : task.dueAt().toLocalDate().toString();
+          JsonObject day = findDay(days, date);
+          if (day == null) {
+            day = new JsonObject(); day.addProperty("date", date);
+            day.add("tasks", new JsonArray()); days.add(day);
+          }
+          day.getAsJsonArray("tasks").add(task.toJson());
+        }
+      }
+      result.add("days", days);
+      JsonArray sessions = new JsonArray();
+      for (var session : learningService.listSessionsByGoal(parts[4], context)) sessions.add(session.toJson());
+      result.add("sessions", sessions);
+      json(e, 200, result);
+    } catch (SQLException ex) { error(e, 500, "learning_goal_error", ex.getMessage(), true); }
+      catch (Exception ex) { ex.printStackTrace(); error(e, 500, "learning_goal_error", ex.getMessage(), true); }
+  }
+
+  private JsonObject findDay(JsonArray days, String date) {
+    for (JsonElement element : days) {
+      JsonObject day = element.getAsJsonObject();
+      if (date.equals(day.get("date").getAsString())) return day;
+    }
+    return null;
   }
 
   private void wechatAiCommand(HttpExchange e) throws IOException {
@@ -917,14 +1029,15 @@ public final class ApiServer {
           + "WHERE p.workspace_id=? AND p.deleted_at IS NULL AND s.deleted_at IS NULL AND t.deleted_at IS NULL "
           + "AND t.status NOT IN ('cancelled','skipped') "
           + "AND NOT EXISTS (SELECT 1 FROM schedule_items recurrence_item WHERE recurrence_item.task_id=t.id "
-          + "AND recurrence_item.source_type='task_recurrence' AND recurrence_item.deleted_at IS NULL AND recurrence_item.status<>'cancelled') "
+          + "AND recurrence_item.deleted_at IS NULL AND recurrence_item.status<>'cancelled') "
           + "AND DATE(COALESCE(t.due_at,t.created_at)) BETWEEN ? AND ? "
           + "GROUP BY DATE(COALESCE(t.due_at,t.created_at))";
-      String recurrenceSql = "SELECT DATE(i.start_at) day,COUNT(*) planned,SUM(i.status='done') completed "
+      String recurrenceSql = "SELECT DATE(i.start_at) day,COUNT(*) planned,"
+          + "SUM(CASE WHEN t.status='done' OR i.status='done' THEN 1 ELSE 0 END) completed "
           + "FROM schedule_items i JOIN plan_tasks t ON t.id=i.task_id JOIN plans p ON p.id=t.plan_id "
           + "JOIN plan_stages s ON s.id=t.stage_id WHERE p.workspace_id=? AND p.deleted_at IS NULL "
           + "AND s.deleted_at IS NULL AND t.deleted_at IS NULL AND t.status NOT IN ('cancelled','skipped') "
-          + "AND i.deleted_at IS NULL AND i.source_type='task_recurrence' AND i.status<>'cancelled' "
+          + "AND i.deleted_at IS NULL AND i.status<>'cancelled' "
           + "AND DATE(i.start_at) BETWEEN ? AND ? GROUP BY DATE(i.start_at)";
       String todoSql = "SELECT DATE(COALESCE(due_at,created_at)) day, COUNT(*) planned, SUM(status='done') completed "
           + "FROM todos WHERE workspace_id=? AND deleted_at IS NULL AND status<>'cancelled' "
@@ -1025,7 +1138,7 @@ public final class ApiServer {
       if (!"POST".equals(e.getRequestMethod())) { json(e, 405, Map.of("error", "method_not_allowed")); return; }
       if (!model.configured()) { json(e, 503, Map.of("error", "ai_unavailable", "message", "AI 模型未配置，请设置 api.key")); return; }
       JsonObject body = body(e);
-      String title = string(body, "scheduleTitle", "学习笔记");
+      String title = string(body, "scheduleTitle", "日程小记");
       String message = string(body, "message", "").trim();
       JsonArray messages = NotePrompt.messages(body);
       String markdown;
@@ -1040,7 +1153,7 @@ public final class ApiServer {
         reply = "";
       }
       if (markdown.isBlank()) { json(e, 502, Map.of("error", "ai_generation_failed", "message", "AI 返回了空内容")); return; }
-      if (reply.isBlank()) reply = message.isBlank() ? "已根据学习资料生成笔记。" : "已根据你的要求调整笔记。";
+      if (reply.isBlank()) reply = message.isBlank() ? "已根据本次日程生成小记。" : "已根据你的要求调整小记。";
       JsonObject resp = new JsonObject();
       resp.addProperty("markdown", markdown);
       resp.addProperty("reply", reply);
@@ -1104,9 +1217,13 @@ public final class ApiServer {
   }
 
   private void list(HttpExchange e, String table) throws SQLException, IOException {
-    String scope = table.equals("plans") ? "workspace_id = ?" : "workspace_id = ?";
     String softDelete = List.of("plans", "todos", "schedule_items").contains(table) ? " AND deleted_at IS NULL" : "";
-    String sql = "SELECT * FROM " + table + " WHERE " + scope + softDelete + " ORDER BY updated_at DESC";
+    // 日历日程：不显示已删计划的日程（删除计划时其日程仍留在表里，这里过滤掉，避免日历残留孤儿项）。
+    String sql = table.equals("schedule_items")
+        ? "SELECT s.* FROM schedule_items s LEFT JOIN plans p ON p.id=s.plan_id "
+            + "WHERE s.workspace_id = ? AND s.deleted_at IS NULL AND (s.plan_id IS NULL OR p.deleted_at IS NULL) "
+            + "ORDER BY s.updated_at DESC"
+        : "SELECT * FROM " + table + " WHERE workspace_id = ?" + softDelete + " ORDER BY updated_at DESC";
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
       p.setBytes(1, Database.uuidBytes(workspace(e)));
       try (ResultSet rs = p.executeQuery()) { List<JsonObject> rows = new ArrayList<>(); while (rs.next()) rows.add(row(rs, table)); json(e, 200, rows); }
@@ -1225,7 +1342,7 @@ public final class ApiServer {
       boolean refresh = e.getRequestURI().getRawQuery() != null && e.getRequestURI().getRawQuery().contains("refresh=true");
       json(e, 200, scheduleMaterials.load(context(e), UUID.fromString(parts[3]), refresh));
     } catch (IllegalArgumentException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
-      catch (Exception ex) { LOG.warn("[日程资料] 获取失败: {}", ex.getMessage()); json(e, 502, Map.of("error", "schedule_materials_unavailable", "message", "暂时无法获取学习资料")); }
+      catch (Exception ex) { LOG.warn("[日程资料] 获取失败: {}", ex.getMessage()); json(e, 502, Map.of("error", "schedule_materials_unavailable", "message", "暂时无法获取日程资料")); }
   }
 
   private String safeBody(JsonObject body) {

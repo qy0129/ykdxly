@@ -7,6 +7,12 @@ import com.changlu.planner.agent.core.tool.ToolRegistry;
 import com.changlu.planner.agent.subagents.research.WebSearchTool;
 import com.changlu.planner.agent.subagents.travel.tools.DestinationResearchTool;
 import com.changlu.planner.agent.subagents.travel.tools.TravelDraftTool;
+import com.changlu.planner.agent.subagents.travel.tools.LocationContextTool;
+import com.changlu.planner.agent.subagents.travel.tools.WeatherForecastTool;
+import com.changlu.planner.agent.subagents.travel.tools.AttractionResearchTool;
+import com.changlu.planner.agent.subagents.travel.tools.MapRoutingTool;
+import com.changlu.planner.agent.subagents.travel.external.TravelApiClient;
+import com.changlu.planner.agent.subagents.travel.services.*;
 import com.changlu.planner.features.command.AiCommandService;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -24,7 +30,12 @@ public final class TravelModule implements SubagentModule {
   }
 
   @Override public void register(SubagentRegistry subagents, ToolRegistry tools) {
+    TravelApiClient http = new TravelApiClient();
     tools.register(new DestinationResearchTool(search));
+    tools.register(new LocationContextTool(new AmapGeocodingService(http)));
+    tools.register(new WeatherForecastTool(new AmapWeatherForecastService(http)));
+    tools.register(new AttractionResearchTool(new AmapAttractionResearchService(http)));
+    tools.register(new MapRoutingTool(new AmapRoutingService(http)));
     tools.register(new TravelDraftTool(commands));
     subagents.register(new TravelSubagent(new ModelTravelPlanner(model), tools, new TravelPolicy(),
         schema("input.schema.json"), schema("output.schema.json")));

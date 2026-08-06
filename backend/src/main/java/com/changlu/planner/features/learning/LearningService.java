@@ -2,6 +2,7 @@ package com.changlu.planner.features.learning;
 
 import com.changlu.planner.shared.database.Database;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.sql.Connection;
@@ -35,8 +36,8 @@ public final class LearningService {
   /** 列出用户的有效学习目标。 */
   public List<LearningGoal> listGoals(Database.Context context) throws SQLException {
     String sql = """
-        SELECT id, title, description, domain, priority, target_date,
-               weekly_hours, status, progress, total_sessions, completed_sessions,
+        SELECT id, plan_id, title, description, domain, priority, target_date,
+               weekly_hours, status, target_metrics, milestones, progress, total_sessions, completed_sessions,
                total_minutes, version, created_at, updated_at
         FROM learning_goals
         WHERE workspace_id=? AND user_id=? AND deleted_at IS NULL
@@ -51,6 +52,7 @@ public final class LearningService {
         while (rs.next()) {
           goals.add(new LearningGoal(
               Database.id(rs, "id"),
+              planId(rs),
               rs.getString("title"),
               rs.getString("description"),
               rs.getString("domain"),
@@ -58,6 +60,8 @@ public final class LearningService {
               rs.getDate("target_date") != null ? rs.getDate("target_date").toLocalDate() : null,
               rs.getObject("weekly_hours") != null ? rs.getDouble("weekly_hours") : null,
               rs.getString("status"),
+              jsonArray(rs, "target_metrics"),
+              jsonArray(rs, "milestones"),
               rs.getDouble("progress"),
               rs.getInt("total_sessions"),
               rs.getInt("completed_sessions"),
@@ -74,20 +78,25 @@ public final class LearningService {
 
   /** 获取单个学习目标。 */
   public LearningGoal getGoal(String goalId, Database.Context context) throws SQLException {
+    try (Connection c = database.connection()) { return getGoal(c, goalId, context); }
+  }
+
+  /** 事务内读取学习目标（确认草案时与计划级联删除共用同一连接，保证原子性）。 */
+  public LearningGoal getGoal(Connection c, String goalId, Database.Context context) throws SQLException {
     String sql = """
-        SELECT id, title, description, domain, priority, target_date,
-               weekly_hours, status, progress, total_sessions, completed_sessions,
+        SELECT id, plan_id, title, description, domain, priority, target_date,
+               weekly_hours, status, target_metrics, milestones, progress, total_sessions, completed_sessions,
                total_minutes, version, created_at, updated_at
         FROM learning_goals
         WHERE id=? AND workspace_id=? AND deleted_at IS NULL""";
-    try (Connection c = database.connection();
-         PreparedStatement p = c.prepareStatement(sql)) {
+    try (PreparedStatement p = c.prepareStatement(sql)) {
       p.setBytes(1, Database.uuidBytes(UUID.fromString(goalId)));
       p.setBytes(2, Database.uuidBytes(context.workspaceId()));
       try (ResultSet rs = p.executeQuery()) {
         if (!rs.next()) return null;
         return new LearningGoal(
             Database.id(rs, "id"),
+            planId(rs),
             rs.getString("title"),
             rs.getString("description"),
             rs.getString("domain"),
@@ -95,6 +104,8 @@ public final class LearningService {
             rs.getDate("target_date") != null ? rs.getDate("target_date").toLocalDate() : null,
             rs.getObject("weekly_hours") != null ? rs.getDouble("weekly_hours") : null,
             rs.getString("status"),
+            jsonArray(rs, "target_metrics"),
+            jsonArray(rs, "milestones"),
             rs.getDouble("progress"),
             rs.getInt("total_sessions"),
             rs.getInt("completed_sessions"),
@@ -114,7 +125,7 @@ public final class LearningService {
   public JsonObject createGoal(Database.Context context, JsonObject input) throws SQLException {
     UUID id = UUID.randomUUID();
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
-        "INSERT INTO learning_goals (id,workspace_id,user_id,plan_id,title,description,domain,priority,target_date,weekly_hours,status) VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
+        "INSERT INTO learning_goals (id,workspace_id,user_id,plan_id,title,description,domain,priority,target_date,weekly_hours,status,target_metrics,milestones) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
       p.setBytes(1, Database.uuidBytes(id)); p.setBytes(2, Database.uuidBytes(context.workspaceId()));
       p.setBytes(3, Database.uuidBytes(context.userId()));
       p.setBytes(4, input.has("planId") && !input.get("planId").isJsonNull() ? Database.uuidBytes(UUID.fromString(input.get("planId").getAsString())) : null);
@@ -122,7 +133,10 @@ public final class LearningService {
       p.setString(7, value(input, "domain", "general")); p.setString(8, value(input, "priority", "medium"));
       p.setObject(9, date(input, "targetDate"));
       p.setObject(10, input.has("weeklyHours") && !input.get("weeklyHours").isJsonNull() ? input.get("weeklyHours").getAsDouble() : null);
-      p.setString(11, value(input, "status", "active")); p.executeUpdate();
+      p.setString(11, value(input, "status", "active"));
+      p.setString(12, jsonText(input, "targetMetrics"));
+      p.setString(13, jsonText(input, "milestones"));
+      p.executeUpdate();
     }
     LearningGoal goal = getGoal(id.toString(), context);
     return goal == null ? new JsonObject() : goal.toJson();
@@ -133,13 +147,16 @@ public final class LearningService {
     LearningGoal before = getGoal(goalId, context);
     if (before == null) throw new IllegalArgumentException("learning_goal_not_found");
     int expected = input.has("expectedVersion") ? input.get("expectedVersion").getAsInt() : before.version();
-    String sql = "UPDATE learning_goals SET title=COALESCE(?,title),description=COALESCE(?,description),domain=COALESCE(?,domain),priority=COALESCE(?,priority),target_date=COALESCE(?,target_date),weekly_hours=COALESCE(?,weekly_hours),status=COALESCE(?,status),version=version+1 WHERE id=? AND workspace_id=? AND user_id=? AND version=? AND deleted_at IS NULL";
+    String sql = "UPDATE learning_goals SET title=COALESCE(?,title),description=COALESCE(?,description),domain=COALESCE(?,domain),priority=COALESCE(?,priority),target_date=COALESCE(?,target_date),weekly_hours=COALESCE(?,weekly_hours),status=COALESCE(?,status),target_metrics=COALESCE(?,target_metrics),milestones=COALESCE(?,milestones),version=version+1 WHERE id=? AND workspace_id=? AND user_id=? AND version=? AND deleted_at IS NULL";
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
       p.setString(1, nullable(input, "title")); p.setString(2, nullable(input, "description"));
       p.setString(3, nullable(input, "domain")); p.setString(4, nullable(input, "priority")); p.setObject(5, date(input, "targetDate"));
       p.setObject(6, input.has("weeklyHours") && !input.get("weeklyHours").isJsonNull() ? input.get("weeklyHours").getAsDouble() : null);
-      p.setString(7, nullable(input, "status")); p.setBytes(8, Database.uuidBytes(UUID.fromString(goalId)));
-      p.setBytes(9, Database.uuidBytes(context.workspaceId())); p.setBytes(10, Database.uuidBytes(context.userId())); p.setInt(11, expected);
+      p.setString(7, nullable(input, "status"));
+      p.setString(8, jsonText(input, "targetMetrics"));
+      p.setString(9, jsonText(input, "milestones"));
+      p.setBytes(10, Database.uuidBytes(UUID.fromString(goalId)));
+      p.setBytes(11, Database.uuidBytes(context.workspaceId())); p.setBytes(12, Database.uuidBytes(context.userId())); p.setInt(13, expected);
       if (p.executeUpdate() == 0) throw new IllegalStateException("learning_goal_version_conflict");
     }
     LearningGoal goal = getGoal(goalId, context);
@@ -148,7 +165,12 @@ public final class LearningService {
 
   /** Soft delete a learning goal. */
   public void deleteGoal(String goalId, Database.Context context, int expectedVersion) throws SQLException {
-    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
+    try (Connection c = database.connection()) { deleteGoal(c, goalId, context, expectedVersion); }
+  }
+
+  /** 事务内软删学习目标。 */
+  public void deleteGoal(Connection c, String goalId, Database.Context context, int expectedVersion) throws SQLException {
+    try (PreparedStatement p = c.prepareStatement(
         "UPDATE learning_goals SET deleted_at=NOW(),version=version+1 WHERE id=? AND workspace_id=? AND user_id=? AND version=? AND deleted_at IS NULL")) {
       p.setBytes(1, Database.uuidBytes(UUID.fromString(goalId))); p.setBytes(2, Database.uuidBytes(context.workspaceId()));
       p.setBytes(3, Database.uuidBytes(context.userId())); p.setInt(4, expectedVersion);
@@ -170,6 +192,21 @@ public final class LearningService {
   private static java.sql.Date date(JsonObject input, String name) {
     String value = nullable(input, name);
     return value == null || value.isBlank() ? null : java.sql.Date.valueOf(LocalDate.parse(value));
+  }
+  private static String planId(ResultSet rs) throws SQLException {
+    byte[] value = rs.getBytes("plan_id");
+    return value == null ? null : Database.bytesUuid(value).toString();
+  }
+  private static JsonArray jsonArray(ResultSet rs, String name) throws SQLException {
+    String value = rs.getString(name);
+    if (value == null || value.isBlank()) return new JsonArray();
+    try {
+      JsonElement parsed = JsonParser.parseString(value);
+      return parsed.isJsonArray() ? parsed.getAsJsonArray() : new JsonArray();
+    } catch (RuntimeException ignored) { return new JsonArray(); }
+  }
+  private static String jsonText(JsonObject input, String name) {
+    return input.has(name) && input.get(name).isJsonArray() ? input.get(name).getAsJsonArray().toString() : null;
   }
 
   public List<LearningSession> listSessions(Database.Context context, int days) throws SQLException {
@@ -207,6 +244,93 @@ public final class LearningService {
         }
         return sessions;
       }
+    }
+  }
+
+  /** 列出单个学习目标的学习会话。 */
+  public List<LearningSession> listSessionsByGoal(String goalId, Database.Context context) throws SQLException {
+    String sql = """
+        SELECT ls.id, ls.title, ls.domain, ls.planned_minutes, ls.actual_minutes,
+               ls.status, ls.focus_score, ls.notes, ls.completed_at, ls.created_at,
+               lg.title AS goal_title
+        FROM learning_sessions ls
+        LEFT JOIN learning_goals lg ON ls.goal_id = lg.id AND lg.deleted_at IS NULL
+        WHERE ls.workspace_id=? AND ls.user_id=? AND ls.goal_id=?
+        ORDER BY ls.created_at DESC LIMIT 100""";
+    try (Connection c = database.connection();
+         PreparedStatement p = c.prepareStatement(sql)) {
+      p.setBytes(1, Database.uuidBytes(context.workspaceId()));
+      p.setBytes(2, Database.uuidBytes(context.userId()));
+      p.setBytes(3, Database.uuidBytes(UUID.fromString(goalId)));
+      try (ResultSet rs = p.executeQuery()) {
+        List<LearningSession> sessions = new ArrayList<>();
+        while (rs.next()) {
+          sessions.add(new LearningSession(
+              Database.id(rs, "id"),
+              rs.getString("title"),
+              rs.getString("domain"),
+              rs.getInt("planned_minutes"),
+              rs.getObject("actual_minutes") != null ? rs.getInt("actual_minutes") : null,
+              rs.getString("status"),
+              rs.getObject("focus_score") != null ? rs.getInt("focus_score") : null,
+              rs.getString("notes"),
+              rs.getTimestamp("completed_at") != null
+                  ? rs.getTimestamp("completed_at").toLocalDateTime() : null,
+              rs.getTimestamp("created_at").toLocalDateTime(),
+              rs.getString("goal_title")
+          ));
+        }
+        return sessions;
+      }
+    }
+  }
+
+  /** 学习目标关联计划下的任务（含阶段名），供详情页按天展示。 */
+  public List<PlanTask> planTasks(String planId, Database.Context context) throws SQLException {
+    String sql = """
+        SELECT t.id, t.title, t.description, t.due_at, t.estimated_minutes, t.status, t.version, s.title AS stage_title
+        FROM plan_tasks t
+        LEFT JOIN plan_stages s ON s.id = t.stage_id AND s.deleted_at IS NULL
+        JOIN plans p ON p.id = t.plan_id
+        WHERE t.plan_id=? AND p.workspace_id=? AND t.deleted_at IS NULL
+        ORDER BY t.due_at, t.sort_order, t.created_at""";
+    try (Connection c = database.connection();
+         PreparedStatement p = c.prepareStatement(sql)) {
+      p.setBytes(1, Database.uuidBytes(UUID.fromString(planId)));
+      p.setBytes(2, Database.uuidBytes(context.workspaceId()));
+      try (ResultSet rs = p.executeQuery()) {
+        List<PlanTask> tasks = new ArrayList<>();
+        while (rs.next()) {
+          tasks.add(new PlanTask(
+              Database.id(rs, "id"),
+              rs.getString("title"),
+              rs.getString("description"),
+              rs.getTimestamp("due_at") != null
+                  ? rs.getTimestamp("due_at").toLocalDateTime() : null,
+              rs.getObject("estimated_minutes") != null ? rs.getInt("estimated_minutes") : null,
+              rs.getString("status"),
+              rs.getInt("version"),
+              rs.getString("stage_title")
+          ));
+        }
+        return tasks;
+      }
+    }
+  }
+
+  public record PlanTask(String id, String title, String description, LocalDateTime dueAt,
+                         Integer minutes, String status, int version, String stageTitle) {
+    public JsonObject toJson() {
+      JsonObject obj = new JsonObject();
+      obj.addProperty("id", id);
+      obj.addProperty("title", title);
+      obj.addProperty("description", description != null ? description : "");
+      obj.addProperty("dueAt", dueAt != null ? dueAt.toString() : null);
+      obj.addProperty("minutes", minutes);
+      obj.addProperty("status", status);
+      obj.addProperty("version", version);
+      obj.addProperty("stageTitle", stageTitle != null ? stageTitle : "");
+      return obj;
     }
   }
 
@@ -308,15 +432,17 @@ public final class LearningService {
   // ==================== 数据模型 ====================
 
   public record LearningGoal(
-      String id, String title, String description, String domain,
+      String id, String planId, String title, String description, String domain,
       String priority, LocalDate targetDate, Double weeklyHours,
-      String status, double progress, int totalSessions,
+      String status, JsonArray targetMetrics, JsonArray milestones,
+      double progress, int totalSessions,
       int completedSessions, int totalMinutes, int version,
       LocalDateTime createdAt, LocalDateTime updatedAt
   ) {
     public JsonObject toJson() {
       JsonObject obj = new JsonObject();
       obj.addProperty("id", id);
+      obj.addProperty("planId", planId != null ? planId : "");
       obj.addProperty("title", title);
       obj.addProperty("description", description != null ? description : "");
       obj.addProperty("domain", domain);
@@ -324,6 +450,8 @@ public final class LearningService {
       obj.addProperty("targetDate", targetDate != null ? targetDate.toString() : null);
       obj.addProperty("weeklyHours", weeklyHours);
       obj.addProperty("status", status);
+      obj.add("targetMetrics", targetMetrics != null ? targetMetrics.deepCopy() : new JsonArray());
+      obj.add("milestones", milestones != null ? milestones.deepCopy() : new JsonArray());
       obj.addProperty("progress", progress);
       obj.addProperty("totalSessions", totalSessions);
       obj.addProperty("completedSessions", completedSessions);

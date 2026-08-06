@@ -354,6 +354,7 @@ export interface TrashItem {
 
 export interface LearningGoal {
   id: string
+  planId?: string
   title: string
   description?: string
   domain?: string
@@ -361,6 +362,8 @@ export interface LearningGoal {
   targetDate?: string | null
   weeklyHours?: number | null
   status: string
+  targetMetrics?: LearningGoalMetric[]
+  milestones?: string[]
   progress: number
   totalSessions: number
   completedSessions: number
@@ -368,6 +371,48 @@ export interface LearningGoal {
   version: number
   createdAt: string
   updatedAt: string
+}
+
+export interface LearningGoalMetric {
+  label: string
+  value: string
+  unit?: string
+}
+
+export interface LearningGoalDetailTask {
+  id: string
+  title: string
+  description: string
+  dueAt?: string | null
+  minutes?: number | null
+  status: string
+  version: number
+  stageTitle?: string
+}
+
+export interface LearningGoalDay {
+  date: string
+  tasks: LearningGoalDetailTask[]
+}
+
+export interface LearningGoalSession {
+  id: string
+  title: string
+  domain?: string
+  plannedMinutes: number
+  actualMinutes?: number | null
+  status: string
+  focusScore?: number | null
+  notes?: string
+  completedAt?: string | null
+  createdAt: string
+  goalTitle?: string
+}
+
+export interface LearningGoalDetail {
+  goal: LearningGoal
+  days: LearningGoalDay[]
+  sessions: LearningGoalSession[]
 }
 
 /** 所有 JSON 请求统一经过这里，避免各功能页面重复处理状态码和请求头。 */
@@ -390,6 +435,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
+}
+
+/** 给每个日程/任务分配一个稳定的独特颜色（按 id 哈希），让日历小点、今日计划、计划页一眼可区分。 */
+const ITEM_COLORS = ['#d39a24', '#4a90d9', '#e05d44', '#50b96a', '#9b59b6', '#e67e22', '#16a085', '#c0392b',
+  '#2c3e50', '#8e44ad', '#f39c12', '#27ae60', '#2980b9', '#e74c3c', '#7f8c8d', '#1abc9c']
+function colorForItem(id: string): string {
+  let hash = 0
+  for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) >>> 0
+  return ITEM_COLORS[hash % ITEM_COLORS.length]
 }
 
 function requireArray<T>(value: unknown, path: string): T[] {
@@ -496,9 +550,21 @@ export const plannerApi = {
         })),
       })),
     }))
+    // 日程标题优先展示关联任务的名称与说明（阶段只是分类）：B站/小红书搜索、日历、每日任务都用任务名。
+    const taskById = new Map<string, ApiTask>()
+    for (const taskList of tasks) for (const task of taskList) taskById.set(task.id, task)
     const schedules: CalendarItem[] = rawSchedules.map((item) => {
       const when = splitDateTime(item.startAt)
-      return { id: item.id, title: item.title, date: when.date, time: when.time, planId: item.planId ?? undefined, stageId: item.stageId ?? undefined, taskId: item.taskId ?? undefined, color: '#d39a24', status: item.status, duration: item.durationMinutes, progress: Math.round(item.progress), version: item.version }
+      const task = item.taskId ? taskById.get(item.taskId) : undefined
+      return {
+        id: item.id,
+        title: task?.title || item.title,
+        description: task?.description || undefined,
+        date: when.date, time: when.time,
+        planId: item.planId ?? undefined, stageId: item.stageId ?? undefined, taskId: item.taskId ?? undefined,
+        color: colorForItem(item.id), status: item.status, duration: item.durationMinutes,
+        progress: Math.round(item.progress), version: item.version,
+      }
     })
     const todos: TodoItem[] = rawTodos.map((item) => {
       const when = splitDateTime(item.dueAt)
@@ -518,6 +584,7 @@ export const plannerApi = {
   updateSchedule: (item: CalendarItem) => request<ApiSchedule>(`/schedules/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, startAt: `${item.date}T${item.time}:00`, durationMinutes: item.duration, status: item.status, planId: item.planId ?? null, stageId: item.stageId ?? null, taskId: item.taskId ?? null, expectedVersion: item.version }) }),
   deleteSchedule: (id: string) => request<void>(`/schedules/${id}`, { method: 'DELETE' }),
   loadScheduleMaterials: (id: string, refresh = false) => request<ScheduleMaterialsResponse>(`/schedules/${id}/materials${refresh ? '?refresh=true' : ''}`),
+  loadWeatherDaily: () => request<{ location: string; days: Array<{ date: string; condition: string; tempHigh?: number; tempLow?: number; suggestion: string }> }>('/weather/daily'),
 
   createTodo: (item: TodoItem) => request<ApiTodo>('/todos', { method: 'POST', body: JSON.stringify({ title: item.title, dueAt: todoDueAt(item), status: item.done ? 'done' : 'pending', priority: priorityToApi(item.priority), reminderMinutes: reminderToMinutes(item.reminder) }) }),
   updateTodo: (item: TodoItem) => request<ApiTodo>(`/todos/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, dueAt: todoDueAt(item), status: item.done ? 'done' : 'pending', priority: priorityToApi(item.priority), reminderMinutes: reminderToMinutes(item.reminder), expectedVersion: item.version }) }),
@@ -613,6 +680,7 @@ export const plannerApi = {
   loadAgentRun: (runId: string) => request<AgentRunResponse>(`/agent/runs/${runId}`),
   confirmAgentDraft: (id: string) => request<{ id: string; changeSetId: string; status: string; runId?: string; runStatus?: string; executed: AiDraftAction[] }>(`/agent/drafts/${id}/confirm`, { method: 'POST' }),
   cancelAgentDraft: (id: string) => request<{ id: string; status: string; runId?: string; runStatus?: string }>(`/agent/drafts/${id}/cancel`, { method: 'POST' }),
+  modifyAgentDraft: (id: string, message: string) => request<{ reply?: string; status?: string; runId?: string; draft?: AiDraft }>(`/agent/drafts/${id}/modify`, { method: 'POST', body: JSON.stringify({ message }) }),
   confirmAiDraft: (id: string) => request<{ id: string; changeSetId: string; status: string; executed: AiDraftAction[] }>(`/ai/drafts/${id}/confirm`, { method: 'POST' }),
   cancelAiDraft: (id: string) => request<{ id: string; status: string }>(`/ai/drafts/${id}/cancel`, { method: 'POST' }),
   loadAiSession: () => request<AiSession>('/ai/session'),
@@ -640,6 +708,11 @@ export const plannerApi = {
     const value = await request<{ goals: LearningGoal[] }>('/learning/goals')
     return Array.isArray(value?.goals) ? value.goals : []
   },
+  loadLearningGoal: (id: string) => request<LearningGoalDetail>(`/learning/goals/${id}`),
+  learningTaskAction: (id: string, version: number, action: 'complete' | 'reopen') => request<ApiTask>(`/tasks/${id}/${action}`, {
+    method: 'POST',
+    body: JSON.stringify({ expectedVersion: version }),
+  }),
   chatReview: (message: string, history: AiReviewMessage[], conversationId?: string) => request<AiReviewResponse>('/ai/review/chat', {
     method: 'POST',
     body: JSON.stringify({ message, history, conversationId }),

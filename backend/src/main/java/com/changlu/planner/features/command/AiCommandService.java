@@ -135,6 +135,11 @@ public final class AiCommandService {
     return result;
   }
 
+  /** 返回与给定时段重叠的已有日程标题，供草案创建前询问用户（不抛异常）。 */
+  public java.util.List<String> scheduleConflicts(Database.Context context, String startAt, int durationMinutes) throws SQLException {
+    return plans.findScheduleConflicts(context, java.time.LocalDateTime.parse(startAt), durationMinutes);
+  }
+
   public JsonObject confirm(String draftReference, Database.Context context) throws Exception {
     UUID draftId = draftId(draftReference, context);
     try (Connection c = database.connection()) {
@@ -457,7 +462,7 @@ public final class AiCommandService {
     value.add("stages", query("SELECT s.id,s.plan_id,s.title,s.status,s.progress,s.task_progress,s.effort_progress,s.due_date,s.version FROM plan_stages s JOIN plans p ON p.id=s.plan_id WHERE p.workspace_id=? AND s.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY s.plan_id,s.sort_order", context.workspaceId(), "stage"));
     value.add("tasks", query("SELECT t.id,t.plan_id,t.stage_id,t.title,t.status,t.priority,t.estimated_minutes,t.actual_minutes,t.due_at,t.version FROM plan_tasks t JOIN plans p ON p.id=t.plan_id WHERE p.workspace_id=? AND t.deleted_at IS NULL AND p.deleted_at IS NULL ORDER BY t.due_at LIMIT 100", context.workspaceId(), "task"));
     value.add("todos", query("SELECT id,title,status,priority,due_at,version FROM todos WHERE workspace_id=? AND deleted_at IS NULL ORDER BY due_at LIMIT 60", context.workspaceId(), "todo"));
-    value.add("schedules", query("SELECT id,title,status,start_at,duration_minutes,plan_id,stage_id,task_id,version FROM schedule_items WHERE workspace_id=? AND deleted_at IS NULL ORDER BY start_at DESC LIMIT 100", context.workspaceId(), "schedule"));
+    value.add("schedules", query("SELECT id,title,status,start_at,duration_minutes,plan_id,stage_id,task_id,version,location_name,latitude,longitude,coordinate_system,timezone_id,source_url,reservation_required FROM schedule_items WHERE workspace_id=? AND deleted_at IS NULL ORDER BY start_at DESC LIMIT 100", context.workspaceId(), "schedule"));
     value.add("recentExecution", recentExecution(context)); return gson.toJson(value);
   }
 
@@ -471,7 +476,7 @@ public final class AiCommandService {
         if ("stage".equals(type)) { row.addProperty("planId", Database.id(rs, "plan_id")); addProgress(row, rs); row.addProperty("dueDate", dateText(rs, "due_date")); row.addProperty("version", rs.getInt("version")); }
         if ("task".equals(type)) { row.addProperty("planId", Database.id(rs, "plan_id")); row.addProperty("stageId", Database.id(rs, "stage_id")); row.addProperty("priority", rs.getString("priority")); row.addProperty("estimatedMinutes", integer(rs.getObject("estimated_minutes"))); row.addProperty("actualMinutes", integer(rs.getObject("actual_minutes"))); row.addProperty("dueAt", timeText(rs, "due_at")); row.addProperty("version", rs.getInt("version")); }
         if ("todo".equals(type)) { row.addProperty("priority", rs.getString("priority")); row.addProperty("dueAt", timeText(rs, "due_at")); row.addProperty("version", rs.getInt("version")); }
-        if ("schedule".equals(type)) { row.addProperty("startAt", timeText(rs, "start_at")); row.addProperty("durationMinutes", rs.getInt("duration_minutes")); addUuid(row, "planId", rs.getBytes("plan_id")); addUuid(row, "stageId", rs.getBytes("stage_id")); addUuid(row, "taskId", rs.getBytes("task_id")); row.addProperty("version", rs.getInt("version")); }
+        if ("schedule".equals(type)) { row.addProperty("startAt", timeText(rs, "start_at")); row.addProperty("durationMinutes", rs.getInt("duration_minutes")); addUuid(row, "planId", rs.getBytes("plan_id")); addUuid(row, "stageId", rs.getBytes("stage_id")); addUuid(row, "taskId", rs.getBytes("task_id")); row.addProperty("locationName", rs.getString("location_name")); row.add("latitude", gson.toJsonTree(rs.getObject("latitude"))); row.add("longitude", gson.toJsonTree(rs.getObject("longitude"))); row.addProperty("coordinateSystem", rs.getString("coordinate_system")); row.addProperty("timezoneId", rs.getString("timezone_id")); row.addProperty("sourceUrl", rs.getString("source_url")); row.add("reservationRequired", gson.toJsonTree(rs.getObject("reservation_required"))); row.addProperty("version", rs.getInt("version")); }
         rows.add(row);
       }}
     }
@@ -492,7 +497,9 @@ public final class AiCommandService {
         normalizeModelFields(fields);
         if (type.startsWith("create_") && !"create_schedule".equals(type) && string(fields, "title", "").isBlank()) throw new IllegalArgumentException("创建操作缺少标题");
         if (needsTarget(type)) {
-          UUID targetId = UUID.fromString(required(action, "targetId"));
+          // 模型偶尔把实体标题填进 targetId（如把"雅思 7 分冲刺计划"当作 targetId），先按标题反查真实 id。
+          UUID targetId = resolveTargetId(c, type, required(action, "targetId"), context);
+          action.addProperty("targetId", targetId.toString());
           JsonObject before = type.endsWith("_learning_goal")
               ? learningGoalSnapshot(c, context, targetId)
               : target(c, context, type, targetId, type.startsWith("restore_"));
@@ -504,6 +511,78 @@ public final class AiCommandService {
         validateFields(type, fields);
       }
     }
+  }
+
+  /**
+   * 解析操作的目标 id。模型偶尔把实体标题/名称填进 targetId（例如把"雅思 7 分冲刺计划"当作 targetId
+   * 而不是其 UUID），这里按标题反查真实 id，避免 UUID.fromString 抛 Invalid UUID string。
+   * 匹配顺序：合法 UUID 直通 → 规范化后标题相等（唯一）→ 最长公共子串 ≥3 且唯一命中 → 否则给出清晰错误。
+   */
+  private UUID resolveTargetId(Connection c, String type, String rawTargetId, Database.Context context) throws SQLException {
+    try {
+      return UUID.fromString(rawTargetId);
+    } catch (IllegalArgumentException ignored) { /* 不是 UUID → 按标题反查 */ }
+    // 学习目标的 targetId 总是 Subagent 生成的真实 UUID，不做标题反查。
+    if (type.endsWith("_learning_goal")) {
+      throw new IllegalArgumentException("找不到要操作的学习目标：「" + rawTargetId + "」");
+    }
+    String title = rawTargetId == null ? "" : rawTargetId.trim();
+    if (title.isBlank()) throw new IllegalArgumentException("targetId_required");
+    EntityTable entity = entityTable(type);
+    boolean joined = "plan_stage".equals(entity.entityType()) || "plan_task".equals(entity.entityType());
+    String table = entity.table();
+    String from = table + (joined ? " JOIN plans p ON p.id=" + table + ".plan_id" : "");
+    String where = joined
+        ? "p.workspace_id=? AND " + table + ".deleted_at IS NULL AND p.deleted_at IS NULL"
+        : "workspace_id=? AND deleted_at IS NULL";
+    String normalized = normalizeForMatch(title);
+    String exactId = null;
+    int exactCount = 0;
+    String bestId = null;
+    int bestLength = 0;
+    boolean ambiguous = false;
+    try (PreparedStatement p = c.prepareStatement(
+        "SELECT id,title FROM " + from + " WHERE " + where + " ORDER BY updated_at DESC LIMIT 300")) {
+      p.setBytes(1, Database.uuidBytes(context.workspaceId()));
+      try (ResultSet rs = p.executeQuery()) {
+        while (rs.next()) {
+          String normalizedDb = normalizeForMatch(rs.getString("title"));
+          if (normalizedDb.equals(normalized)) {
+            exactId = Database.id(rs, "id");
+            exactCount++;
+            continue;
+          }
+          int length = longestSharedSubstring(normalized, normalizedDb);
+          if (length > bestLength) {
+            bestLength = length;
+            bestId = Database.id(rs, "id");
+            ambiguous = false;
+          } else if (length == bestLength && bestLength >= 3 && bestId != null) {
+            ambiguous = true;
+          }
+        }
+      }
+    }
+    if (exactCount == 1) return UUID.fromString(exactId);
+    if (exactCount > 1) throw new IllegalArgumentException("存在多个同名「" + title + "」，请指明要操作哪一个");
+    if (bestId != null && bestLength >= 3 && !ambiguous) return UUID.fromString(bestId);
+    throw new IllegalArgumentException("找不到要操作的" + entity.entityType() + "：「" + title + "」");
+  }
+
+  private String normalizeForMatch(String value) {
+    return value == null ? "" : value.replaceAll("\\s", "").toLowerCase();
+  }
+
+  private int longestSharedSubstring(String a, String b) {
+    int best = 0;
+    for (int i = 0; i < a.length(); i++) {
+      for (int j = 0; j < b.length(); j++) {
+        int k = 0;
+        while (i + k < a.length() && j + k < b.length() && a.charAt(i + k) == b.charAt(j + k)) k++;
+        if (k > best) best = k;
+      }
+    }
+    return best;
   }
 
   private void validateTargetVersions(Connection c, JsonArray actions, Database.Context context) throws SQLException {
@@ -548,12 +627,31 @@ public final class AiCommandService {
       }
       case "delete_learning_goal" -> {
         String targetId = required(action, "targetId");
-        int expected = f.has("expectedVersion") ? f.get("expectedVersion").getAsInt() : learning.getGoal(targetId, context).version();
-        learning.deleteGoal(targetId, context, expected);
+        // 在同一事务连接上读取目标，保证目标+计划+日程的删除原子性。
+        LearningService.LearningGoal goal = learning.getGoal(c, targetId, context);
+        if (goal == null) throw new IllegalArgumentException("learning_goal_not_found");
+        int expected = f.has("expectedVersion") ? f.get("expectedVersion").getAsInt() : goal.version();
+        // 级联删除目标关联的学习计划与日程，避免删了目标但"长期计划"仍留在计划页/日历里。
+        if (goal.planId() != null && !goal.planId().isBlank()) {
+          UUID planId = UUID.fromString(goal.planId());
+          try {
+            softDeleteOrRestore(c, "delete_plan", planId, new JsonObject(), context, draftId, changeSetId, source);
+          } catch (IllegalArgumentException alreadyGone) {
+            LOG.info("[学习目标删除] 关联计划已不存在，跳过计划级联：{}", alreadyGone.getMessage());
+          }
+          try (PreparedStatement p = c.prepareStatement(
+              "UPDATE schedule_items SET deleted_at=NOW(),purge_after=DATE_ADD(NOW(),INTERVAL 30 DAY),version=version+1 WHERE plan_id=? AND deleted_at IS NULL")) {
+            p.setBytes(1, Database.uuidBytes(planId));
+            p.executeUpdate();
+          }
+        }
+        learning.deleteGoal(c, targetId, context, expected);
         result.add(item(type, targetId, action));
       }
       case "update_plan" -> result.add(item(type, updatePlan(c, UUID.fromString(required(action, "targetId")), f, context, draftId, changeSetId, source), action));
-      case "delete_plan", "restore_plan", "delete_stage", "restore_stage", "delete_todo", "restore_todo", "delete_schedule", "restore_schedule" ->
+      case "delete_plan" -> result.add(item(type,
+          deletePlanWithCascade(c, UUID.fromString(required(action, "targetId")), f, context, draftId, changeSetId, source), action));
+      case "restore_plan", "delete_stage", "restore_stage", "delete_todo", "restore_todo", "delete_schedule", "restore_schedule" ->
           result.add(item(type, softDeleteOrRestore(c, type, UUID.fromString(required(action, "targetId")), f, context, draftId, changeSetId, source), action));
       case "create_stage" -> result.add(item(type, plans.createStage(c, context, UUID.fromString(required(f, "planId")), f, draftId, changeSetId, source).get("id").getAsString(), action));
       case "update_stage" -> result.add(item(type, plans.updateStage(c, context, UUID.fromString(required(action, "targetId")), f, draftId, changeSetId, source).get("id").getAsString(), action));
@@ -601,9 +699,12 @@ public final class AiCommandService {
         for (JsonElement scheduleElement : array(tf, "schedules")) {
           JsonObject schedule = scheduleElement.getAsJsonObject(); schedule.addProperty("planId", planId.toString()); schedule.addProperty("stageId", stageId.toString()); schedule.addProperty("taskId", taskId.toString());
           if (!schedule.has("title")) schedule.addProperty("title", required(tf, "title"));
-          // 旅行日程是明确日期的单次安排，不应被每周可用时段设置阻塞；仍保留时间冲突校验。
+          // 旅行/学习/饮食的日程是明确时间的单次安排（用户直接给出时间），不应被每周可用时段设置阻塞；
+          // 否则未配置偏好时确认会抛 availability_required。仍保留时间冲突校验。
+          String reason = string(f, "reason", "");
+          boolean explicitTimes = isTravelPlan(f) || "learning_agent".equals(reason) || "diet_agent".equals(reason);
           JsonObject created = plans.createSchedule(c, context, schedule, draftId, changeSetId, source,
-              !isTravelPlan(f) && !"learning_agent".equals(string(f, "reason", "")));
+              !explicitTimes);
           executed.add(simpleItem("create_schedule", UUID.fromString(created.get("id").getAsString()), "安排任务：" + required(tf, "title")));
         }
       }
@@ -658,6 +759,31 @@ public final class AiCommandService {
     UUID planId = planIdFromSnapshot(before); if (planId != null) plans.recomputeProgress(c, planId); return id.toString();
   }
 
+  /**
+   * 删除计划时级联清理，保证"学习目标 + 长期计划 + 日程"一起删除：
+   * 软删计划本体 → 软删该计划的全部日程（避免日历残留）→ 软删关联的学习目标（避免孤儿目标）。
+   */
+  private String deletePlanWithCascade(Connection c, UUID planId, JsonObject f, Database.Context context,
+                                       UUID draftId, UUID changeSetId, String source) throws SQLException {
+    softDeleteOrRestore(c, "delete_plan", planId, f, context, draftId, changeSetId, source);
+    try (PreparedStatement p = c.prepareStatement(
+        "UPDATE schedule_items SET deleted_at=NOW(),purge_after=DATE_ADD(NOW(),INTERVAL 30 DAY),version=version+1 WHERE plan_id=? AND deleted_at IS NULL")) {
+      p.setBytes(1, Database.uuidBytes(planId));
+      p.executeUpdate();
+    }
+    try (PreparedStatement p = c.prepareStatement(
+        "SELECT id,version FROM learning_goals WHERE plan_id=? AND workspace_id=? AND deleted_at IS NULL")) {
+      p.setBytes(1, Database.uuidBytes(planId));
+      p.setBytes(2, Database.uuidBytes(context.workspaceId()));
+      try (ResultSet rs = p.executeQuery()) {
+        while (rs.next()) {
+          learning.deleteGoal(c, Database.id(rs, "id"), context, rs.getInt("version"));
+        }
+      }
+    }
+    return planId.toString();
+  }
+
   private void prepareTaskStatus(String type, JsonObject f) {
     String status = switch (type) { case "complete_task" -> "done"; case "delay_task" -> "pending"; case "block_task" -> "blocked"; case "skip_task" -> "skipped"; case "cancel_task" -> "cancelled"; default -> null; };
     if (status != null) f.addProperty("status", status); f.addProperty("actionType", type);
@@ -701,7 +827,7 @@ public final class AiCommandService {
     JsonObject o = baseRow(rs); o.addProperty("description", rs.getString("description")); o.addProperty("status", rs.getString("status")); o.addProperty("priority", rs.getString("priority")); o.addProperty("dueAt", timeText(rs, "due_at")); o.addProperty("completedAt", timeText(rs, "completed_at")); return o;
   }
   private JsonObject scheduleRow(ResultSet rs) throws SQLException {
-    JsonObject o = baseRow(rs); o.addProperty("description", rs.getString("description")); o.addProperty("status", rs.getString("status")); o.addProperty("startAt", timeText(rs, "start_at")); o.addProperty("durationMinutes", rs.getInt("duration_minutes")); addUuid(o, "planId", rs.getBytes("plan_id")); addUuid(o, "stageId", rs.getBytes("stage_id")); addUuid(o, "taskId", rs.getBytes("task_id")); o.addProperty("completedAt", timeText(rs, "completed_at")); return o;
+    JsonObject o = baseRow(rs); o.addProperty("description", rs.getString("description")); o.addProperty("status", rs.getString("status")); o.addProperty("startAt", timeText(rs, "start_at")); o.addProperty("durationMinutes", rs.getInt("duration_minutes")); addUuid(o, "planId", rs.getBytes("plan_id")); addUuid(o, "stageId", rs.getBytes("stage_id")); addUuid(o, "taskId", rs.getBytes("task_id")); o.addProperty("locationName", rs.getString("location_name")); o.add("latitude", gson.toJsonTree(rs.getObject("latitude"))); o.add("longitude", gson.toJsonTree(rs.getObject("longitude"))); o.addProperty("coordinateSystem", rs.getString("coordinate_system")); o.addProperty("timezoneId", rs.getString("timezone_id")); o.addProperty("sourceUrl", rs.getString("source_url")); o.add("reservationRequired", gson.toJsonTree(rs.getObject("reservation_required"))); o.addProperty("completedAt", timeText(rs, "completed_at")); return o;
   }
   private JsonObject baseRow(ResultSet rs) throws SQLException { JsonObject o = new JsonObject(); o.addProperty("id", Database.id(rs, "id")); o.addProperty("title", rs.getString("title")); o.addProperty("version", rs.getInt("version")); o.addProperty("deletedAt", timeText(rs, "deleted_at")); return o; }
 
@@ -725,7 +851,7 @@ public final class AiCommandService {
       case "plan_stage" -> { sql = "UPDATE plan_stages s JOIN plans p ON p.id=s.plan_id SET s.title=?,s.description=?,s.status=?,s.due_date=?,s.sort_order=?,s.deleted_at=?,s.purge_after=NULL,s.version=s.version+1 WHERE s.id=? AND p.workspace_id=? AND s.version=?"; add(values, before, "title", "description", "status"); values.add(sqlDate(before, "dueDate")); values.add(integer(before, "sortOrder", 0)); values.add(sqlTime(before, "deletedAt")); }
       case "plan_task" -> { sql = "UPDATE plan_tasks t JOIN plans p ON p.id=t.plan_id SET t.title=?,t.description=?,t.status=?,t.priority=?,t.estimated_minutes=?,t.actual_minutes=?,t.due_at=?,t.completed_at=?,t.blocked_reason=?,t.sort_order=?,t.deleted_at=?,t.purge_after=NULL,t.version=t.version+1 WHERE t.id=? AND p.workspace_id=? AND t.version=?"; add(values, before, "title", "description", "status", "priority"); values.add(optionalInteger(before, "estimatedMinutes")); values.add(optionalInteger(before, "actualMinutes")); values.add(sqlTime(before, "dueAt")); values.add(sqlTime(before, "completedAt")); values.add(nullable(before, "reason")); values.add(integer(before, "sortOrder", 0)); values.add(sqlTime(before, "deletedAt")); }
       case "todo" -> { sql = "UPDATE todos SET title=?,description=?,status=?,priority=?,due_at=?,completed_at=?,deleted_at=?,purge_after=NULL,version=version+1 WHERE id=? AND workspace_id=? AND version=?"; add(values, before, "title", "description", "status", "priority"); values.add(sqlTime(before, "dueAt")); values.add(sqlTime(before, "completedAt")); values.add(sqlTime(before, "deletedAt")); }
-      case "schedule" -> { sql = "UPDATE schedule_items SET title=?,description=?,status=?,start_at=?,duration_minutes=?,plan_id=?,stage_id=?,task_id=?,completed_at=?,deleted_at=?,purge_after=NULL,version=version+1 WHERE id=? AND workspace_id=? AND version=?"; add(values, before, "title", "description", "status"); values.add(sqlTime(before, "startAt")); values.add(integer(before, "durationMinutes", 30)); values.add(uuidBytes(before, "planId")); values.add(uuidBytes(before, "stageId")); values.add(uuidBytes(before, "taskId")); values.add(sqlTime(before, "completedAt")); values.add(sqlTime(before, "deletedAt")); }
+      case "schedule" -> { sql = "UPDATE schedule_items SET title=?,description=?,status=?,start_at=?,duration_minutes=?,plan_id=?,stage_id=?,task_id=?,location_name=?,latitude=?,longitude=?,coordinate_system=?,timezone_id=?,source_url=?,reservation_required=?,completed_at=?,deleted_at=?,purge_after=NULL,version=version+1 WHERE id=? AND workspace_id=? AND version=?"; add(values, before, "title", "description", "status"); values.add(sqlTime(before, "startAt")); values.add(integer(before, "durationMinutes", 30)); values.add(uuidBytes(before, "planId")); values.add(uuidBytes(before, "stageId")); values.add(uuidBytes(before, "taskId")); add(values, before, "locationName", "latitude", "longitude", "coordinateSystem", "timezoneId", "sourceUrl", "reservationRequired"); values.add(sqlTime(before, "completedAt")); values.add(sqlTime(before, "deletedAt")); }
       default -> throw new IllegalArgumentException("unsupported_undo_entity");
     }
     try (PreparedStatement p = c.prepareStatement(sql)) { int index = 1; for (Object value : values) p.setObject(index++, value); p.setBytes(index++, Database.uuidBytes(id)); p.setBytes(index++, Database.uuidBytes(workspaceId)); p.setInt(index, currentVersion); requireAffected(p.executeUpdate(), "undo_version_conflict"); }
@@ -903,14 +1029,14 @@ public final class AiCommandService {
   private void validateFields(String type, JsonObject f) {
     List<String> allowed;
     if ("create_learning_goal".equals(type) || "update_learning_goal".equals(type)) {
-      allowed = List.of("title", "description", "domain", "priority", "targetDate", "weeklyHours", "status", "planId", "reason", "expectedVersion");
+      allowed = List.of("title", "description", "domain", "priority", "targetDate", "weeklyHours", "status", "planId", "reason", "targetMetrics", "milestones", "expectedVersion");
     } else if ("delete_learning_goal".equals(type)) {
       allowed = List.of("reason", "expectedVersion");
     } else if (type.endsWith("_plan")) allowed = List.of("title", "description", "color", "status", "dueDate", "stages", "learningGoal", "reason", "expectedVersion");
     else if (type.endsWith("_stage")) allowed = List.of("planId", "title", "description", "status", "dueDate", "sortOrder", "tasks", "reason", "expectedVersion");
     else if (type.endsWith("_task")) allowed = List.of("planId", "stageId", "title", "description", "status", "priority", "estimatedMinutes", "actualMinutes", "dueAt", "sortOrder", "reason", "schedules", "expectedVersion", "actionType");
     else if (type.endsWith("_todo")) allowed = List.of("title", "description", "status", "priority", "dueAt", "actualMinutes", "reason", "expectedVersion");
-    else if (type.endsWith("_schedule")) allowed = List.of("title", "description", "status", "startAt", "durationMinutes", "planId", "stageId", "taskId", "actualMinutes", "reason", "expectedVersion", "actionType");
+    else if (type.endsWith("_schedule")) allowed = List.of("title", "description", "status", "startAt", "durationMinutes", "planId", "stageId", "taskId", "actualMinutes", "reason", "expectedVersion", "actionType", "locationName", "latitude", "longitude", "coordinateSystem", "timezoneId", "sourceUrl", "reservationRequired");
     else if ("batch_reschedule".equals(type)) allowed = List.of("items", "reason");
     else allowed = List.of("timezone", "availability", "maxSessionMinutes", "bufferMinutes");
     requireOnly(f, allowed);
@@ -966,11 +1092,14 @@ public final class AiCommandService {
 
   private JsonObject insertLearningGoal(Connection c, Database.Context context, JsonObject input) throws SQLException {
     UUID id = UUID.randomUUID();
-    try (PreparedStatement p = c.prepareStatement("INSERT INTO learning_goals (id,workspace_id,user_id,plan_id,title,description,domain,priority,target_date,weekly_hours,status) VALUES (?,?,?,?,?,?,?,?,?,?,?)")) {
+    try (PreparedStatement p = c.prepareStatement("INSERT INTO learning_goals (id,workspace_id,user_id,plan_id,title,description,domain,priority,target_date,weekly_hours,status,target_metrics,milestones) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
       p.setBytes(1, Database.uuidBytes(id)); p.setBytes(2, Database.uuidBytes(context.workspaceId())); p.setBytes(3, Database.uuidBytes(context.userId()));
       p.setBytes(4, input.has("planId") && !input.get("planId").isJsonNull() ? Database.uuidBytes(UUID.fromString(input.get("planId").getAsString())) : null);
       p.setString(5, required(input, "title")); p.setString(6, nullable(input, "description")); p.setString(7, string(input, "domain", "general")); p.setString(8, string(input, "priority", "medium"));
-      p.setObject(9, date(input, "targetDate")); p.setObject(10, input.has("weeklyHours") && !input.get("weeklyHours").isJsonNull() ? input.get("weeklyHours").getAsDouble() : null); p.setString(11, string(input, "status", "active")); p.executeUpdate();
+      p.setObject(9, date(input, "targetDate")); p.setObject(10, input.has("weeklyHours") && !input.get("weeklyHours").isJsonNull() ? input.get("weeklyHours").getAsDouble() : null); p.setString(11, string(input, "status", "active"));
+      p.setString(12, input.has("targetMetrics") && input.get("targetMetrics").isJsonArray() ? input.get("targetMetrics").getAsJsonArray().toString() : null);
+      p.setString(13, input.has("milestones") && input.get("milestones").isJsonArray() ? input.get("milestones").getAsJsonArray().toString() : null);
+      p.executeUpdate();
     }
     JsonObject row = new JsonObject(); row.addProperty("id", id.toString()); row.addProperty("version", 0); row.addProperty("title", input.get("title").getAsString()); return row;
   }

@@ -32,6 +32,9 @@ public final class Database {
     config.setMaximumPoolSize(8);
     config.setMinimumIdle(1);
     config.setPoolName("changlu-planner");
+    // 学习计划等大型 JSON（数千行/2MB+）在排序时会超过默认 256KB sort_buffer 导致 "Out of sort memory"，
+    // 通过初始化 SQL 提升每条连接的排序缓冲区。
+    config.setConnectionInitSql("SET SESSION sort_buffer_size = 8388608");
   }
 
   public static Database fromEnvironment() {

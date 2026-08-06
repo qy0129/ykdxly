@@ -1,6 +1,7 @@
 package com.changlu.planner.app;
 
 import com.changlu.planner.integrations.wechat.WechatBotAgent;
+import com.changlu.planner.agent.subagents.travel.refresh.TravelRefreshScheduler;
 import com.changlu.planner.interfaces.http.ApiServer;
 import com.changlu.planner.shared.database.Database;
 
@@ -15,6 +16,8 @@ public final class PlannerApplication {
     database.ensureDefaultContext();
     ApiServer server = new ApiServer(database, Integer.parseInt(System.getenv().getOrDefault("PLANNER_PORT", "8081")));
     server.start();
+    TravelRefreshScheduler travelRefresh = TravelRefreshScheduler.production(database);
+    travelRefresh.start();
     WechatBotAgent wechatBot = new WechatBotAgent(database);
     if (Boolean.parseBoolean(System.getenv().getOrDefault("PLANNER_WECHAT_ENABLED", "true"))) {
       wechatBot.start();
@@ -24,6 +27,7 @@ public final class PlannerApplication {
     // 所有后台入口都在这里统一关闭，避免开发环境重启时遗留连接和线程。
     Runtime.getRuntime().addShutdownHook(new Thread(() -> {
       wechatBot.close();
+      travelRefresh.close();
       server.stop();
       database.stop();
     }));

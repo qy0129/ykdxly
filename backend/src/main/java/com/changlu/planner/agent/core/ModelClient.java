@@ -148,6 +148,10 @@ public final class ModelClient {
     JsonObject result = parseJsonObject(content);
     // 部分推理模型会把最终 JSON 放在 reasoning_content，content 只放解释文本。
     if (result == null && !reasoning.isBlank()) result = parseJsonObject(reasoning);
+    // 模型常把中文引号写成未转义的 ASCII 双引号（如 "已为您创建"青岛…"计划"），严格 JSON 无法解析。
+    // 把字符串内部左右都是汉字的裸双引号按中文引号转义后重新尝试。
+    if (result == null && !content.isBlank()) result = parseJsonObject(fixInnerCjkQuotes(content));
+    if (result == null && !reasoning.isBlank()) result = parseJsonObject(fixInnerCjkQuotes(reasoning));
     if (result != null) return result;
     if (content.isBlank()) content = reasoning;
     LOG.warn("[模型 JSON 解析失败] 用途={} 内容预览={}", purpose, preview(content));
@@ -225,6 +229,47 @@ public final class ModelClient {
     return null;
   }
 
+  /**
+   * 修复模型把中文引号写成未转义 ASCII 双引号导致的非法 JSON。
+   * 规则：仅当双引号位于 JSON 字符串内部、且左右两侧都是 CJK 字符时，视为中文引号，
+   * 转义为 {@code \"} 保留在字符串里。JSON 的合法定界引号左侧/右侧一定是结构字符（如 ,:{}[]），
+   * 因此不会被误改。
+   */
+  private String fixInnerCjkQuotes(String value) {
+    StringBuilder out = new StringBuilder(value.length() + 16);
+    boolean inString = false;
+    boolean escaped = false;
+    for (int index = 0; index < value.length(); index++) {
+      char c = value.charAt(index);
+      if (c == '\\' && !escaped) {
+        out.append(c);
+        escaped = true;
+        continue;
+      }
+      if (c == '"' && !escaped) {
+        char left = index > 0 ? value.charAt(index - 1) : 0;
+        char right = index + 1 < value.length() ? value.charAt(index + 1) : 0;
+        if (inString && isCjk(left) && isCjk(right)) {
+          out.append("\\\"");
+          continue;
+        }
+        inString = !inString;
+        out.append(c);
+        continue;
+      }
+      escaped = false;
+      out.append(c);
+    }
+    return out.toString();
+  }
+
+  private boolean isCjk(char c) {
+    return (c >= '一' && c <= '鿿')   // 中日韩统一表意文字
+        || (c >= '㐀' && c <= '䶿')   // 扩展 A
+        || (c >= '　' && c <= '〿')   // CJK 标点
+        || (c >= '＀' && c <= '￯');  // 全角字符
+  }
+
   private String normalizeJsonText(String value) {
     StringBuilder normalized = new StringBuilder(value.length());
     boolean quoted = false;
@@ -292,6 +337,9 @@ public final class ModelClient {
   }
 
   private boolean retryable(Exception error) {
+    // 模型偶发输出非法 JSON（如中文引号写成未转义的 ASCII 双引号）时，重试同一请求通常能拿到合法输出，
+    // 否则配置的 maxAttempts 形同虚设，用户只能手动重发一次。
+    if (error instanceof InvalidJsonException) return true;
     return !(error instanceof IllegalStateException) || error instanceof ModelHttpException http
         && (http.status == 408 || http.status == 429 || http.status >= 500);
   }

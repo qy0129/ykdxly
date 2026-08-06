@@ -1,21 +1,34 @@
 package com.changlu.planner.agent.subagents.travel;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.changlu.planner.agent.core.contract.SubagentRequest;
+import com.changlu.planner.agent.subagents.travel.nlu.*;
+import java.time.Clock;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.format.DateTimeParseException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.UUID;
 
 public final class TravelPolicy {
   private static final Pattern DESTINATION_PATTERN = Pattern.compile(
-      "(?:去|到|前往)([\\p{IsHan}A-Za-z0-9]{2,12}?)(?:玩|旅游|旅行|度假|出发|，|,|$)");
+      "(?:去|到|前往)([\\p{IsHan}A-Za-z0-9]{2,12}?)(?:玩|旅游|旅行|度假|出发|，|,|$|(?=[一二两三四五六七八九十百零〇0-9]{1,3}(?:天|日)))");
   private static final Pattern ARABIC_DAYS_PATTERN = Pattern.compile("(\\d{1,3})\\s*(?:天|日)");
   private static final Pattern CHINESE_DAYS_PATTERN = Pattern.compile(
       "([一二两三四五六七八九十百零〇]+)\\s*(?:天|日)");
+  private final Clock clock;
+  private final RelativeDateParser relativeDates;
+  private final ChineseDurationParser durations = new ChineseDurationParser();
+  private final ChineseMoneyParser money = new ChineseMoneyParser();
+  private final TravelPreferenceParser preferences = new TravelPreferenceParser();
+
+  public TravelPolicy() { this(Clock.system(ZoneId.of("Asia/Shanghai"))); }
+  public TravelPolicy(Clock clock) { this.clock = clock; this.relativeDates = new RelativeDateParser(clock); }
 
   public SubagentRequest normalizeRequest(SubagentRequest request) {
     JsonObject arguments = request.arguments();
@@ -30,22 +43,25 @@ public final class TravelPolicy {
     if (arguments.has("budget") && arguments.get("budget").isJsonObject()
         && arguments.getAsJsonObject("budget").keySet().isEmpty()) arguments.remove("budget");
     if (startDate == null) {
-      if (message.contains("明天")) startDate = LocalDate.now().plusDays(1);
-      else if (message.contains("后天")) startDate = LocalDate.now().plusDays(2);
-      else if (message.contains("今天")) startDate = LocalDate.now();
+      startDate = relativeDates.parse(message, requestZone(arguments));
       if (startDate != null) arguments.addProperty("startDate", startDate.toString());
     }
     if (startDate != null && (!arguments.has("endDate") || arguments.get("endDate").getAsString().isBlank())) {
-      int days = durationDays(message);
+      int days = durations.parseDays(message);
       if (days > 0) arguments.addProperty("endDate", startDate.plusDays(days - 1L).toString());
     }
     if (!arguments.has("travelers") && (message.contains("一个人") || message.contains("独自"))) {
       arguments.addProperty("travelers", 1);
     }
-    if (!arguments.has("pace") && (message.contains("轻松") || message.contains("休闲"))) {
-      arguments.addProperty("pace", "relaxed");
+    preferences.apply(message, arguments);
+    if (!arguments.has("budget")) {
+      java.math.BigDecimal amount = money.parse(message);
+      if (amount != null) { JsonObject budget = new JsonObject(); budget.addProperty("amount", amount); budget.addProperty("currency", "CNY"); arguments.add("budget", budget); }
     }
-    if (!arguments.has("saveToPlanner") && writeRequested(message, arguments)) {
+    if (previewOnly(message)) {
+      // A current explicit preview instruction must override a reused request from an earlier turn.
+      arguments.addProperty("saveToPlanner", false);
+    } else if (!arguments.has("saveToPlanner") && writeRequested(message, arguments)) {
       arguments.addProperty("saveToPlanner", true);
     }
     String remarks = arguments.has("remarks") && !arguments.get("remarks").isJsonNull()
@@ -57,6 +73,16 @@ public final class TravelPolicy {
       arguments.add("constraints", constraints);
     }
     return new SubagentRequest(request.message(), arguments, request.documentIds());
+  }
+
+  private ZoneId requestZone(JsonObject arguments) {
+    try {
+      if (arguments.has("deviceLocation") && arguments.get("deviceLocation").isJsonObject()) {
+        JsonObject location = arguments.getAsJsonObject("deviceLocation");
+        if (location.has("timezone") && !location.get("timezone").getAsString().isBlank()) return ZoneId.of(location.get("timezone").getAsString());
+      }
+    } catch (Exception ignored) { }
+    return clock.getZone();
   }
 
   private void clearInvalidDate(JsonObject arguments, String name) {
@@ -104,12 +130,13 @@ public final class TravelPolicy {
   }
 
   public boolean writeRequested(String message, JsonObject arguments) {
+    if (previewOnly(message)) return false;
     if (arguments.has("saveToPlanner") && arguments.get("saveToPlanner").isJsonPrimitive()) {
       return arguments.get("saveToPlanner").getAsBoolean();
     }
     String normalized = message == null ? "" : message.replaceAll("\\s", "");
-    if (normalized.contains("不要保存") || normalized.contains("只要建议") || normalized.contains("仅预览")) return false;
-    return normalized.contains("制定") || normalized.contains("创建") || normalized.contains("安排")
+    boolean implicitTripPlan = normalized.matches(".*(?:去|到|前往).{2,16}[一二两三四五六七八九十百零〇0-9]{1,3}(?:天|日).*?");
+    return implicitTripPlan || normalized.contains("制定") || normalized.contains("创建") || normalized.contains("安排")
         || normalized.contains("生成计划") || normalized.contains("加入计划") || normalized.contains("保存到")
         || normalized.contains("加入日历") || normalized.contains("写入日历") || normalized.contains("排进日历")
         || normalized.contains("生成草案") || normalized.contains("生成写入")
@@ -119,6 +146,7 @@ public final class TravelPolicy {
   }
 
   public boolean planApproved(String message, JsonObject arguments) {
+    if (previewOnly(message)) return false;
     if (arguments.has("approvePlan") && arguments.get("approvePlan").isJsonPrimitive()
         && arguments.get("approvePlan").getAsBoolean()) return true;
     String normalized = message == null ? "" : message.replaceAll("\\s", "");
@@ -126,7 +154,15 @@ public final class TravelPolicy {
         || normalized.contains("确认旅行计划") || normalized.contains("确认计划")
         || normalized.contains("确认无误") || normalized.contains("没问题")
         || normalized.contains("就按这个") || normalized.contains("就这么定")
-        || normalized.contains("生成草案") || normalized.contains("生成写入计划");
+         || normalized.contains("生成草案") || normalized.contains("生成写入计划");
+  }
+
+  private boolean previewOnly(String message) {
+    String normalized = message == null ? "" : message.replaceAll("\\s", "");
+    return normalized.contains("\u4e0d\u8981\u4fdd\u5b58") || normalized.contains("\u53ea\u8981\u5efa\u8bae")
+        || normalized.contains("\u4ec5\u9884\u89c8") || normalized.contains("\u4e0d\u8981\u5199\u5165\u65e5\u5386")
+        || normalized.contains("\u4e0d\u5199\u5165\u65e5\u5386") || normalized.contains("\u4e0d\u8981\u751f\u6210\u8349\u6848")
+        || normalized.contains("\u53ea\u751f\u6210\u65b9\u6848\u9884\u89c8");
   }
 
   /** 纯确认语句：去掉确认类词与标点后没有剩余内容，可安全复用第一阶段方案。 */
@@ -145,15 +181,56 @@ public final class TravelPolicy {
 
   public void validate(TravelResult result) {
     TravelRequest request = result.request();
-    if (!request.startDate().isBlank() && !request.endDate().isBlank()
-        && LocalDate.parse(request.endDate()).isBefore(LocalDate.parse(request.startDate()))) {
+    LocalDate start = request.startDate().isBlank() ? null : LocalDate.parse(request.startDate());
+    LocalDate end = request.endDate().isBlank() ? null : LocalDate.parse(request.endDate());
+    if (start != null && end != null && end.isBefore(start)) {
       throw new IllegalArgumentException("TRAVEL_DATE_RANGE_INVALID");
     }
     if (request.travelers() != null && request.travelers() < 1) {
       throw new IllegalArgumentException("TRAVEL_TRAVELERS_INVALID");
     }
+    validateDays(result.days(), start, end);
+    validateBudgetEstimate(result.budgetEstimate());
     // 目的地缺失不由这里抛异常：missingRequirements → informationForm 会在 TravelSubagent
     // 里优雅地询问目的地/日期，而不是让整个 run 失败（"我要旅游"等无目的地请求的场景）。
+  }
+
+  private void validateDays(JsonArray days, LocalDate start, LocalDate end) {
+    Set<String> dates = new HashSet<>();
+    for (JsonElement element : days) {
+      if (!element.isJsonObject()) throw new IllegalArgumentException("TRAVEL_DAY_INVALID");
+      JsonObject day = element.getAsJsonObject();
+      if (!day.has("date") || !day.get("date").isJsonPrimitive()) {
+        throw new IllegalArgumentException("TRAVEL_DAY_DATE_REQUIRED");
+      }
+      LocalDate date;
+      try {
+        date = LocalDate.parse(day.get("date").getAsString());
+      } catch (DateTimeParseException error) {
+        throw new IllegalArgumentException("TRAVEL_DAY_DATE_INVALID");
+      }
+      if (!dates.add(date.toString())) throw new IllegalArgumentException("TRAVEL_DAY_DUPLICATE");
+      if (start != null && date.isBefore(start) || end != null && date.isAfter(end)) {
+        throw new IllegalArgumentException("TRAVEL_DAY_OUT_OF_RANGE");
+      }
+      if (day.has("activities") && !day.get("activities").isJsonArray()) {
+        throw new IllegalArgumentException("TRAVEL_ACTIVITIES_INVALID");
+      }
+    }
+  }
+
+  private void validateBudgetEstimate(JsonObject budget) {
+    if (budget == null || budget.keySet().isEmpty()) return;
+    if (budget.has("amount") && (!budget.get("amount").isJsonPrimitive()
+        || !budget.getAsJsonPrimitive("amount").isNumber()
+        || budget.get("amount").getAsDouble() < 0)) {
+      throw new IllegalArgumentException("TRAVEL_BUDGET_INVALID");
+    }
+    if (budget.has("currency") && (!budget.get("currency").isJsonPrimitive()
+        || !budget.getAsJsonPrimitive("currency").isString()
+        || budget.get("currency").getAsString().length() != 3)) {
+      throw new IllegalArgumentException("TRAVEL_BUDGET_INVALID");
+    }
   }
 
   private void requireType(JsonObject arguments, String name, String expected) {

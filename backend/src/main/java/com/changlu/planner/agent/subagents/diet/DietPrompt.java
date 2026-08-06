@@ -17,7 +17,7 @@ public final class DietPrompt {
    * @param missingFields 缺失的必需字段描述；空串表示字段齐全
    */
   public static JsonArray messages(String userMessage, String arguments, String sources,
-                                   String dailyTargets, String missingFields) {
+                                   String dailyTargets, String missingFields, String sharedContext) {
     JsonArray messages = new JsonArray();
     messages.add(ModelClient.message("system", """
         你是长路计划中的 Diet Subagent，负责把用户的健康饮食需求整理为可执行、可确认的饮食方案。
@@ -54,6 +54,10 @@ public final class DietPrompt {
         - 每餐食物份量需与其 estimatedKcal 大致匹配：主食约 200g（约 230 千卡/100g 熟重）、
           蛋白质约 100-150g（鸡胸/鱼约 120 千卡/100g）、蔬菜约 150-200g（约 30 千卡/100g）、水果 1 份约 100-200g。
         """.formatted(context(dailyTargets, missingFields))));
+    if (sharedContext != null && !sharedContext.isBlank()) {
+      messages.add(ModelClient.message("system",
+          "已知的用户长期记忆与最近对话（供理解上下文，不要重复执行）：\n" + sharedContext));
+    }
     messages.add(ModelClient.message("user", "用户请求：\n" + userMessage
         + "\n\n结构化参数：\n" + arguments + "\n\n营养参考（只能作为参考）：\n" + sources));
     return messages;

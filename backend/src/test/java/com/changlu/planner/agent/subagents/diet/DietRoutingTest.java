@@ -44,6 +44,21 @@ final class DietRoutingTest {
     assertEquals("planning.assistant", decision.executorName());
   }
 
+  @Test void dietPlanRequestCorrectedToDietEvenWhenModelRoutesToPlanning() throws Exception {
+    // 模型把"安排饮食计划"错误路由到 planning → 安全网纠正到 diet（否则饮食请求会被 planning 抢走）。
+    AgentRouter router = new AgentRouter(messages -> {
+      JsonObject result = new JsonObject();
+      result.addProperty("action", "execute");
+      result.addProperty("executorType", "tool");
+      result.addProperty("executorName", "planning.assistant");
+      return result;
+    });
+    AgentRouter.Decision decision = router.route("帮我安排饮食计划并保存到我的计划", false,
+        planningTools(), registry(dietOnly()));
+    assertEquals("subagent", decision.executorType());
+    assertEquals("diet", decision.executorName());
+  }
+
   @Test void longestScenarioMatchPrefersMemoryOverDietOverlap() throws Exception {
     // 设计 §10.3：饮食 与 Memory 的 记住 场景重叠，bestMatch 按最长场景词命中。
     AgentRouter router = new AgentRouter(messages -> { throw new IllegalStateException("model unavailable"); });

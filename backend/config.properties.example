@@ -10,8 +10,21 @@ ai.model=Qwen/Qwen3.5-9B
 
 # 天气简报功能可选。
 amap.api.key=
+amap.api.base-url=https://restapi.amap.com/v3
 briefing.default.location=杭州
 briefing.news.enabled=true
+
+# 旅行 Agent：地图、天气、景点和路径查询均复用上方高德 Key；未配置时会明确降级。
+travel.model.max-tokens=4800
+travel.model.timeout-seconds=120
+travel.location.ip-fallback-enabled=false
+travel.geocoding.cache-hours=24
+travel.weather.cache-hours=6
+travel.routing.cache-hours=1
+travel.refresh.enabled=true
+travel.refresh.daily-hours=24
+travel.refresh.urgent-hours=6
+travel.refresh.retry-base-minutes=15
 
 # 微信消息里的网页地址。局域网使用时填 http://电脑IP:8081/。
 web.url=

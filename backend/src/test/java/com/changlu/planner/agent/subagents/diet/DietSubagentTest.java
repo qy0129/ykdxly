@@ -139,8 +139,8 @@ final class DietSubagentTest {
     // Web 入口只传 message、不带 arguments：提取器把自然语言补成结构参数，planner 收到完整 request
     AtomicInteger drafts = new AtomicInteger();
     DietRequest[] captured = new DietRequest[1];
-    DietPlannerModel planner = (request, sources, targets, missing) -> { captured[0] = request; return toPlan("[]"); };
-    DietArgumentExtractor extractor = message -> JsonParser.parseString("""
+    DietPlannerModel planner = (request, sources, targets, missing, shared) -> { captured[0] = request; return toPlan("[]"); };
+    DietArgumentExtractor extractor = (message, shared) -> JsonParser.parseString("""
         {"goal":"减脂","profile":{"age":30,"sex":"female","heightCm":162,"weightKg":70,
         "targetWeightKg":58,"activityLevel":"light"},"dietaryType":"balanced","dislikes":["香菜"]}
         """).getAsJsonObject();
@@ -160,12 +160,179 @@ final class DietSubagentTest {
     }
   }
 
+  @Test void sanitizesHallucinatedOptionalFieldsFromExtraction() throws Exception {
+    // 回归：提取器幻觉非法 dietaryType（如 "paleo"）——合并后被 sanitize 删除、视同未提供。
+    // 否则该值会经 DietRequest.toJson 持久化进 taskData.request，WAITING_USER resume 回放时
+    // input.schema 枚举校验直接 INVALID_ARGUMENT:input.arguments.dietaryType。
+    AtomicInteger drafts = new AtomicInteger();
+    DietRequest[] captured = new DietRequest[1];
+    DietPlannerModel planner = (request, sources, targets, missing, shared) -> { captured[0] = request; return toPlan("[]"); };
+    DietArgumentExtractor extractor = (message, shared) -> JsonParser.parseString("""
+        {"goal":"减脂","dietaryType":"paleo","profile":{"age":30,"sex":"male","heightCm":175,
+        "weightKg":70,"activityLevel":"moderate"}}
+        """).getAsJsonObject();
+    try (ToolRegistry tools = tools(drafts, () -> AgentResult.completed("资料完成", sourcesData(), "trace"))) {
+      AgentResult result = new DietSubagent(planner, tools, new DietPolicy(), extractor,
+          new JsonObject(), new JsonObject()).execute(
+          new SubagentRequest("帮我安排一周减脂餐", new JsonObject(), List.of()),
+          context(Set.of("diet:read", "planning:write")));
+
+      assertEquals(AgentStatus.COMPLETED, result.status());
+      assertEquals("", captured[0].dietaryType());
+      assertEquals(30.0, captured[0].profileNumber("age"));
+      // 持久化的 request 不再携带非法枚举，防止第二轮 resume 崩
+      JsonObject persisted = result.data().getAsJsonObject("request");
+      assertFalse(persisted.has("dietaryType"));
+    }
+  }
+
+  @Test void extractorReceivesSharedContextToFillProfileFromMemory() throws Exception {
+    // 新 run（上一轮已 COMPLETED）下用户资料不在本轮消息里，而在最近对话/长期记忆（sharedContext）中：
+    // 提取器必须收到 sharedContext 并从中补全 profile，否则 requiredFields 会再次追问用户已给过的信息。
+    AtomicInteger drafts = new AtomicInteger();
+    DietRequest[] captured = new DietRequest[1];
+    String[] capturedShared = new String[1];
+    DietPlannerModel planner = (request, sources, targets, missing, shared) -> { captured[0] = request; return toPlan("[]"); };
+    DietArgumentExtractor extractor = (message, shared) -> {
+      capturedShared[0] = shared;
+      return JsonParser.parseString("""
+          {"goal":"减脂","profile":{"age":21,"sex":"male","heightCm":178,"weightKg":65,"activityLevel":"sedentary"}}
+          """).getAsJsonObject();
+    };
+    try (ToolRegistry tools = tools(drafts, () -> AgentResult.completed("资料完成", sourcesData(), "trace"))) {
+      AgentResult result = new DietSubagent(planner, tools, new DietPolicy(), extractor,
+          new JsonObject(), new JsonObject()).execute(
+          new SubagentRequest("帮我安排一周减脂餐", new JsonObject(), List.of()),
+          context(Set.of("diet:read", "planning:write"),
+              "[用户] 男，21岁，体重65kg，身高178cm，办公久坐\n[长期记忆] [personal_fact] 用户男性，21岁，178cm，65kg"));
+
+      assertEquals(AgentStatus.COMPLETED, result.status());
+      assertTrue(capturedShared[0] != null && capturedShared[0].contains("178cm"));
+      assertEquals(21.0, captured[0].profileNumber("age"));
+      assertEquals("male", captured[0].profileText("sex"));
+      assertEquals(65.0, captured[0].profileNumber("weightKg"));
+    }
+  }
+
+  @Test void deterministicProfileRecoveryPreventsReaskingWhenExtractorFails() throws Exception {
+    // 回归：提取器（LLM）完全失效返回空对象时，确定性兜底必须从 sharedContext 的记忆/最近对话
+    // 解析出用户本人 profile，requiredFields 为空 → 直接生成菜单，而不是再次追问用户已给过的资料
+    // （对应"已知您为男性21岁…请确认"的确认死循环）。
+    AtomicInteger drafts = new AtomicInteger();
+    DietRequest[] captured = new DietRequest[1];
+    DietPlannerModel planner = (request, sources, targets, missing, shared) -> { captured[0] = request; return toPlan("[]"); };
+    // 提取器只从当前消息提取了 goal，却没能从记忆/最近对话填 profile（LLM 提取不完整的典型失败模式）
+    DietArgumentExtractor failing = (message, shared) -> JsonParser.parseString("{\"goal\":\"减脂\"}").getAsJsonObject();
+    try (ToolRegistry tools = tools(drafts, () -> AgentResult.completed("资料完成", sourcesData(), "trace"))) {
+      AgentResult result = new DietSubagent(planner, tools, new DietPolicy(), failing,
+          new JsonObject(), new JsonObject()).execute(
+          new SubagentRequest("把这份减脂餐计划保存到我的计划", new JsonObject(), List.of()),
+          context(Set.of("diet:read", "planning:write"),
+              "用户长期记忆（稳定的偏好、个性和事实，请自然遵循）：\n"
+                  + "- [personal_fact] 用户男性，21岁，178cm，65kg，办公久坐\n\n"
+                  + "最近对话：\n[用户] 男，21岁，体重65kg，身高178cm，办公久坐"));
+
+      // 资料齐全 + 用户要求保存 → 直达草案确认，而不是再次追问已给过的资料
+      assertEquals(AgentStatus.WAITING_CONFIRMATION, result.status());
+      assertTrue(result.requiresConfirmation());
+      assertEquals(21.0, captured[0].profileNumber("age"));
+      assertEquals("male", captured[0].profileText("sex"));
+      assertEquals(65.0, captured[0].profileNumber("weightKg"));
+      assertEquals("sedentary", captured[0].profileText("activityLevel"));
+    }
+  }
+
+  @Test void goalRecoveredFromMessageWhenExtractorOmitsIt() throws Exception {
+    // 回归：菜单已生成后用户请求"保存+排日程"——提取器偶发漏提取 goal，
+    // 兜底必须从消息确定性补上目标，否则 requiredFields 缺目标 → 反复追问"是减脂、增肌、保持健康还是控糖"。
+    AtomicInteger drafts = new AtomicInteger();
+    DietRequest[] captured = new DietRequest[1];
+    DietPlannerModel planner = (request, sources, targets, missing, shared) -> { captured[0] = request; return toPlan("[]"); };
+    // 提取器只填了 profile、漏了 goal（LLM 提取不完整的典型失败模式）
+    DietArgumentExtractor extractor = (message, shared) -> JsonParser.parseString("""
+        {"profile":{"age":21,"sex":"male","heightCm":178,"weightKg":65,"activityLevel":"sedentary"}}
+        """).getAsJsonObject();
+    try (ToolRegistry tools = tools(drafts, () -> AgentResult.completed("资料完成", sourcesData(), "trace"))) {
+      AgentResult result = new DietSubagent(planner, tools, new DietPolicy(), extractor,
+          new JsonObject(), new JsonObject()).execute(
+          new SubagentRequest("把这份减脂餐计划保存到我的计划，并把我每天的早午晚餐排进日程：早餐 8:00、午餐 12:00、晚餐 18:30。",
+              new JsonObject(), List.of()),
+          context(Set.of("diet:read", "planning:write"), "用户长期记忆：\n[用户] 帮我做个减脂餐计划"));
+
+      // goal 从消息兜底补全 → 直达草案确认，不再追问目标
+      assertEquals(AgentStatus.WAITING_CONFIRMATION, result.status());
+      assertTrue(result.requiresConfirmation());
+      assertEquals("减脂", captured[0].goal());
+      assertEquals(21.0, captured[0].profileNumber("age"));
+      assertEquals("sedentary", captured[0].profileText("activityLevel"));
+    }
+  }
+
+  @Test void scheduleTimesInjectedIntoDraftInstruction() throws Exception {
+    // 用户明确给了餐次时间（早餐8:00/午餐12:00/晚餐18:30）：即使提取器全失效、模型漏生成指令，
+    // 确定性兜底也必须把时间写进交给草案工具的指令，否则日历不会出现日程。
+    String[] capturedInstruction = new String[1];
+    DietRequest[] captured = new DietRequest[1];
+    DietPlannerModel planner = (request, sources, targets, missing, shared) -> { captured[0] = request; return toPlan("[]"); };
+    DietArgumentExtractor extractor = (message, shared) -> new JsonObject();
+    try (ToolRegistry tools = tools(new AtomicInteger(), () -> AgentResult.completed("ok", sourcesData(), "trace"),
+        call -> {
+          capturedInstruction[0] = call.arguments().get("planningInstruction").getAsString();
+          JsonObject data = new JsonObject();
+          JsonObject draft = new JsonObject(); draft.addProperty("id", "draft-1"); data.add("draft", draft);
+          return new AgentResult("1.0", AgentStatus.WAITING_CONFIRMATION, "请确认", data, List.of(), "trace", true, "draft-1");
+        })) {
+      AgentResult result = new DietSubagent(planner, tools, new DietPolicy(), extractor,
+          new JsonObject(), new JsonObject()).execute(
+          new SubagentRequest("把这份减脂餐计划保存到我的计划，并把我每天的早午晚餐排进日程：早餐 8:00、午餐 12:00、晚餐 18:30。",
+              new JsonObject(), List.of()),
+          context(Set.of("diet:read", "planning:write"),
+              "用户长期记忆：\n[用户] 男，21岁，体重65kg，身高178cm，办公久坐"));
+
+      assertEquals(AgentStatus.WAITING_CONFIRMATION, result.status());
+      assertEquals("减脂", captured[0].goal());
+      // 指令必须是确定性构造的自然中文（AiCommandService 规划代理能解析），而不是模型可能输出的 CREATE_PLAN(...) DSL
+      assertTrue(capturedInstruction[0].startsWith("创建减脂一周饮食计划"));
+      assertTrue(!capturedInstruction[0].contains("CREATE_PLAN"));
+      assertTrue(capturedInstruction[0].contains("第1天"));
+      assertTrue(capturedInstruction[0].contains("早餐安排在8:00"));
+      assertTrue(capturedInstruction[0].contains("午餐安排在12:00"));
+      assertTrue(capturedInstruction[0].contains("晚餐安排在18:30"));
+      assertTrue(capturedInstruction[0].contains("写入日程"));
+    }
+  }
+
+  @Test void writeRequestedDetectsSaveToMyPlan() {
+    DietPolicy policy = new DietPolicy();
+    assertTrue(policy.writeRequested(
+        "把这份减脂餐计划保存到我的计划，并把我每天的早午晚餐排进日程：早餐 8:00、午餐 12:00、晚餐 18:30。",
+        new JsonObject()));
+    assertFalse(policy.writeRequested("帮我出一周减脂菜单", new JsonObject()));
+  }
+
+  @Test void parseScheduleTimesExtractsMealTimesFromMessage() {
+    JsonObject times = DietSubagent.parseScheduleTimes(
+        "把早午晚餐排进日程：早餐 8:00、午餐 12:00、晚餐 18:30。");
+    assertEquals("08:00", times.get("breakfast").getAsString()); // 小时补零
+    assertEquals("12:00", times.get("lunch").getAsString());
+    assertEquals("18:30", times.get("dinner").getAsString());
+    assertEquals(0, DietSubagent.parseScheduleTimes("帮我保存菜单").size());
+  }
+
+  @Test void withScheduleTimesOnlyAppendsWhenUserGivesTimes() {
+    assertEquals("创建计划。；并把每天早餐安排在8:00、午餐安排在12:00、晚餐安排在18:30，写入日程。",
+        DietSubagent.withScheduleTimes("创建计划。", "把早午晚餐排进日程：早餐 8:00、午餐 12:00、晚餐 18:30。"));
+    assertEquals("创建计划。", DietSubagent.withScheduleTimes("创建计划。", "帮我保存菜单"));
+    assertEquals("已含日程的计划。", DietSubagent.withScheduleTimes("已含日程的计划。", "早餐 8:00")); // 幂等
+    assertEquals("创建计划。", DietSubagent.withScheduleTimes("创建计划。", "早餐 8点")); // 无 HH:mm 不追加
+  }
+
   @Test void providedArgumentsTakePriorityOverExtraction() throws Exception {
     // 显式 arguments 已提供 weightKg=80，提取器也返回 weightKg=70：以显式为主；未提供的 targetWeightKg 由提取补齐
     AtomicInteger drafts = new AtomicInteger();
     DietRequest[] captured = new DietRequest[1];
-    DietPlannerModel planner = (request, sources, targets, missing) -> { captured[0] = request; return toPlan("[]"); };
-    DietArgumentExtractor extractor = message -> JsonParser.parseString("""
+    DietPlannerModel planner = (request, sources, targets, missing, shared) -> { captured[0] = request; return toPlan("[]"); };
+    DietArgumentExtractor extractor = (message, shared) -> JsonParser.parseString("""
         {"profile":{"weightKg":70,"targetWeightKg":58}}
         """).getAsJsonObject();
     JsonObject arguments = fullArguments();
@@ -185,10 +352,10 @@ final class DietSubagentTest {
   @Test void extractionFailureFallsBackToOriginalArguments() throws Exception {
     // 提取器抛异常 / 返回空：回退为原始空参数，照常走追问流程（不阻塞）
     AtomicInteger drafts = new AtomicInteger();
-    DietPlannerModel plan = (request, sources, targets, missing) ->
+    DietPlannerModel plan = (request, sources, targets, missing, shared) ->
         toPlan("[\"为了计算你的营养目标，还需要：目标、年龄、性别、身高、体重、日常活动量。\"]");
-    DietArgumentExtractor failing = message -> { throw new IllegalStateException("model down"); };
-    DietArgumentExtractor empty = message -> new JsonObject();
+    DietArgumentExtractor failing = (message, shared) -> { throw new IllegalStateException("model down"); };
+    DietArgumentExtractor empty = (message, shared) -> new JsonObject();
     try (ToolRegistry tools = tools(drafts, () -> AgentResult.completed("资料完成", sourcesData(), "trace"))) {
       AgentResult failed = new DietSubagent(plan, tools, new DietPolicy(), failing,
           new JsonObject(), new JsonObject()).execute(
@@ -215,22 +382,26 @@ final class DietSubagentTest {
   }
 
   private DietSubagent subagent(JsonObject generated, ToolRegistry tools) {
-    return new DietSubagent((request, sources, targets, missing) -> generated.deepCopy(),
+    return new DietSubagent((request, sources, targets, missing, shared) -> generated.deepCopy(),
         tools, new DietPolicy(), new JsonObject(), new JsonObject());
   }
 
   private ToolRegistry tools(AtomicInteger drafts, ResearchWork research) {
+    return tools(drafts, research, call -> {
+      drafts.incrementAndGet();
+      JsonObject data = new JsonObject();
+      JsonObject draft = new JsonObject(); draft.addProperty("id", "draft-1"); data.add("draft", draft);
+      return new AgentResult("1.0", AgentStatus.WAITING_CONFIRMATION, "请确认饮食计划草案", data,
+          List.of(), "trace", true, "draft-1");
+    });
+  }
+
+  private ToolRegistry tools(AtomicInteger drafts, ResearchWork research, ToolWork draftWork) {
     ToolRegistry tools = new ToolRegistry();
     tools.register(handler(NutritionReferenceTool.NAME, Set.of("diet:read"), ToolRiskLevel.READ_ONLY,
         ToolSideEffect.NONE, false, call -> research.run()));
     tools.register(handler(DietDraftTool.NAME, Set.of("planning:write"), ToolRiskLevel.LOW_RISK_WRITE,
-        ToolSideEffect.INTERNAL_WRITE, true, call -> {
-          drafts.incrementAndGet();
-          JsonObject data = new JsonObject();
-          JsonObject draft = new JsonObject(); draft.addProperty("id", "draft-1"); data.add("draft", draft);
-          return new AgentResult("1.0", AgentStatus.WAITING_CONFIRMATION, "请确认饮食计划草案", data,
-              List.of(), "trace", true, "draft-1");
-        }));
+        ToolSideEffect.INTERNAL_WRITE, true, draftWork));
     return tools;
   }
 
@@ -281,9 +452,13 @@ final class DietSubagentTest {
   }
 
   private AgentContext context(Set<String> permissions) {
+    return context(permissions, "");
+  }
+
+  private AgentContext context(Set<String> permissions, String sharedContext) {
     UUID runId = UUID.randomUUID();
     return new AgentContext(runId, UUID.randomUUID(), "trace", new Database.Context(UUID.randomUUID(),
-        UUID.randomUUID()), "web", permissions, Instant.now().plusSeconds(5), new JsonObject());
+        UUID.randomUUID()), "web", permissions, Instant.now().plusSeconds(5), new JsonObject(), sharedContext);
   }
 
   @FunctionalInterface private interface ToolWork { AgentResult execute(ToolCall call) throws Exception; }

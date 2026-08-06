@@ -164,4 +164,39 @@ public final class LearningPrompt {
     messages.add(ModelClient.message("user", context.toString()));
     return messages;
   }
+
+  // ── 学习课程大纲提示（联网调研后生成量化指标 + 里程碑 + 阶段 + 每日模板）──
+  public static JsonArray curriculumMessages(JsonObject context) {
+    JsonArray messages = new JsonArray();
+    String today = context.has("currentDate") && !context.get("currentDate").isJsonNull()
+        ? context.get("currentDate").getAsString() : "";
+    String dateNote = today.isBlank() ? ""
+        : "今天是 " + today + "。用户说的“明年/今年/月底/三个月内”等相对时间一律以今天为准推算成具体日期。";
+    messages.add(ModelClient.message("system", """
+        你是学习规划专家。基于用户请求和联网调研资料，输出结构化课程大纲。
+        输入：{"request":"用户请求","currentDate":"今天","targetDate":"用户给出的目标日期或空","sources":[公开资料],"existingGoals":[已有目标]}。
+        输出 JSON：
+        {
+          "goal": {"title":"目标标题","description":"具体描述","domain":"领域","priority":"high|medium|low","targetDate":"YYYY-MM-DD（必须给出具体日期，信息不足时按用户意图合理推算）","weeklyHours":每周小时数},
+          "targetMetrics": [{"label":"量化指标名","value":"目标值","unit":"单位"}],
+          "milestones": ["阶段里程碑，如第30天完成词汇量3000"],
+          "planTitle": "学习计划标题",
+          "stages": [
+            {"title":"阶段名","days":天数,"focus":"本阶段重点","dailyMinutes":每天分钟数,
+             "dailyPlan":[
+               {"title":"当天知识点（如：函数极限与连续）","content":"当天具体要学的任务，精确到知识点与练习量（如：掌握极限的ε-δ定义，完成课后习题1.1-1.12并整理错题）"}
+             ],
+             "priority":"high|medium|low"}
+          ]
+        }
+        要求：
+        - targetDate 必须按用户意图和 currentDate 推算成具体日期，不能留空。
+        - stages 的 days 之和约等于 今天到 targetDate 的天数；阶段通常 2-4 个（如基础/强化/冲刺）。
+        - 每个阶段的 dailyPlan 是逐日具体任务数组：条目数必须与 days 完全一致，第 i 条就是第 i 天的安排。
+        - 每条 title 概括当天要学的知识点（≤15字）；content 精确到知识点/教材章节/练习题量，写清当天具体做什么（≤50字），具体可执行，禁止用"复习""练习""巩固"这类泛化描述代替。
+        - 量化指标按领域自适应（考试分数/词汇量/做题量/每周时长等），尽量 2-4 个。
+        """ + dateNote));
+    messages.add(ModelClient.message("user", context.toString()));
+    return messages;
+  }
 }

@@ -1,187 +1,255 @@
-import { useEffect, useState } from 'react'
-import { format } from 'date-fns'
-import { CheckCircle2, Circle, Clock3, PenLine, Plus, Sparkles, Trash2, X } from 'lucide-react'
-import type { CalendarItem, Plan, PlanItem, PlanTask } from '../../types/planner'
-import { ProgressRing } from '../../components/ui/ProgressRing'
-import { PlanDialog, StageDialog, TaskDialog, type StageDraftFields, type TaskDraftFields } from '../../components/dialogs/PlannerDialogs'
+import { useEffect, useMemo, useState } from 'react'
+import { CheckCircle2, Circle, PenLine, Plus, Target, Trash2 } from 'lucide-react'
+import type { CalendarItem, Plan, PlanTask } from '../../types/planner'
+import { PlanDialog } from '../../components/dialogs/PlannerDialogs'
 
-/** 计划页按阶段展示可执行任务；阶段和计划进度均由任务状态计算。 */
+const statusLabel: Record<string, string> = {
+  active: '进行中',
+  paused: '已暂停',
+  completed: '已完成',
+}
+
+/** 饮食计划识别：按标题特征，用于独立展示"健康饮食"板块。 */
+export function isDietPlan(plan?: Plan | null) {
+  return Boolean(plan && /饮食|减脂|健康餐|增肌餐|控糖/.test(plan.title))
+}
+
+function todayString() {
+  const now = new Date()
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000)
+  return local.toISOString().slice(0, 10)
+}
+
+function dayLabel(date: string) {
+  if (date === todayString()) return '今天'
+  const yesterday = new Date()
+  yesterday.setDate(yesterday.getDate() - 1)
+  const yStr = new Date(yesterday.getTime() - yesterday.getTimezoneOffset() * 60000).toISOString().slice(0, 10)
+  if (date === yStr) return '昨天'
+  return date
+}
+
+/** 计划页按学习目标的排版展示：计划卡片 → 点开查看按日期分组的每日任务。 */
 export function PlansPage({
-  activePlanId, plansData, calendarItems, onPlanChange, onUpdatePlan, onDeletePlans,
-  onCreateStage, onUpdateStage, onDeleteStage, onCreateTask, onUpdateTask,
-  onDeleteTask, onDeleteTasks, onAddSchedule, onOpenSchedule, onAiAdjust,
+  plansData, calendarItems, onUpdatePlan, onDeletePlans,
+  onAddSchedule, onOpenSchedule, onToggle, onCreatePlan,
+  pendingPlanId, onConsumePendingPlan,
 }: {
-  activePlanId: string
   plansData: Plan[]
   calendarItems: CalendarItem[]
-  onPlanChange: (id: string) => void
   onUpdatePlan: (plan: Plan) => Promise<boolean | void> | boolean | void
   onDeletePlans: (ids: string[]) => Promise<boolean>
-  onCreateStage: (planId: string, item: PlanItem) => void
-  onUpdateStage: (planId: string, item: PlanItem) => void
-  onDeleteStage: (planId: string, item: PlanItem) => void
-  onCreateTask: (planId: string, stageId: string, fields: TaskDraftFields) => Promise<boolean>
-  onUpdateTask: (task: PlanTask) => Promise<boolean>
-  onDeleteTask: (task: PlanTask) => void
-  onDeleteTasks: (tasks: PlanTask[]) => Promise<boolean>
   onAddSchedule: (planId: string) => void
   onOpenSchedule: (item: CalendarItem) => void
-  onAiAdjust: (plan: Plan) => void
+  onToggle: (id: string) => void
+  onCreatePlan: () => void
+  pendingPlanId?: string | null
+  onConsumePendingPlan?: () => void
 }) {
-  const plan = plansData.find((item) => item.id === activePlanId) ?? plansData[0]
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [editingPlan, setEditingPlan] = useState(false)
-  const [stageDialog, setStageDialog] = useState<{ item?: PlanItem } | null>(null)
-  const [taskDialog, setTaskDialog] = useState<{ stageId: string; task?: PlanTask } | null>(null)
-  const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([])
-  const [selectedPlanIds, setSelectedPlanIds] = useState<string[]>([])
-  const [deletingPlans, setDeletingPlans] = useState(false)
 
+  // 侧栏/新建计划传入的信号：跳到对应计划详情；消费后清除，不影响初始网格视图。
   useEffect(() => {
-    const taskIds = new Set(plan?.items.flatMap((stage) => stage.tasks.map((task) => task.id)) ?? [])
-    setSelectedTaskIds((current) => current.filter((id) => taskIds.has(id)))
+    if (pendingPlanId) {
+      setSelectedId(pendingPlanId)
+      onConsumePendingPlan?.()
+    }
+  }, [pendingPlanId, onConsumePendingPlan])
+
+  const plan = plansData.find((item) => item.id === selectedId) ?? null
+
+  // 每日任务来自该计划的日程，按日期分组；并关联到真实 PlanTask 以展示任务标题与详细说明。
+  const taskById = useMemo(() => {
+    const map = new Map<string, PlanTask>()
+    for (const stage of plan?.items ?? []) {
+      for (const task of stage.tasks) map.set(task.id, task)
+    }
+    return map
   }, [plan])
-
-  useEffect(() => {
-    const planIds = new Set(plansData.map((item) => item.id))
-    setSelectedPlanIds((current) => current.filter((id) => planIds.has(id)))
-  }, [plansData])
-
-  if (!plan) return <div className="content-page simple-empty">还没有长期计划，先创建一个计划吧。</div>
-  const today = format(new Date(), 'yyyy-MM-dd')
-  const nextItems = calendarItems
-    .filter((item) => item.planId === plan.id && item.status !== 'done')
-    .filter((item) => item.date >= today)
-    .sort((left, right) => `${left.date}T${left.time}`.localeCompare(`${right.date}T${right.time}`))
-    .slice(0, 5)
-  const allTasks = plan.items.flatMap((stage) => stage.tasks)
-  const allPlansSelected = plansData.length > 0 && plansData.every((item) => selectedPlanIds.includes(item.id))
-
-  const toggleTaskSelection = (taskId: string) => {
-    setSelectedTaskIds((current) => current.includes(taskId)
-      ? current.filter((id) => id !== taskId)
-      : [...current, taskId])
-  }
-
-  const deleteSelectedTasks = async () => {
-    const tasks = allTasks.filter((task) => selectedTaskIds.includes(task.id))
-    if (tasks.length > 0 && await onDeleteTasks(tasks)) setSelectedTaskIds([])
-  }
-
-  const deleteSelectedPlans = async () => {
-    if (deletingPlans || selectedPlanIds.length === 0) return
-    setDeletingPlans(true)
-    try {
-      if (await onDeletePlans(selectedPlanIds)) setSelectedPlanIds([])
-    } finally {
-      setDeletingPlans(false)
+  const daySections = useMemo(() => {
+    if (!plan) return []
+    const map = new Map<string, CalendarItem[]>()
+    for (const item of calendarItems) {
+      if (item.planId !== plan.id) continue
+      const list = map.get(item.date) ?? []
+      list.push(item)
+      map.set(item.date, list)
     }
+    return [...map.entries()]
+      .sort((left, right) => left[0].localeCompare(right[0]))
+      .map(([date, list]) => ({
+        date,
+        items: [...list].sort((left, right) => left.time.localeCompare(right.time)),
+      }))
+  }, [plan, calendarItems])
+
+  // 卡片列表视图
+  if (!plan) {
+    return (
+      <div className="learning-page content-page">
+        <section className="learning-header">
+          <div>
+            <span className="eyebrow">计划</span>
+            <h2>计划</h2>
+            <p>点开计划查看每天的安排和进度</p>
+          </div>
+          <div className="learning-header-actions">
+            {plansData.length > 0 && (
+              <button className="secondary-button danger-text" type="button"
+                onClick={() => void onDeletePlans(plansData.map((item) => item.id))}>
+                删除全部
+              </button>
+            )}
+            <button className="primary-button" type="button" onClick={onCreatePlan}><Plus size={16} /> 新建计划</button>
+          </div>
+        </section>
+
+        {plansData.length === 0 && (
+          <div className="learning-empty">
+            <Target size={40} />
+            <p>还没有计划</p>
+            <p>去「AI 对话」里说一句“帮我制定一个学习计划”</p>
+          </div>
+        )}
+
+        <section className="learning-grid">
+          {plansData.map((item) => (
+            <div className="learning-card" key={item.id}>
+              <button className="learning-card-body" type="button" onClick={() => setSelectedId(item.id)}>
+                <div className="learning-card-head">
+                  <strong>{item.title}</strong>
+                  <span className={`learning-status learning-status-${item.status}`}>{statusLabel[item.status] ?? item.status}</span>
+                </div>
+                <p className="learning-domain">{item.subtitle || '长期计划'}</p>
+                <dl className="learning-meta">
+                  {item.dueDate ? <div><dt>目标日期</dt><dd>{item.dueDate}</dd></div> : null}
+                  <div><dt>任务</dt><dd>{item.completedTasks} / {item.totalTasks}</dd></div>
+                </dl>
+                <div className="learning-progress">
+                  <div className="learning-progress-track">
+                    <div className="learning-progress-bar" style={{ width: `${Math.min(100, Math.round(item.taskProgress))}%` }} />
+                  </div>
+                  <span>{Math.round(item.taskProgress)}%</span>
+                </div>
+              </button>
+              <button className="learning-card-delete" type="button" onClick={() => void onDeletePlans([item.id])} title="删除计划" aria-label={`删除计划：${item.title}`}>
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+        </section>
+      </div>
+    )
   }
 
-  const savePlanDialog = async (next: Plan) => {
-    const result = await onUpdatePlan(next)
-    if (result !== false) setEditingPlan(false)
-  }
-
-  const startStageEdit = (item: PlanItem) => {
-    setStageDialog({ item })
-  }
-
-  const saveStageDialog = (fields: StageDraftFields) => {
-    if (stageDialog?.item) {
-      onUpdateStage(plan.id, { ...stageDialog.item, title: fields.title, dueLabel: fields.dueLabel || '待安排' })
-    } else {
-      onCreateStage(plan.id, { id: `stage-${Date.now()}`, title: fields.title, dueLabel: fields.dueLabel || '待安排', progress: 0, taskProgress: 0, effortProgress: 0, version: 0, tasks: [] })
-    }
-    setStageDialog(null)
-  }
-
-  const createTask = async (fields: TaskDraftFields) => {
-    if (!taskDialog) return false
-    if (taskDialog.task) {
-      const updated = await onUpdateTask({ ...taskDialog.task, ...fields })
-      if (updated) setTaskDialog(null)
-      return updated
-    }
-    // 创建失败时保留弹窗，避免用户填写的任务内容直接消失。
-    const created = await onCreateTask(plan.id, taskDialog.stageId, fields)
-    if (created) setTaskDialog(null)
-    return created
-  }
-
-  const frequencyLabel = (task: PlanTask) => ({
-    once: '仅一次',
-    daily: '每天',
-    every_other_day: '隔一天',
-    weekdays: '工作日',
-    weekly: '每周',
-  }[task.recurrenceType] ?? '仅一次')
-
+  // 详情视图：每天具体干的事情
   return (
-    <div className="plans-page content-page">
-      <div className="plans-list-toolbar">
-        <div><span className="eyebrow">长期计划</span><strong>{plansData.length} 项计划</strong></div>
-        <div className="batch-actions">
-          {plansData.length > 0 && <label className="batch-select"><input className="batch-checkbox" type="checkbox" checked={allPlansSelected} onChange={() => setSelectedPlanIds(allPlansSelected ? [] : plansData.map((item) => item.id))} />全选计划</label>}
-          {selectedPlanIds.length > 0 && <button className="secondary-button danger-text" type="button" onClick={() => void deleteSelectedPlans()} disabled={deletingPlans}><Trash2 size={15} /> {deletingPlans ? '删除中…' : `删除已选（${selectedPlanIds.length}）`}</button>}
+    <div className="learning-page content-page">
+      <section className="learning-header">
+        <div>
+          <span className="eyebrow">计划</span>
+          <h2>{plan.title}</h2>
+          <p>{plan.subtitle || '每日任务'}</p>
         </div>
-      </div>
-      <div className="plans-switcher" role="tablist" aria-label="选择长期计划">
-        {plansData.map((item) => <div className="plan-switcher-item" key={item.id}>
-          <input className="batch-checkbox" type="checkbox" checked={selectedPlanIds.includes(item.id)} onChange={() => setSelectedPlanIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])} aria-label={`选择计划：${item.title}`} />
-          <button type="button" role="tab" aria-selected={item.id === plan.id} className={item.id === plan.id ? 'active' : ''} onClick={() => { setSelectedTaskIds([]); onPlanChange(item.id) }}><i style={{ backgroundColor: item.color }} /><span>{item.title}</span><b>{item.taskProgress}%</b></button>
-        </div>)}
-      </div>
-
-      <section className="plan-overview">
-        <div className="plan-overview-main">
-          <ProgressRing value={plan.taskProgress} color={plan.color} size={76} />
-          <div><span className="eyebrow">长期计划</span><h2>{plan.title}</h2><p>{plan.completedTasks} 项已完成，共 {plan.totalTasks} 项 · 目标日期 {plan.dueDate || '待安排'}</p><small>执行完成率 {plan.taskProgress}% · 预计工时完成率 {plan.effortProgress}%</small></div>
-        </div>
-        <div className="overview-actions">
-          <button className="secondary-button" type="button" onClick={() => onAiAdjust(plan)}><Sparkles size={17} /> AI 调整</button>
-          <button className="secondary-button" type="button" onClick={() => setEditingPlan(true)}><PenLine size={16} /> 编辑计划</button>
-          <button className="primary-button" type="button" onClick={() => onAddSchedule(plan.id)}><Plus size={17} /> 添加安排</button>
+        <div className="learning-header-actions">
+          <button className="secondary-button" type="button" onClick={() => setEditingPlan(true)}><PenLine size={16} /> 编辑</button>
+          <button className="primary-button" type="button" onClick={() => onAddSchedule(plan.id)}><Plus size={16} /> 添加安排</button>
+          <button className="secondary-button danger-text" type="button" onClick={() => void onDeletePlans([plan.id])}><Trash2 size={16} /> 删除计划</button>
         </div>
       </section>
 
-      <div className="plan-detail-grid">
-        <section className="plan-stages">
-          <div className="section-heading">
-            <div><span className="eyebrow">阶段与任务</span><h3>推进路径</h3></div>
-            <div className="section-heading-actions">
-              {selectedTaskIds.length > 0 && <button className="secondary-button danger-text" type="button" onClick={() => void deleteSelectedTasks()}><Trash2 size={15} /> 删除已选（{selectedTaskIds.length}）</button>}
-              <button className="secondary-button" type="button" onClick={() => setStageDialog({})}><Plus size={15} /> 添加阶段</button>
+      <div className="learning-detail">
+        <div className="learning-detail-head">
+          <span className={`learning-status learning-status-${plan.status}`}>{statusLabel[plan.status] ?? plan.status}</span>
+          <span className="learning-domain">共 {plan.totalTasks} 项任务 · 已完成 {plan.completedTasks}</span>
+          {plan.dueDate && <span className="learning-domain">目标日期：{plan.dueDate}</span>}
+        </div>
+
+        <section className="learning-detail-section">
+          <h3>进度</h3>
+          <div className="learning-progress">
+            <div className="learning-progress-track">
+              <div className="learning-progress-bar" style={{ width: `${Math.min(100, Math.round(plan.taskProgress))}%` }} />
             </div>
+            <span>{Math.round(plan.taskProgress)}%</span>
           </div>
-          {plan.items.map((stage, index) => <section className="stage-task-group" key={stage.id}>
-            <article className="stage-row">
-              <span className="stage-index">{String(index + 1).padStart(2, '0')}</span>
-              <div className="stage-copy"><strong>{stage.title}</strong><span>{stage.dueLabel} · 执行 {stage.taskProgress}% · 工时 {stage.effortProgress}%</span><div className="stage-track"><i style={{ width: `${stage.taskProgress}%`, backgroundColor: plan.color }} /></div></div>
-              <span className="row-actions"><b>{stage.taskProgress}%</b><button className="icon-button" type="button" onClick={() => startStageEdit(stage)} title="编辑阶段"><PenLine size={14} /></button><button className="icon-button danger-icon" type="button" onClick={() => onDeleteStage(plan.id, stage)} title="删除阶段"><X size={14} /></button></span>
-            </article>
-            <div className="plan-task-list">
-              {stage.tasks.map((task) => <article className={`plan-task-row ${task.status}`} key={task.id}>
-                <button className={`icon-button task-select-button ${selectedTaskIds.includes(task.id) ? 'selected' : ''}`} type="button" onClick={() => toggleTaskSelection(task.id)} title={selectedTaskIds.includes(task.id) ? '取消选择' : '选择任务'} aria-pressed={selectedTaskIds.includes(task.id)}>{selectedTaskIds.includes(task.id) ? <CheckCircle2 size={18} /> : <Circle size={18} />}</button>
-                <div><strong>{task.title}</strong><span>{frequencyLabel(task)} · {task.estimatedMinutes ? `每次 ${task.estimatedMinutes} 分钟` : '未估时'}{task.scheduledTime ? ` · ${task.scheduledTime}` : ''}{task.reason ? ` · ${task.reason}` : ''}</span></div>
-                <span className="task-status">{task.scheduleCount > 0 ? `${task.completedScheduleCount}/${task.scheduleCount} · ${task.scheduleProgress}%` : task.status}</span>
-                <button className="icon-button" type="button" onClick={() => setTaskDialog({ stageId: stage.id, task })} title="编辑任务"><PenLine size={15} /></button>
-                <button className="icon-button danger-icon" type="button" onClick={() => onDeleteTask(task)} title="移入回收站"><X size={15} /></button>
-              </article>)}
-              <button className="text-button task-add-button" type="button" onClick={() => setTaskDialog({ stageId: stage.id })}><Plus size={14} /> 添加任务</button>
-            </div>
-          </section>)}
         </section>
 
-        <section className="next-actions">
-          <div className="section-heading"><div><span className="eyebrow">接下来</span><h3>近期安排</h3></div></div>
-          {nextItems.map((item) => <button className="next-action-row" type="button" onClick={() => onOpenSchedule(item)} key={item.id}><Clock3 size={19} /><div><strong>{item.title}</strong><span>{item.date} · {item.time}{item.taskId ? ' · 已关联任务' : ''}</span></div><span>{item.duration}m</span></button>)}
-          {nextItems.length === 0 && <div className="simple-empty">该计划暂时没有近期安排。</div>}
+        <section className="learning-detail-section">
+          <h3>阶段分层（{plan.items.length} 个阶段）</h3>
+          {plan.items.length === 0 && <p className="learning-empty-hint">还没有阶段。</p>}
+          <div className="plan-stage-hierarchy">
+            {plan.items.map((stage, index) => (
+              <article className="plan-stage-node" key={stage.id}>
+                <div className="plan-stage-head">
+                  <span className="plan-stage-index">{String(index + 1).padStart(2, '0')}</span>
+                  <strong>{stage.title}</strong>
+                  <em>{Math.round(stage.taskProgress)}%</em>
+                </div>
+                <div className="plan-stage-track"><i style={{ width: `${Math.min(100, Math.round(stage.taskProgress))}%` }} /></div>
+                <div className="plan-stage-tasks">
+                  {stage.tasks.map((task) => (
+                    <span className={`plan-stage-task ${task.status === 'done' ? 'done' : ''}`} key={task.id}>
+                      {task.title}
+                      {task.description ? <em>{task.description}</em> : null}
+                    </span>
+                  ))}
+                  {stage.tasks.length === 0 && <small className="learning-empty-hint">本阶段暂无任务</small>}
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="learning-detail-section">
+          <h3>每日任务（{daySections.length} 天）</h3>
+          {daySections.length === 0 && (
+            <p className="learning-empty-hint">还没有排期任务，点击「添加安排」为计划安排每日任务。</p>
+          )}
+          <div className="learning-days">
+            {daySections.map((day) => (
+              <article className={`learning-day${day.date === todayString() ? ' today' : ''}`} key={day.date}>
+                <div className="learning-day-head"><strong>{dayLabel(day.date)}</strong><span>{day.date}</span></div>
+                {day.items.map((item) => {
+                  const task = item.taskId ? taskById.get(item.taskId) : undefined
+                  const title = task?.title || item.title
+                  const detail = task?.description || ''
+                  const meta = `${item.time} · ${item.duration} 分钟`
+                  return (
+                    <div className={`learning-task-row${item.status === 'done' ? ' is-done' : ''}`} key={item.id}>
+                      <button
+                        className="learning-task-check"
+                        type="button"
+                        onClick={() => onToggle(item.id)}
+                        aria-label={item.status === 'done' ? `恢复完成：${title}` : `完成任务：${title}`}
+                        title={item.status === 'done' ? '标记为未完成' : '标记为完成'}
+                      >
+                        {item.status === 'done' ? <CheckCircle2 size={16} /> : <Circle size={16} />}
+                      </button>
+                      <button className="learning-task-body" type="button" onClick={() => onOpenSchedule(item)} title="打开当日安排">
+                        <span>{title}</span>
+                        <p>{[detail, meta].filter(Boolean).join(' · ')}</p>
+                      </button>
+                    </div>
+                  )
+                })}
+              </article>
+            ))}
+          </div>
         </section>
       </div>
 
-      {editingPlan && <PlanDialog initial={plan} onClose={() => setEditingPlan(false)} onSubmit={savePlanDialog} />}
-      {stageDialog && <StageDialog initial={stageDialog.item} onClose={() => setStageDialog(null)} onSubmit={saveStageDialog} />}
-      {taskDialog && <TaskDialog initial={taskDialog.task} stageTitle={plan.items.find((stage) => stage.id === taskDialog.stageId)?.title ?? '计划阶段'} onClose={() => setTaskDialog(null)} onSubmit={createTask} />}
+      {editingPlan && (
+        <PlanDialog
+          initial={plan}
+          onClose={() => setEditingPlan(false)}
+          onSubmit={async (next) => {
+            const ok = await onUpdatePlan(next)
+            if (ok !== false) setEditingPlan(false)
+          }}
+        />
+      )}
     </div>
   )
 }

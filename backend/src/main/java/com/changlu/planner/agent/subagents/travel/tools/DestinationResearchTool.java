@@ -13,6 +13,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.time.Duration;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 
 public final class DestinationResearchTool implements ToolHandler {
@@ -37,14 +39,26 @@ public final class DestinationResearchTool implements ToolHandler {
     String query = call.arguments().has("query") ? call.arguments().get("query").getAsString().trim() : "";
     if (query.isBlank()) throw new IllegalArgumentException("TRAVEL_RESEARCH_QUERY_REQUIRED");
     JsonArray sources = new JsonArray();
-    for (WebSearchTool.Result result : search.search(query, 8, false)) {
+    Set<String> seenUrls = new LinkedHashSet<>();
+    for (String researchQuery : researchQueries(query)) {
+      for (WebSearchTool.Result result : search.search(researchQuery, 8, false)) {
+        if (!seenUrls.add(result.url())) continue;
       JsonObject row = new JsonObject();
       row.addProperty("title", result.title()); row.addProperty("summary", result.summary());
       row.addProperty("source", result.source()); row.addProperty("url", result.url());
       sources.add(row);
+      }
+      if (sources.size() >= 12) break;
     }
     JsonObject data = new JsonObject(); data.add("sources", sources);
     return AgentResult.completed(sources.isEmpty() ? "暂时没有找到公开资料。" : "已找到公开旅行资料。",
         data, context.traceId());
+  }
+
+  private List<String> researchQueries(String query) {
+    return List.of(
+        query,
+        query + " attractions transportation itinerary",
+        query + " opening hours travel notices");
   }
 }

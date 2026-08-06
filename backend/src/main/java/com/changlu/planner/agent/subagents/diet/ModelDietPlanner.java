@@ -14,12 +14,13 @@ public final class ModelDietPlanner implements DietPlannerModel {
   public ModelDietPlanner(ModelClient model) { this.model = model; }
 
   @Override public JsonObject plan(DietRequest request, JsonArray sources, JsonObject dailyTargets,
-                                   List<String> missingFields) throws Exception {
+                                   List<String> missingFields, String sharedContext) throws Exception {
     return model.completeJson("diet-subagent",
         DietPrompt.messages(requestMessage(request), gson.toJson(request.toJson()),
             gson.toJson(sources),
             dailyTargets == null ? null : gson.toJson(dailyTargets),
-            String.join("、", missingFields)),
+            String.join("、", missingFields),
+            sharedContext),
         0.15, 5000, 180, 2);
   }
 

@@ -12,13 +12,20 @@ public record TravelResult(
     JsonArray sources,
     JsonArray risks,
     JsonArray questions,
-    String planningInstruction
+    String planningInstruction,
+    JsonObject locationContext,
+    JsonArray weather,
+    JsonArray attractions,
+    JsonArray transitMatrix,
+    JsonArray alternativePlans
 ) {
   public static TravelResult fromGenerated(JsonObject generated, JsonArray sources) {
     return new TravelResult(text(generated, "message", "已整理旅行方案。"),
         TravelRequest.from(object(generated, "request")), array(generated, "days"),
         array(generated, "preparationTasks"), object(generated, "budgetEstimate"), sources.deepCopy(),
-        array(generated, "risks"), array(generated, "questions"), text(generated, "planningInstruction", ""));
+        array(generated, "risks"), array(generated, "questions"), text(generated, "planningInstruction", ""),
+        new JsonObject(), new JsonArray(), new JsonArray(), new JsonArray(),
+        array(generated, "alternativePlans"));
   }
 
   public JsonObject toData() {
@@ -31,6 +38,11 @@ public record TravelResult(
     value.add("risks", risks.deepCopy());
     value.add("questions", questions.deepCopy());
     value.addProperty("planningInstruction", planningInstruction);
+    value.add("locationContext", locationContext.deepCopy());
+    value.add("weather", weather.deepCopy());
+    value.add("attractions", attractions.deepCopy());
+    value.add("transitMatrix", transitMatrix.deepCopy());
+    value.add("alternativePlans", alternativePlans.deepCopy());
     return value;
   }
 

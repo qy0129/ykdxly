@@ -8,8 +8,8 @@ function fallbackMaterials(item: CalendarItem, plan?: Plan): SourceMaterial[] {
   const query = [plan?.title, item.title].filter(Boolean).join(' ').trim() || item.title
   const encodedQuery = encodeURIComponent(query)
   return [
-    { id: `bilibili-search-${item.id}`, kind: 'platform', source: '哔哩哔哩', title: `搜索：${query}`, summary: '打开哔哩哔哩搜索相关课程和讲解视频。', meta: '平台入口 · 必备', url: `https://search.bilibili.com/all?keyword=${encodedQuery}`, color: '#b85f42' },
-    { id: `xiaohongshu-search-${item.id}`, kind: 'platform', source: '小红书', title: `搜索：${query}`, summary: '打开小红书搜索相关学习笔记和经验分享。', meta: '平台入口 · 必备', url: `https://www.xiaohongshu.com/search_result?keyword=${encodedQuery}`, color: '#d77d55' },
+    { id: `bilibili-search-${item.id}`, kind: 'platform', source: '哔哩哔哩', title: `搜索：${query}`, summary: '打开哔哩哔哩搜索相关视频、方法和经验分享。', meta: '平台入口 · 可选', url: `https://search.bilibili.com/all?keyword=${encodedQuery}`, color: '#b85f42' },
+    { id: `xiaohongshu-search-${item.id}`, kind: 'platform', source: '小红书', title: `搜索：${query}`, summary: '打开小红书搜索相关经验、攻略和实践分享。', meta: '平台入口 · 可选', url: `https://www.xiaohongshu.com/search_result?keyword=${encodedQuery}`, color: '#d77d55' },
   ]
 }
 
@@ -17,30 +17,30 @@ function materialNote(noteItems: Note[], material: SourceMaterial) {
   return noteItems.find((note) => (note.content || '').includes(material.url) || note.excerpt.includes(material.url))
 }
 
-type StudySection = { title: string; content: string }
+type ScheduleSection = { title: string; content: string }
 
-function validStudySections(value: unknown): value is StudySection[] {
+function validScheduleSections(value: unknown): value is ScheduleSection[] {
   return Array.isArray(value) && value.length >= 3 && value.every((item) => {
     if (!item || typeof item !== 'object') return false
-    const section = item as Partial<StudySection>
+    const section = item as Partial<ScheduleSection>
     return typeof section.title === 'string' && section.title.trim().length > 0
       && typeof section.content === 'string' && section.content.trim().length > 0
   })
 }
 
-function fallbackStudySections(item: CalendarItem): StudySection[] {
+function fallbackScheduleSections(item: CalendarItem): ScheduleSection[] {
   return [
-    { title: '核心理解', content: `围绕“${item.title}”先明确今天要解决的问题，再区分需要理解的概念、需要执行的方法和可以验证的结果。` },
-    { title: '学习路径', content: '先建立整体框架，再选择一份可靠原文核对细节；把定义、步骤和一个具体例子分别记录下来。' },
-    { title: '实践建议', content: '把主题拆成一个 20 至 30 分钟的小练习，完成后用自己的话复述要点，并记录一个仍然不清楚的问题。' },
-    { title: '资料使用提醒', content: '平台入口用于继续查找资料，打开原文时优先核对来源、发布时间和上下文，不要只依据搜索摘要下结论。' },
+    { title: '事项概览', content: `围绕“${item.title}”先明确这次安排要达成的结果，再区分需要了解的信息、需要执行的步骤和可以验证的完成标准。` },
+    { title: '行动步骤', content: '先列出整体框架，再选择可靠的参考内容核对细节；把关键结论、执行步骤和一个具体例子分别记下来。' },
+    { title: '执行建议', content: '把主题拆成一个 20 至 30 分钟的小步骤，完成后记录结果、遇到的问题和下一步行动。' },
+    { title: '资料使用提醒', content: '平台入口用于继续查找相关内容，打开原文时优先核对来源、发布时间和上下文，不要只依据搜索摘要下结论。' },
   ]
 }
 
 type NoteChatMessage = { role: 'user' | 'assistant'; content: string; markdown?: string }
 
-const NOTE_PREFILL = '请根据本次学习资料写一份结构化笔记'
-const NOTE_QUICK_SUGGESTIONS = ['写完整笔记', '精简一点', '加一个例子', '口语化语气']
+const NOTE_PREFILL = '请根据本次日程内容整理一份结构化小记'
+const NOTE_QUICK_SUGGESTIONS = ['整理成小记', '精简一点', '补充行动清单', '口语化一点']
 
 export function ScheduleDetailPage({
   item,
@@ -68,8 +68,8 @@ export function ScheduleDetailPage({
   const plan = plansData.find((value) => value.id === item.planId)
   const [materials, setMaterials] = useState<SourceMaterial[]>([])
   const [keyPoints, setKeyPoints] = useState<string[]>([])
-  const [studyNote, setStudyNote] = useState('正在匹配学习资料并生成学习建议。')
-  const [studySections, setStudySections] = useState<StudySection[]>([])
+  const [scheduleNote, setScheduleNote] = useState('正在匹配相关资料并生成日程建议。')
+  const [scheduleSections, setScheduleSections] = useState<ScheduleSection[]>([])
   const [aiGenerated, setAiGenerated] = useState(false)
   const [materialQuery, setMaterialQuery] = useState('')
   const [materialsLoading, setMaterialsLoading] = useState(true)
@@ -91,25 +91,25 @@ export function ScheduleDetailPage({
     setMaterialsError('')
     try {
       const result = await plannerApi.loadScheduleMaterials(item.id, refresh)
-      if (!Array.isArray(result.materials) || !Array.isArray(result.keyPoints) || typeof result.studyNote !== 'string' || !validStudySections(result.sections)) {
+      if (!Array.isArray(result.materials) || !Array.isArray(result.keyPoints) || typeof result.studyNote !== 'string' || !validScheduleSections(result.sections)) {
         throw new Error('资料接口返回格式错误')
       }
       setMaterials(result.materials.length > 0 ? result.materials : fallbackMaterials(item, plan))
       setMaterialQuery(result.query)
       setKeyPoints(result.keyPoints)
-      setStudyNote(result.studyNote)
-      setStudySections(result.sections)
+      setScheduleNote(result.studyNote)
+      setScheduleSections(result.sections)
       setAiGenerated(result.aiGenerated)
       setPersonalNote((current) => current || result.studyNote)
     } catch (cause) {
       setMaterials(fallbackMaterials(item, plan))
       setMaterialQuery([plan?.title, item.title].filter(Boolean).join(' '))
-      setKeyPoints(['先确认资料和当前日程的关联，再选择一篇可靠原文深入学习。', '记录定义、步骤和一个可验证的例子。', '学习结束后用自己的话复述要点，并把疑问写入本次笔记。'])
-      setStudyNote('当前先用基础框架整理学习方向；网络恢复后点击“重新获取”，让 AI 结合联网资料补充细节。')
-      setStudySections(fallbackStudySections(item))
+      setKeyPoints(['先确认资料和当前日程的关联，再选择可靠内容深入了解。', '记录关键结论、执行步骤和一个可验证的结果。', '完成后用自己的话复盘要点，并把疑问写入这次小记。'])
+      setScheduleNote('当前先用基础框架整理日程方向；网络恢复后点击“重新获取”，让 AI 结合联网资料补充细节。')
+      setScheduleSections(fallbackScheduleSections(item))
       setAiGenerated(false)
       setMaterialsError(cause instanceof Error ? cause.message : '资料获取失败')
-      setPersonalNote((current) => current || '先选择一篇可靠原文深入学习，再记录本次日程的收获和疑问。')
+      setPersonalNote((current) => current || '先选择可靠内容了解，再记录本次日程的收获、结果和疑问。')
     } finally {
       setMaterialsLoading(false)
     }
@@ -158,10 +158,10 @@ export function ScheduleDetailPage({
       const history = chatMessages.slice(-8).map(({ role, content }) => ({ role, content }))
       const result = await plannerApi.generateNoteContent({
         scheduleTitle: item.title,
-        studyNote,
+        studyNote: scheduleNote,
         draftNote: personalNote,
         keyPoints,
-        sections: studySections,
+        sections: scheduleSections,
         message,
         history,
       })
@@ -216,14 +216,14 @@ export function ScheduleDetailPage({
   const savePersonalNote = () => {
     const next: Note = {
       id: personalNoteId ?? `study-note-${Date.now()}`,
-      title: `${item.title} · 学习记录`,
-      category: '学习笔记',
+      title: `${item.title} · 小记`,
+      category: '小记',
       excerpt: personalNote,
       content: personalNote,
       updatedAt: '刚刚',
       color: item.color,
       relatedIds: [],
-      source: '日程学习记录',
+      source: '日程小记',
     }
     onNotesChange(personalNoteId ? noteItems.map((note) => note.id === personalNoteId ? next : note) : [next, ...noteItems])
     setPersonalNoteId(next.id)
@@ -235,7 +235,7 @@ export function ScheduleDetailPage({
       <section className="schedule-heading">
         <div className="schedule-title-mark" style={{ backgroundColor: item.color }}><BookOpen size={22} /></div>
         <div>
-          <span className="eyebrow">当日安排 · 学习</span>
+          <span className="eyebrow">当日安排</span>
           <h2>{item.title}</h2>
           <p>{item.date} · {item.time} · {item.duration} 分钟 {plan ? `· ${plan.title}` : ''}</p>
         </div>
@@ -263,13 +263,13 @@ export function ScheduleDetailPage({
 
           <article className="ai-material-detail">
             <div className="ai-material-detail-heading">
-              <div><span className="eyebrow">学习内容</span><h3>从资料到可执行理解</h3></div>
+              <div><span className="eyebrow">日程内容</span><h3>从资料到可执行行动</h3></div>
               <span className="ai-material-status">{materialsLoading ? '整理中' : aiGenerated ? 'AI 已整理' : '基础整理'}</span>
             </div>
-            <p className="ai-material-intro">{studyNote}</p>
+            <p className="ai-material-intro">{scheduleNote}</p>
             {materialsError && <p className="ai-material-error">资料状态：{materialsError}</p>}
             <div className="ai-material-sections">
-              {studySections.map((section) => (
+              {scheduleSections.map((section) => (
                 <section key={section.title}>
                   <h4>{section.title}</h4>
                   <p>{section.content}</p>
@@ -306,7 +306,7 @@ export function ScheduleDetailPage({
 
         <aside className="schedule-notes">
           <div className="section-heading">
-            <div><span className="eyebrow">我的记录</span><h3>本次学习笔记</h3></div>
+            <div><span className="eyebrow">我的记录</span><h3>本次小记</h3></div>
             <button className="primary-button save-note-top" type="button" onClick={savePersonalNote} title="保存到长期笔记"><Save size={14} /> 保存</button>
           </div>
           <div className="note-mode-tabs">
@@ -314,7 +314,7 @@ export function ScheduleDetailPage({
             <button type="button" className={noteMode === 'preview' ? 'active' : ''} onClick={() => setNoteMode('preview')}>👁 预览</button>
           </div>
           {noteMode === 'edit' ? (
-            <textarea value={personalNote} onChange={(event) => setPersonalNote(event.target.value)} placeholder="写下本次学习的收获、疑问或下一步…支持 Markdown 语法" />
+            <textarea value={personalNote} onChange={(event) => setPersonalNote(event.target.value)} placeholder="写下本次日程的收获、结果、疑问或下一步…支持 Markdown 语法" />
           ) : (
             <div className="note-preview-area" onClick={() => setNoteMode('edit')} role="button" tabIndex={0} onKeyDown={(e) => e.key === 'Enter' && setNoteMode('edit')}>
               {personalNote.trim() ? <MarkdownPreview value={personalNote} /> : <p className="note-preview-empty">点击此处开始编辑笔记</p>}
@@ -325,14 +325,14 @@ export function ScheduleDetailPage({
               <Image size={14} /> {imageUploading ? '上传中…' : '图片'}
             </button>
             <button className="secondary-button ai-write-button" type="button" onClick={toggleChatPanel} disabled={chatBusy} title="和 AI 对话来写笔记、反复调整笔记">
-              <Sparkles size={14} /> {chatBusy ? 'AI 处理中…' : chatOpen ? '收起 AI 对话' : 'AI 写笔记'}
+              <Sparkles size={14} /> {chatBusy ? 'AI 处理中…' : chatOpen ? '收起 AI 对话' : 'AI 写小记'}
             </button>
           </div>
 
           {chatOpen && (
             <div className="note-chat-panel">
               <div className="note-chat-header">
-                <span><Sparkles size={13} /> AI 笔记助手</span>
+                <span><Sparkles size={13} /> AI 小记助手</span>
                 <button className="icon-button" type="button" onClick={() => setChatOpen(false)} title="收起对话" aria-label="收起对话"><ChevronDown size={15} /></button>
               </div>
 
@@ -377,7 +377,7 @@ export function ScheduleDetailPage({
 
           <div className="schedule-related">
             <span className="eyebrow">相关长期笔记</span>
-            {noteItems.filter((note) => note.category === '学习笔记').slice(0, 3).map((note) => (
+            {noteItems.filter((note) => note.category === '小记' || note.category === '学习笔记').slice(0, 3).map((note) => (
               <button className="schedule-related-item" key={note.id} type="button" onClick={() => onOpenNote(note.id)}>
                 <i style={{ backgroundColor: note.color }} />
                 <div><strong>{note.title}</strong><span>{note.updatedAt}</span></div>

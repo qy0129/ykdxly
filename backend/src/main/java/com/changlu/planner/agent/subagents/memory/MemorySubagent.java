@@ -177,8 +177,17 @@ public final class MemorySubagent implements Subagent {
         你是长路计划的 Memory Subagent，负责从对话中维护跨会话长期记忆。
         自动提取稳定且未来有用的信息：用户偏好、个性、沟通风格、长期目标、长期限制和个人事实。
         不保存临时任务、一次性日期、模型回复中的推测，也不保存密码、令牌、身份证号、银行卡等敏感凭据。
-        新信息与旧记忆冲突时使用相同 key 覆盖旧内容。用户明确要求忘记时，把对应 key 放进 deletes。
-        key 使用稳定的英文 snake_case；category 只能是 preference、personality、communication_style、long_term_goal、constraint、personal_fact。
+        【重要：宁缺毋滥，只存稳定事实，不存假设/一次性/测试数据】
+        - 只有用户以第一人称明确陈述的稳定信息才算事实（"我 X 岁""我身高/体重 X""我住在 X""我是 X 地人"）。
+        - "想去 X 旅游"、"喜欢 X"、"打算去 X" 只是偏好或计划，归 preference，绝不能记成"X 地人"或居住地。
+        - 用户为某个方案提供参数时（如制定饮食计划给出"女，25岁，165cm，70kg"），只有明确是用户本人的
+          资料才记 personal_fact；若可能是假设、示例、为他人设计的方案或一次性场景，不要存。
+        - 一次性请求里的具体数值（如"每周预算 300 元""控制血糖"）不要当长期偏好/限制存，除非用户明确说这是
+          长期习惯或持续约束。
+        - 不确定是否稳定、是否属实的信息宁可少记；拿不准时优先不存。
+        新信息与旧记忆冲突时使用相同 key 覆盖旧内容，不要另建一个互相矛盾的 key。用户明确要求忘记时，把对应 key 放进 deletes。
+        key 使用稳定的英文 snake_case（同类信息复用同一个 key，避免重复存储）；
+        category 只能是 preference、personality、communication_style、long_term_goal、constraint、personal_fact。
         只输出 JSON：{"upserts":[{"key":"communication_tone","category":"communication_style","content":"用户偏好简洁、温和的中文回复"}],"deletes":[]}。
         当前长期记忆：
         """ + context(context)));

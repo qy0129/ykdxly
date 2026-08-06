@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { CheckCircle2, Circle, Clock3, RotateCcw, Trash2 } from 'lucide-react'
+import { CheckCircle2, Circle, Clock3, ListChecks, RotateCcw, Trash2 } from 'lucide-react'
 import type { TrashItem } from '../../services/plannerApi'
 
 const typeLabels: Record<TrashItem['type'], string> = {
@@ -39,11 +39,14 @@ export function TrashPage({
     setSelectedKeys((current) => current.includes(key) ? current.filter((value) => value !== key) : [...current, key])
   }
 
-  const runBatch = async (action: (selected: TrashItem[]) => Promise<boolean>) => {
-    if (processing || selectedItems.length === 0) return
+  const runBatch = async (
+    action: (selected: TrashItem[]) => Promise<boolean>,
+    targetItems: TrashItem[] = selectedItems,
+  ) => {
+    if (processing || targetItems.length === 0) return
     setProcessing(true)
     try {
-      if (await action(selectedItems)) setSelectedKeys([])
+      if (await action(targetItems)) setSelectedKeys([])
     } finally {
       setProcessing(false)
     }
@@ -59,6 +62,7 @@ export function TrashPage({
         </div>
         <div className="trash-heading-actions">
           <span className="trash-count"><Trash2 size={16} /> {items.length} 项</span>
+          {items.length > 0 && <button className="secondary-button danger-text" type="button" disabled={processing} onClick={() => void runBatch(onDeleteMany, items)}><ListChecks size={15} /> 全选删除</button>}
           {selectedItems.length > 0 && <>
             <button className="secondary-button" type="button" disabled={processing} onClick={() => void runBatch(onRestoreMany)}><RotateCcw size={15} /> 恢复已选（{selectedItems.length}）</button>
             <button className="secondary-button danger-text" type="button" disabled={processing} onClick={() => void runBatch(onDeleteMany)}><Trash2 size={15} /> 彻底删除（{selectedItems.length}）</button>
