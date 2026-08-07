@@ -1,0 +1,63 @@
+
+=== users ===
+id binary(16)
+external_id varchar(128)
+display_name varchar(100)
+avatar_url mediumtext
+timezone varchar(64)
+created_at timestamp
+updated_at timestamp
+
+=== workspace_members ===
+workspace_id binary(16)
+user_id binary(16)
+role varchar(32)
+joined_at timestamp
+
+=== workspaces ===
+id binary(16)
+owner_id binary(16)
+name varchar(160)
+created_at timestamp
+updated_at timestamp
+
+=== learning_goals ===
+id binary(16)
+workspace_id binary(16)
+user_id binary(16)
+plan_id binary(16)
+title varchar(240)
+description text
+domain varchar(100)
+priority varchar(10)
+target_date date
+weekly_hours decimal(4,1) unsigned
+status varchar(20)
+target_metrics json
+milestones json
+progress decimal(5,2)
+total_sessions int unsigned
+completed_sessions int unsigned
+total_minutes int unsigned
+version int
+deleted_at datetime
+created_at timestamp
+updated_at timestamp
+
+=== plans ===
+id binary(16)
+workspace_id binary(16)
+owner_id binary(16)
+title varchar(200)
+description text
+color char(7)
+status varchar(20)
+progress decimal(5,2)
+task_progress decimal(5,2)
+effort_progress decimal(5,2)
+version int
+deleted_at datetime
+purge_after datetime
+due_date date
+created_at timestamp
+updated_at timestamp

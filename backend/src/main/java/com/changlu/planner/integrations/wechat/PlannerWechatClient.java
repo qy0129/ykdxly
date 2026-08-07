@@ -1,8 +1,9 @@
 package com.changlu.planner.integrations.wechat;
 
-import com.changlu.planner.shared.config.EnvironmentConfig;
+import com.changlu.planner.shared.config.WebUrlResolver;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import java.net.URI;
@@ -18,14 +19,30 @@ import java.util.regex.Pattern;
 /** Keeps WeChat transport concerns out of the planning command service. */
 final class PlannerWechatClient {
   record AiReply(String text, List<String> imageUrls) {}
+  record CommandReply(boolean handled, String message) {}
   private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(20);
-  private static final Duration AI_TIMEOUT = Duration.ofSeconds(70);
+  // 学习目标等重任务会触发多次模型调用（大纲 + 逐日分块展开），单次慢响应可能 100s+，
+  // 学习子代理预算 480s：回环必须能容纳，否则 HTTP 先断导致 bot 报「AI 响应超时」。
+  private static final Duration AI_TIMEOUT = Duration.ofSeconds(540);
   private static final Pattern DRAFT_ACTION = Pattern.compile("^(确认|取消)\\s*[:：]?\\s*([A-Za-z0-9-]{4,})$");
   private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
   private final Gson gson = new Gson();
   private final String apiBase = System.getenv().getOrDefault("PLANNER_API_BASE_URL", "http://127.0.0.1:8081/api").replaceAll("/$", "");
 
-  String command(String userId, String message) throws Exception { return postText("/integrations/wechat/command", userId, message, "message"); }
+  /**
+   * 快捷命令：解析 {handled, message} 契约。handled=false 时由上层回退 AI 对话，
+   * 不能再复用 postText 的“已完成。”兜底，否则会掩盖命令未命中的事实。
+   */
+  CommandReply command(String userId, String message) throws Exception {
+    JsonObject body = new JsonObject(); body.addProperty("text", message);
+    HttpResponse<String> response = http.send(request("/integrations/wechat/command", userId)
+        .POST(HttpRequest.BodyPublishers.ofString(gson.toJson(body))).build(), HttpResponse.BodyHandlers.ofString());
+    if (response.statusCode() / 100 != 2) return new CommandReply(false, null);
+    JsonObject result = JsonParser.parseString(response.body()).getAsJsonObject();
+    boolean handled = result.has("handled") && result.get("handled").getAsBoolean();
+    return new CommandReply(handled, handled && result.has("message") ? result.get("message").getAsString() : null);
+  }
+
   String capture(String userId, String message) throws Exception { return postText("/integrations/wechat/capture", userId, message, "message"); }
 
   String briefing(String userId) throws Exception {
@@ -46,7 +63,17 @@ final class PlannerWechatClient {
     JsonObject result = JsonParser.parseString(response.body()).getAsJsonObject();
     String reply = result.has("reply") ? result.get("reply").getAsString() : "我暂时没有生成回复。";
     List<String> imageUrls = imageUrls(result);
-    if (!result.has("draft") || !result.get("draft").isJsonObject()) return new AiReply(reply, imageUrls);
+    if (!result.has("draft") || !result.get("draft").isJsonObject()) {
+      // 信息搜集表（travel/learning 缺必填参数时返回 WAITING_USER + inputRequirements）：
+      // 附工作台表单链接让用户点开填写，否则微信里只有一句"请先补充旅行信息"，找不到填表入口。
+      if (result.has("inputRequirements") && result.get("inputRequirements").isJsonArray()
+          && result.getAsJsonArray("inputRequirements").size() > 0) {
+        String formTitle = result.has("formTitle") && !result.get("formTitle").isJsonNull()
+            ? result.get("formTitle").getAsString() : "信息搜集表";
+        return new AiReply(reply + "\n\n[点击填写" + formTitle + "](" + webUrl() + "#/agent)", imageUrls);
+      }
+      return new AiReply(reply, imageUrls);
+    }
 
     JsonObject draft = result.getAsJsonObject("draft");
     JsonArray actions = draft.getAsJsonArray("actions");
@@ -59,8 +86,25 @@ final class PlannerWechatClient {
     preview.append("\n\n草案编号：").append(code)
         .append("\n回复“确认 ").append(code).append("”执行，回复“取消 ").append(code).append("”放弃。")
         .toString();
-    if (actions.size() > 3) preview.append("\n\n[点击此链接](").append(webUrl()).append("#/agent)");
+    // 复杂草案（旅游/学习计划等带卡片预览）始终附工作台链接，让用户可查看完整卡片。
+    // 简单待办/日程草案（actions ≤ 3）不发链接，避免噪音。
+    if (actions.size() > 3 || hasCardPreview(actions)) {
+      preview.append("\n\n[点击查看完整卡片](").append(webUrl()).append("#/agent)");
+    }
     return new AiReply(preview.toString(), imageUrls);
+  }
+
+  /** 草案里是否含卡片预览类动作（旅游行程、学习计划等），这类草案值得附工作台链接跳转看卡片。 */
+  private boolean hasCardPreview(JsonArray actions) {
+    for (int i = 0; i < actions.size(); i++) {
+      JsonElement element = actions.get(i);
+      if (!element.isJsonObject()) continue;
+      JsonObject action = element.getAsJsonObject();
+      String type = action.has("type") ? action.get("type").getAsString() : "";
+      if ("create_travel_plan".equals(type) || "create_learning_plan".equals(type)
+          || "create_plan".equals(type)) return true;
+    }
+    return false;
   }
 
   /** 从统一 Agent 返回中提取单张或批量图片 URL，微信层只负责传输。 */
@@ -125,6 +169,6 @@ final class PlannerWechatClient {
   }
 
   private String webUrl() {
-    return EnvironmentConfig.value("PLANNER_WEB_URL", "web.url", "http://127.0.0.1:8081/").replaceAll("/$", "");
+    return WebUrlResolver.resolve().replaceAll("/$", "");
   }
 }

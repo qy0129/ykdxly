@@ -24,6 +24,8 @@ public final class TravelPrompt {
         不要输出 request、budgetEstimate、sources、weather、attractions、transitMatrix；这些内容由后端保留或计算。
         planningInstruction 必须是完整、明确的中文计划写入指令，要求创建一个 Plan，按“出发前准备、每日行程、返程整理”拆成 Stage 和 Task；
         只有用户明确要求具体时间安排时，才要求创建 Schedule。订票、住宿和门票只创建待确认任务，不执行外部预订。
+        所有给用户看的文字（message、days 的 title、activities 的 title/location/notes、preparationTasks 的 title、risks 的 message）必须使用中文；
+        只有景点名称、地名这类专有名词可保留原文，其余一律中文，禁止输出英文、代码、Markdown 标记。
         只输出 JSON，不要 Markdown：
         {
           "message":"中文说明",

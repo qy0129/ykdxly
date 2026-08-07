@@ -18,6 +18,7 @@ import { TodosPage } from '../features/todos/TodosPage'
 import { NotesPage } from '../features/notes/NotesPage'
 import { ScheduleDetailPage } from '../features/schedule/ScheduleDetailPage'
 import { StatsPage } from '../features/stats/StatsPage'
+import { LearningPage } from '../features/learning/LearningPage'
 import { AgentPage } from '../features/agent/AgentPage'
 import { ReviewPage } from '../features/review/ReviewPage'
 import { TrashPage } from '../features/trash/TrashPage'
@@ -28,7 +29,7 @@ const initialStats: PlannerStats = {
   metrics: { completion: 0, completed: 0, planned: 0, focusHours: 0, streak: 0 },
 }
 
-const routeViews = new Set<View>(['calendar', 'plans', 'todos', 'notes', 'stats', 'agent', 'review', 'trash', 'schedule'])
+const routeViews = new Set<View>(['calendar', 'plans', 'todos', 'notes', 'stats', 'learning', 'agent', 'review', 'trash', 'schedule'])
 
 function readRoute() {
   const value = window.location.hash.replace(/^#\/?/, '')
@@ -119,26 +120,42 @@ function App() {
 
   useEffect(() => {
     // 网页端每 30 秒领取一次到期提醒；接口已做服务端去重，刷新页面不会重复弹出。
+    // 同时轮询轻量数据版本号，检测到 bot 等外部写入（版本变化）时刷新主数据，
+    // 让微信里创建的计划/待办/学习目标能出现在已打开的前端页面，无需手动刷新。
     let stopped = false
+    let lastVersion: number | null = null
     const pollReminders = async () => {
       try {
         const reminders = await plannerApi.loadDueReminders()
         if (stopped) return
         const fresh = reminders.filter((item) => !seenReminderIds.current.has(item.id))
-        if (fresh.length === 0) return
-        fresh.forEach((item) => seenReminderIds.current.add(item.id))
-        setReminderQueue((current) => [...current, ...fresh])
-        if ('Notification' in window && Notification.permission === 'granted') {
-          fresh.forEach((item) => new Notification('长路计划提醒', { body: item.title }))
+        if (fresh.length > 0) {
+          fresh.forEach((item) => seenReminderIds.current.add(item.id))
+          setReminderQueue((current) => [...current, ...fresh])
+          if ('Notification' in window && Notification.permission === 'granted') {
+            fresh.forEach((item) => new Notification('长路计划提醒', { body: item.title }))
+          }
         }
       } catch {
         // 提醒轮询失败时下次继续重试，不阻塞计划、待办等主数据加载。
+      }
+      try {
+        const { version } = await plannerApi.loadStateVersion()
+        if (stopped) return
+        if (lastVersion === null) {
+          lastVersion = version
+        } else if (version !== lastVersion) {
+          lastVersion = version
+          await refreshData()
+        }
+      } catch {
+        // 版本号探测失败时静默跳过，不打扰用户。
       }
     }
     void pollReminders()
     const timer = window.setInterval(() => void pollReminders(), 30_000)
     return () => { stopped = true; window.clearInterval(timer) }
-  }, [])
+  }, [refreshData])
 
   // 待办安排到日期后映射成日历条目，但不复制成另一份可持久化数据。
   const calendarEntries = useMemo<CalendarItem[]>(() => [
@@ -181,6 +198,7 @@ function App() {
     todos: { title: '待办事项', subtitle: '只需要完成一次的事' },
     notes: { title: '长期笔记', subtitle: '持续积累并连接你的知识' },
     stats: { title: '计划统计', subtitle: `${format(new Date(), 'yyyy 年 M 月')}执行情况` },
+    learning: { title: '学习目标', subtitle: '量化指标、里程碑与每日任务' },
     agent: { title: 'AI 对话', subtitle: '让 Agent 帮你推进计划' },
     review: { title: 'AI 复盘', subtitle: '基于真实完成记录' },
     trash: { title: '回收站', subtitle: '恢复 30 天内删除的数据' },
@@ -391,6 +409,7 @@ function App() {
           {activeView === 'todos' && <TodosPage todoItems={todoItems} onCreate={createTodo} onUpdate={updateTodo} onDelete={deleteTodo} onDeleteMany={deleteTodos} onToggle={toggleCalendarItem} />}
           {activeView === 'notes' && <NotesPage noteItems={noteItems} onChange={saveNotes} onCreate={createNote} onDelete={deleteNote} onDeleteMany={deleteNotes} selectedNoteId={selectedNoteId} />}
           {activeView === 'stats' && <StatsPage stats={statsData} />}
+          {activeView === 'learning' && <LearningPage onDataChanged={() => setDataRevision((value) => value + 1)} />}
           {activeView === 'agent' && <AgentPage seed={agentSeed} onDataChanged={() => setDataRevision((value) => value + 1)} />}
           {activeView === 'review' && <ReviewPage />}
           {activeView === 'trash' && <TrashPage items={trashItems} restoringId={restoringTrashId} onRestore={(item) => void restoreTrashItem(item)} onRestoreMany={(items) => runTrashBatch(items, 'restore')} onDeleteMany={(items) => runTrashBatch(items, 'purge')} />}

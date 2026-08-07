@@ -1,0 +1,40 @@
+
+=== ai_action_drafts ===
+id binary(16)
+workspace_id binary(16)
+user_id binary(16)
+conversation_id binary(16)
+change_set_id binary(16)
+source_channel varchar(20)
+request_text text
+reply longtext
+actions json
+status varchar(20)
+expires_at datetime
+confirmed_at datetime
+cancelled_at datetime
+superseded_at datetime
+undone_at datetime
+created_at timestamp
+updated_at timestamp
+
+=== ai_conversations ===
+id binary(16)
+workspace_id binary(16)
+user_id binary(16)
+title varchar(240)
+source_channel varchar(20)
+context_summary longtext
+summarized_message_count int unsigned
+context_summary_updated_at datetime
+created_at timestamp
+updated_at timestamp
+
+=== ai_messages ===
+id binary(16)
+conversation_id binary(16)
+role varchar(16)
+content longtext
+proposed_changes json
+image_urls json
+created_at timestamp(6)

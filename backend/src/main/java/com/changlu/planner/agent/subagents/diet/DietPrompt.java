@@ -15,9 +15,11 @@ public final class DietPrompt {
   /**
    * @param dailyTargets 确定性计算结果 JSON；信息不足时为 null（此时只追问，不生成菜单）
    * @param missingFields 缺失的必需字段描述；空串表示字段齐全
+   * @param previousMealPlan 上一版菜单（草案修改场景）；为空表示全新生成
    */
   public static JsonArray messages(String userMessage, String arguments, String sources,
-                                   String dailyTargets, String missingFields, String sharedContext) {
+                                   String dailyTargets, String missingFields, String sharedContext,
+                                   JsonArray previousMealPlan) {
     JsonArray messages = new JsonArray();
     messages.add(ModelClient.message("system", """
         你是长路计划中的 Diet Subagent，负责把用户的健康饮食需求整理为可执行、可确认的饮食方案。
@@ -31,6 +33,8 @@ public final class DietPrompt {
         我的计划时）必须保持 planningInstruction 为空字符串，绝不主动写入。生成时要求创建一个 Plan（如"四周健康饮食计划"），
         按阶段拆 Stage（如"第 1 周适应、第 2-3 周执行、第 4 周巩固"），Task 为每餐/购物/备餐；
         只有用户明确要求具体时间时才创建 Schedule。
+        所有给用户看的文字（message、mealPlan 的 title/foodItems/notes、shoppingList 的 item、recipes 的 title、tips、risks 的 message）
+        必须使用中文；只有蛋白质、维生素、钙等营养学术语可保留英文缩写，其余一律中文，禁止输出英文、代码、Markdown 标记。
         只输出 JSON，不要 Markdown：
         {
           "message":"中文说明",
@@ -59,8 +63,18 @@ public final class DietPrompt {
           "已知的用户长期记忆与最近对话（供理解上下文，不要重复执行）：\n" + sharedContext));
     }
     messages.add(ModelClient.message("user", "用户请求：\n" + userMessage
-        + "\n\n结构化参数：\n" + arguments + "\n\n营养参考（只能作为参考）：\n" + sources));
+        + "\n\n结构化参数：\n" + arguments + "\n\n营养参考（只能作为参考）：\n" + sources
+        + previousPlanSection(previousMealPlan)));
     return messages;
+  }
+
+  /** 修改既有方案时附上上一版菜单，要求只调整被点名的餐次，其余保持与上一版一致。 */
+  private static String previousPlanSection(JsonArray previousMealPlan) {
+    if (previousMealPlan == null || previousMealPlan.isEmpty()) return "";
+    return "\n\n上一版菜单（用户正在修改它，请以此作为基准做局部调整，不要全量重新生成）：\n"
+        + previousMealPlan
+        + "\n调整规则：只修改用户明确提到的日期/餐次/食材；其余日期和餐次保持与上一版一致，"
+        + "并保留原 goal、profile 与 dailyTargets 不变。";
   }
 
   private static String context(String dailyTargets, String missingFields) {

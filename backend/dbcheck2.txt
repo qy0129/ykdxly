@@ -1,0 +1,62 @@
+=== workspaces ===
+00000000000000000000000000000002 | 我的工作区
+1F2C63D1728C4E32B8A0041554D4627C | 我的工作区
+E7830D6553E64E9FAC4A6E13EE38CAA4 | 我的工作区
+EE0F34F5319B44E4B0671EA93E8DA5BE | 我的工作区
+
+=== ALL plans ===
+A0F16BEA82EB49BBB26CEE962DD0AA27 | 英语学习 | status=active | ws=E7830D6553E64E9FAC4A6E13EE38CAA4 | del=null | created=2026-08-07 12:00:13.0
+53BC1A6295D245E6994A08D0566190A3 | 英语学习 | status=active | ws=E7830D6553E64E9FAC4A6E13EE38CAA4 | del=null | created=2026-08-07 11:50:48.0
+34D5760ACB664F36A3A02F7ACEB53463 | 减脂一周饮食计划 | status=active | ws=00000000000000000000000000000002 | del=null | created=2026-08-06 16:53:30.0
+08797C56E3374E8ABDEDC841CFBA9930 | 青岛旅行计划 | status=active | ws=00000000000000000000000000000002 | del=null | created=2026-08-06 16:43:21.0
+7F95695003F04D1193784CB864B350D1 | 三个月高数系统学习冲刺计划 | status=active | ws=00000000000000000000000000000002 | del=null | created=2026-08-05 22:36:15.0
+9ADD940447CA415481F27F0F2E67D09C | 完成长路计划核心版本 | status=active | ws=00000000000000000000000000000002 | del=2026-08-06 15:16:55.0 | created=2026-08-02 22:23:00.0
+
+=== ALL learning_goals ===
+19853BEE65EE426A9366A1FDBEA45465 | ：三个月后英语四级考到600分，每周8小时 | plan=null | user=00000000000000000000000000000001 | target=null | del=2026-08-07 14:25:59.0 | created=2026-08-07 14:13:13.0
+D166946EC8D844229A31542DE4391C46 | 三个月高数系统学习（目标 95 分） | plan=7F95695003F04D1193784CB864B350D1 | user=00000000000000000000000000000001 | target=2026-11-05 | del=null | created=2026-08-05 22:36:18.0
+86BD42039CEA483AA84AEECE337C7C5F | 2027 年 6 月底前雅思备考至 7 分 | plan=null | user=00000000000000000000000000000001 | target=2027-06-30 | del=2026-08-05 21:15:01.0 | created=2026-08-05 20:54:17.0
+
+=== ALL tables ===
+agent_document_chunks
+agent_documents
+agent_run_steps
+agent_runs
+agent_tool_calls
+ai_action_drafts
+ai_channel_sessions
+ai_conversations
+ai_images
+ai_memories
+ai_messages
+briefings
+execution_records
+knowledge_areas
+learning_goals
+learning_sessions
+note_categories
+note_material_links
+note_relations
+note_tag_links
+note_tags
+notes
+notification_outbox
+plan_stages
+plan_tasks
+planning_preferences
+plans
+reminders
+review_entries
+schedule_items
+schedule_material_links
+schema_migrations
+source_materials
+todos
+travel_change_drafts
+travel_data_snapshots
+travel_notifications
+travel_refresh_configs
+users
+wechat_login_sessions
+workspace_members
+workspaces

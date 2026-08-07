@@ -17,6 +17,31 @@ function materialNote(noteItems: Note[], material: SourceMaterial) {
   return noteItems.find((note) => (note.content || '').includes(material.url) || note.excerpt.includes(material.url))
 }
 
+function normalizeNoteSearch(value: string) {
+  return value.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
+}
+
+/** 只返回确实提到当前安排或所属计划的笔记，避免用笔记列表顺序制造假关联。 */
+function relatedScheduleNotes(noteItems: Note[], item: CalendarItem, plan?: Plan) {
+  const itemTitle = normalizeNoteSearch(item.title)
+  const planTitle = plan?.title ? normalizeNoteSearch(plan.title) : ''
+  if (!itemTitle && !planTitle) return []
+
+  return noteItems
+    .map((note) => {
+      const searchable = normalizeNoteSearch([note.title, note.excerpt, note.content, note.source].filter(Boolean).join(' '))
+      let score = 0
+      if (itemTitle && searchable.includes(itemTitle)) score += 5
+      if (planTitle && searchable.includes(planTitle)) score += 2
+      if (note.source === '日程小记' && itemTitle && normalizeNoteSearch(note.title).includes(itemTitle)) score += 3
+      return { note, score }
+    })
+    .filter(({ score }) => score > 0)
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 3)
+    .map(({ note }) => note)
+}
+
 type ScheduleSection = { title: string; content: string }
 
 function validScheduleSections(value: unknown): value is ScheduleSection[] {
@@ -126,12 +151,12 @@ export function ScheduleDetailPage({
       onDeleteNote(existing.id)
       return
     }
-    const content = `# ${material.title}\n\n${material.summary}\n\n来源：${material.source}\n\n[打开原文](${material.url})`
+    const content = `# ${material.title}\n\n关联安排：${item.title}\n\n${material.summary}\n\n来源：${material.source}\n\n[打开原文](${material.url})`
     const next: Note = {
       id: `source-note-${Date.now()}`,
       title: material.title,
       category: '灵感收藏',
-      excerpt: `${material.summary}\n\n原文链接：${material.url}`,
+      excerpt: `关联安排：${item.title}\n\n${material.summary}\n\n原文链接：${material.url}`,
       content,
       updatedAt: '刚刚',
       color: material.color,
@@ -228,6 +253,8 @@ export function ScheduleDetailPage({
     onNotesChange(personalNoteId ? noteItems.map((note) => note.id === personalNoteId ? next : note) : [next, ...noteItems])
     setPersonalNoteId(next.id)
   }
+
+  const relatedNotes = relatedScheduleNotes(noteItems, item, plan)
 
   return (
     <div className="schedule-detail content-page">
@@ -377,13 +404,14 @@ export function ScheduleDetailPage({
 
           <div className="schedule-related">
             <span className="eyebrow">相关长期笔记</span>
-            {noteItems.filter((note) => note.category === '小记' || note.category === '学习笔记').slice(0, 3).map((note) => (
+            {relatedNotes.map((note) => (
               <button className="schedule-related-item" key={note.id} type="button" onClick={() => onOpenNote(note.id)}>
                 <i style={{ backgroundColor: note.color }} />
                 <div><strong>{note.title}</strong><span>{note.updatedAt}</span></div>
                 <ChevronRight size={15} />
               </button>
             ))}
+            {relatedNotes.length === 0 && <span className="schedule-related-empty">暂无与当前安排直接关联的长期笔记</span>}
           </div>
         </aside>
       </div>

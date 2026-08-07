@@ -575,6 +575,7 @@ export const plannerApi = {
   },
 
   loadDueReminders: () => request<TodoReminder[]>('/reminders/due'),
+  loadStateVersion: () => request<{ version: number }>('/state/version'),
 
   createPlan: (item: Plan) => request<ApiPlan>('/plans', { method: 'POST', body: JSON.stringify({ title: item.title, description: item.subtitle, color: item.color, status: item.status, dueDate: item.dueDate || null }) }),
   updatePlan: (item: Plan) => request<ApiPlan>(`/plans/${item.id}`, { method: 'PUT', body: JSON.stringify({ title: item.title, description: item.subtitle, color: item.color, status: item.status, dueDate: item.dueDate || null, expectedVersion: item.version }) }),

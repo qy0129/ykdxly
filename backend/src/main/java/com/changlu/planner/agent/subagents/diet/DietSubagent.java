@@ -73,6 +73,20 @@ public final class DietSubagent implements Subagent {
     // 提取器是 LLM，偶发漏提取目标或记忆里的资料：用确定性解析兜底补全缺失字段，
     // 避免用户在已提供资料后仍被反复追问"确认目标/年龄/身高/体重/活动量"。
     policy.fillMissingFromContext(arguments, request.message(), context.sharedContext());
+    // 草案修改（modifyDraft）可能只带修改文字：缺失参数从上一版请求补全，
+    // 避免"把周二的晚餐换成鸡胸肉"被当成缺少目标/年龄/身高体重的新请求反复追问。
+    JsonObject previousData = previousDietData(context);
+    if (previousData != null && previousData.has("request") && previousData.get("request").isJsonObject()) {
+      JsonObject previousRequest = previousData.getAsJsonObject("request");
+      for (String key : previousRequest.keySet()) {
+        if (!arguments.has(key)) arguments.add(key, previousRequest.get(key).deepCopy());
+      }
+    }
+    // 有上一版菜单 = 在修改既有方案：把它带给模型做局部调整，并强制生成新草案（否则修改文本不含
+    // 保存词，writeRequested 为 false，改完只回一句 completed、旧草案被前端清掉）。
+    JsonArray previousMealPlan = previousData != null && previousData.has("mealPlan")
+        && previousData.get("mealPlan").isJsonArray()
+        ? previousData.getAsJsonArray("mealPlan") : new JsonArray();
     DietRequest dietRequest = DietRequest.from(arguments);
     if (policy.unsupportedProfile(dietRequest)) {
       return AgentResult.failed("DIET_MEDICAL_UNSUPPORTED",
@@ -104,8 +118,9 @@ public final class DietSubagent implements Subagent {
         missing.isEmpty() ? DietTargetCalculator.calculate(dietRequest) : null;
     JsonObject generated;
     try {
-      generated = planner.plan(dietRequest, sources,
-          targets == null ? null : targets.dailyTargets(), missing, context.sharedContext());
+      generated = planner.planWithContext(dietRequest, sources,
+          targets == null ? null : targets.dailyTargets(), missing, context.sharedContext(),
+          request.message(), previousMealPlan);
     } catch (Exception error) {
       // 模型偶发输出非法 JSON 或接口异常：不把原始报错抛给用户，降级为清晰错误。
       LOG.warn("[饮食方案生成失败] run={} 原因={}", context.runId(), error.getMessage());
@@ -132,7 +147,8 @@ public final class DietSubagent implements Subagent {
     // 用户消息含"制定/创建/保存"等词时 writeRequested 为真。写入指令不依赖模型的 planningInstruction：
     // 模型偶发输出结构化 DSL（如 CREATE_PLAN(...)）而非自然中文，AiCommandService 的规划代理解析不出 actions
     // 会导致 DIET_DRAFT_NOT_CREATED。改为从结构化 mealPlan 确定性构造自然中文指令，保证草案能被创建。
-    boolean wantsSave = policy.writeRequested(request.message(), request.arguments());
+    boolean wantsSave = previousMealPlan.size() > 0
+        || policy.writeRequested(request.message(), request.arguments());
     if (!wantsSave) {
       return AgentResult.completed(result.message(), data, context.traceId());
     }
@@ -227,6 +243,21 @@ public final class DietSubagent implements Subagent {
     // 防止非法值进入 DietRequest 后经 toJson 持久化进 taskData.request，在 WAITING_USER 回放时触发 schema 校验崩溃。
     policy.sanitize(merged);
     return merged;
+  }
+
+  /** 从运行状态取上一版饮食方案的请求参数与菜单（modifyDraft 保留在 taskData）。 */
+  private JsonObject previousDietData(AgentContext context) {
+    JsonObject state = context.taskState();
+    if (state == null || !state.has("taskData") || !state.get("taskData").isJsonObject()) return null;
+    JsonObject taskData = state.getAsJsonObject("taskData");
+    JsonObject previous = new JsonObject();
+    if (taskData.has("request") && taskData.get("request").isJsonObject()) {
+      previous.add("request", taskData.get("request").deepCopy());
+    }
+    if (taskData.has("mealPlan") && taskData.get("mealPlan").isJsonArray()) {
+      previous.add("mealPlan", taskData.getAsJsonArray("mealPlan").deepCopy());
+    }
+    return previous.keySet().isEmpty() ? null : previous;
   }
 
   /**

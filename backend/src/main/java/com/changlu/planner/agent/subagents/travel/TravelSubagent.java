@@ -62,6 +62,26 @@ public final class TravelSubagent implements Subagent {
       return AgentResult.failed("TRAVEL_UNSUPPORTED_OPERATION",
           "我可以生成预订和购票任务，但不能代你订票、付款或完成外部预订。", false, context.traceId());
     }
+    // 草案修改可能只带修改文字；先从运行状态恢复上一版行程的请求参数，
+    // 再做必填校验，否则“第三天换景点”会被误判成全新旅行需求。
+    JsonObject previousData = previousTravelData(context, request.arguments());
+    if (previousData != null && previousData.has("request")
+        && previousData.get("request").isJsonObject()) {
+      JsonObject previousRequest = previousData.getAsJsonObject("request");
+      for (String key : previousRequest.keySet()) {
+        if (!request.arguments().has(key)) {
+          request.arguments().add(key, previousRequest.get(key).deepCopy());
+        }
+      }
+    }
+    // 有上一版行程 = 正在修改既有方案。审阅标记（planReview）仍存在说明还在方案审阅态，
+    // 修改后应回到审阅让用户再次确认；modifyDraft 会清掉该标记，此时修改直接生成新草案替换旧卡片。
+    JsonObject taskState = context.taskState();
+    boolean inPlanReview = taskState.has("taskData") && taskState.get("taskData").isJsonObject()
+        && taskState.getAsJsonObject("taskData").has("planReview")
+        && taskState.getAsJsonObject("taskData").get("planReview").isJsonPrimitive()
+        && taskState.getAsJsonObject("taskData").get("planReview").getAsBoolean();
+    boolean modifying = previousData != null;
     JsonArray requiredBeforeResearch = new JsonArray();
     addRequirement(requiredBeforeResearch, request.arguments(), "destination", "目的地", "text", true);
     addRequirement(requiredBeforeResearch, request.arguments(), "startDate", "出发日期", "date", true);
@@ -72,9 +92,11 @@ public final class TravelSubagent implements Subagent {
     TravelDataCollector.Collected collected = collector.collect(
         new TravelDataCollector.SubagentRequestView(request.arguments(), researchQuery(request)), context);
     JsonObject facts = collected.facts();
+    // 用户没手填出发地、但位置工具已从设备定位反查出来时，回填进请求参数，
+    // 否则 authoritativeRequest 重建的 request.origin 永远是空，出发地既进不了模型也上不了卡片。
+    inferOriginFromLocation(request.arguments(), facts);
     JsonArray sources = facts.getAsJsonArray("sources");
 
-    JsonObject previousData = previousTravelData(context, request.arguments());
     SubagentRequest plannerRequest = new SubagentRequest(request.message(), authoritativeRequest(request.arguments()),
         request.documentIds());
     boolean planApproved = policy.planApproved(request.message(), request.arguments());
@@ -159,12 +181,16 @@ public final class TravelSubagent implements Subagent {
       return AgentResult.waitingUser(travel.message(), data, context.traceId());
     }
     // 用户已确认方案（planApproved）视为要求写入，避免裸"确认行程"只回 completed 而实际没保存。
-    if (!planApproved && !policy.writeRequested(request.message(), request.arguments())) {
+    // 修改既有方案（modifyDraft 或方案审阅里的修改）同样视为要求写入：改完必须回到可确认的新草案，
+    // 否则返回的修订版既没有 draft 也没有 planReview，前端会把旧草案清掉、修订结果丢失。
+    if (!planApproved && !policy.writeRequested(request.message(), request.arguments()) && !modifying) {
       return AgentResult.completed(replyMessage(travel, localizedRevision), data, context.traceId());
     }
 
     // 旅行先进入可修改的方案审阅阶段，用户确认后才创建写入草案。
-    if (!planApproved) {
+    // 全新方案无上一版数据（modifying=false）→ 走审阅；修改既有方案但审阅态仍活着（inPlanReview=true）
+    // → 回到审阅继续改；modifyDraft 场景审阅标记已被清掉（inPlanReview=false）→ 直接生成新草案替换旧卡片。
+    if (!planApproved && (!modifying || inPlanReview)) {
       JsonArray questions = data.has("questions") && data.get("questions").isJsonArray()
           ? data.getAsJsonArray("questions") : new JsonArray();
       questions.add("请检查以上行程；确认无误后点击“确认行程，生成写入草案”，也可以直接输入修改意见。");
@@ -313,6 +339,15 @@ public final class TravelSubagent implements Subagent {
     request.remove("previousTravelData");
     request.remove("attractionQuery");
     return request;
+  }
+
+  /** 位置工具解析出的出发地（来自设备定位反查或显式 origin）回填到请求参数。 */
+  private void inferOriginFromLocation(JsonObject arguments, JsonObject facts) {
+    if (string(arguments, "origin", "").trim().isBlank()
+        && facts.has("locationContext") && facts.get("locationContext").isJsonObject()) {
+      String inferred = string(facts.getAsJsonObject("locationContext"), "originName", "").trim();
+      if (!inferred.isBlank()) arguments.addProperty("origin", inferred);
+    }
   }
 
   private String replyMessage(TravelResult travel, JsonObject localizedRevision) {

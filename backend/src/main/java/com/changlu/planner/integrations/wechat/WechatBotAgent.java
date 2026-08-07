@@ -2,7 +2,7 @@ package com.changlu.planner.integrations.wechat;
 
 import com.changlu.planner.agent.core.ModelClient;
 import com.changlu.planner.agent.subagents.memory.MemorySubagent;
-import com.changlu.planner.shared.config.EnvironmentConfig;
+import com.changlu.planner.shared.config.WebUrlResolver;
 import com.changlu.planner.shared.database.Database;
 import com.changlu.planner.features.reminder.ReminderService;
 import com.github.wechat.ilink.sdk.ILinkClient;
@@ -16,16 +16,12 @@ import com.github.wechat.ilink.sdk.core.model.WeixinMessage;
 import com.github.wechat.ilink.sdk.ILinkClientBuilder;
 
 import java.awt.Desktop;
-import java.net.Inet4Address;
-import java.net.InetAddress;
-import java.net.NetworkInterface;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
@@ -70,7 +66,6 @@ WechatBotAgent implements AutoCloseable {
   });
   private volatile ILinkClient client;
   private volatile ScheduledFuture<?> reminderTask;
-  private volatile String webUrl;
   private volatile String pendingGreetingUserId = "";
   private Thread worker;
 
@@ -84,8 +79,7 @@ WechatBotAgent implements AutoCloseable {
   }
 
   public void start() {
-    webUrl = configuredWebUrl();
-    LOG.info("[微信Bot] 启动，网页地址={}", webUrl);
+    LOG.info("[微信Bot] 启动，网页地址={}", WebUrlResolver.resolve());
     worker = new Thread(this::runLoop, "wechat-bot-agent");
     worker.setDaemon(true);
     worker.start();
@@ -208,13 +202,17 @@ WechatBotAgent implements AutoCloseable {
       List<String> imageUrls = List.of();
       String route;
       if (isNoteCapture(text)) { route = "笔记记录"; reply = planner.capture(userId, text); }
-      else if (isReadOnlyCommand(text)) { route = "只读查询"; reply = planner.command(userId, text); }
       else if (text.contains("计划网页") || text.contains("工作台") || text.equals("打开计划")) { route = "网页链接"; reply = webLinkMessage(); }
       else {
-        route = "AI对话";
-        PlannerWechatClient.AiReply aiReply = planner.aiChat(userId, text);
-        reply = aiReply.text();
-        imageUrls = aiReply.imageUrls();
+        // 先命令、后 AI：规则命令命中直接秒回；未命中再交给 AI 对话（含确认/取消草案）。
+        PlannerWechatClient.CommandReply command = planner.command(userId, text);
+        if (command.handled()) { route = "快捷命令"; reply = command.message(); }
+        else {
+          route = "AI对话";
+          PlannerWechatClient.AiReply aiReply = planner.aiChat(userId, text);
+          reply = aiReply.text();
+          imageUrls = aiReply.imageUrls();
+        }
       }
       LOG.info("[工作流] 路由完成｜路由决策｜{}｜进入{}处理", route, route);
       current.sendText(userId, reply);
@@ -303,9 +301,10 @@ WechatBotAgent implements AutoCloseable {
     } catch (Exception ignored) { return false; }
   }
 
-  private String webLinkMessage() { return "点击此链接：\n" + webUrl; }
+  // 网页地址每次发送时实时解析：局域网 IP 会随网络切换变化，启动时缓存会在 IP 变更后指向失效地址。
+  private String webLinkMessage() { return "点击此链接：\n" + WebUrlResolver.resolve(); }
 
-  private String markdownWebLink() { return "[点击此链接](" + webUrl + ")"; }
+  private String markdownWebLink() { return "[点击此链接](" + WebUrlResolver.resolve() + ")"; }
 
   private String textOf(WeixinMessage message) {
     if (message.getItem_list() == null) return "";
@@ -313,39 +312,6 @@ WechatBotAgent implements AutoCloseable {
   }
 
   private boolean isNoteCapture(String text) { return text.startsWith("笔记:") || text.startsWith("笔记："); }
-  private boolean isReadOnlyCommand(String text) { String value = text.replaceAll("[\\s，。！？、,.!?]", ""); return value.equals("今天还有什么") || value.equals("今天还有哪些") || value.equals("计划完成得怎么样"); }
-  private String configuredWebUrl() {
-    String configured = EnvironmentConfig.value("PLANNER_WEB_URL", "web.url", "");
-    if (configured.isBlank()) return "http://" + lanAddress() + ":8081/";
-    try {
-      URI uri = URI.create(configured);
-      if (uri.getPort() == 4173) {
-        return new URI(uri.getScheme(), uri.getUserInfo(), uri.getHost(), 8081, uri.getPath(), uri.getQuery(), uri.getFragment()).toString();
-      }
-    } catch (Exception ignored) { }
-    return configured;
-  }
-  private String lanAddress() {
-    try {
-      String fallback = "";
-      String ethernet = "";
-      for (NetworkInterface network : Collections.list(NetworkInterface.getNetworkInterfaces())) {
-        if (!network.isUp() || network.isLoopback()) continue;
-        String name = (network.getName() + " " + network.getDisplayName()).toLowerCase();
-        if (name.contains("virtual") || name.contains("vethernet") || name.contains("hyper-v")
-            || name.contains("vmware") || name.contains("virtualbox") || name.contains("docker") || name.contains("wsl")) continue;
-        for (InetAddress address : Collections.list(network.getInetAddresses())) {
-          if (!(address instanceof Inet4Address) || address.isLoopbackAddress()) continue;
-          if (fallback.isBlank()) fallback = address.getHostAddress();
-          if (name.contains("wi-fi") || name.contains("wifi") || name.contains("wlan") || name.contains("wireless")) return address.getHostAddress();
-          if (ethernet.isBlank() && name.contains("ethernet")) ethernet = address.getHostAddress();
-        }
-      }
-      if (!ethernet.isBlank()) return ethernet;
-      if (!fallback.isBlank()) return fallback;
-    } catch (Exception ignored) { }
-    return "127.0.0.1";
-  }
   /**
    * SDK 不会自动拉取微信消息，必须持续调用 getUpdates()。
    * 收到消息后 SDK 会更新会话令牌，提醒调度器才能向该用户发送主动消息。

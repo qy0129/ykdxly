@@ -7,6 +7,7 @@ import com.changlu.planner.agent.subagents.document.DocumentResult;
 import com.changlu.planner.agent.subagents.travel.external.TravelApiClient;
 import com.changlu.planner.agent.subagents.travel.services.AmapWeatherForecastService;
 import com.changlu.planner.features.briefing.ScheduleMaterialService;
+import com.changlu.planner.features.command.BotCommandService;
 import com.changlu.planner.features.export.StatsPdfGenerator;
 import com.changlu.planner.features.learning.LearningService;
 import com.changlu.planner.features.notes.NotePrompt;
@@ -71,6 +72,7 @@ public final class ApiServer {
   private final ReminderService reminders;
   private final ScheduleMaterialService scheduleMaterials;
   private final LearningService learningService;
+  private final BotCommandService botCommands;
   private final StaticFileHandler staticFiles = new StaticFileHandler();
   private final HttpClient imageClient = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(15)).build();
   private HttpServer server;
@@ -79,7 +81,7 @@ public final class ApiServer {
   private volatile JsonObject weatherCache;
   private volatile long weatherCacheAt;
 
-  public ApiServer(Database database, int port) { this.database = database; this.port = port; this.agent = new AgentFacade(database); this.model = new ModelClient(); this.planExecution = new PlanExecutionService(database); this.reminders = new ReminderService(database, model, ctx -> { try { return agent.memoryContext(ctx); } catch (Exception ignored) { return ""; } }); this.scheduleMaterials = new ScheduleMaterialService(database); this.learningService = new LearningService(database); }
+  public ApiServer(Database database, int port) { this.database = database; this.port = port; this.agent = new AgentFacade(database); this.model = new ModelClient(); this.planExecution = new PlanExecutionService(database); this.reminders = new ReminderService(database, model, ctx -> { try { return agent.memoryContext(ctx); } catch (Exception ignored) { return ""; } }); this.scheduleMaterials = new ScheduleMaterialService(database); this.learningService = new LearningService(database); this.botCommands = new BotCommandService(database, planExecution, learningService); }
   public int port() { return port; }
 
   public void start() throws IOException {
@@ -118,6 +120,7 @@ public final class ApiServer {
     server.createContext("/api/review/today", logged(this::reviewToday));
     server.createContext("/api/learning/goals", logged(this::learningGoals));
     server.createContext("/api/learning/goals/", logged(this::learningGoal));
+    server.createContext("/api/state/version", logged(this::stateVersion));
     server.createContext("/api/stats", logged(this::stats));
     server.createContext("/api/export/xlsx", logged(this::excelExport));
     server.createContext("/api/export/pdf", logged(this::pdfExport));
@@ -744,94 +747,13 @@ public final class ApiServer {
       String text = string(body(e), "text", "").trim();
       if (text.isBlank()) { json(e, 400, Map.of("error", "text_required")); return; }
       Database.Context context = database.contextForExternalUser(e.getRequestHeaders().getFirst("X-Wechat-User-Id"));
-      String normalized = text.replaceAll("[\\s，。！？、,.!?]", "");
-      JsonObject result = new JsonObject(); result.addProperty("handled", true);
-      if (normalized.equals("今天还有什么") || normalized.equals("今天还有哪些")) {
-        result.addProperty("message", todayOpenItems(context));
-      } else if (normalized.equals("计划完成得怎么样")) {
-        result.addProperty("message", progressSummary(context));
-      } else {
-        result.addProperty("handled", false);
-      }
-      json(e, 200, result);
+      BotCommandService.CommandResult result = botCommands.handle(text, context);
+      JsonObject body = new JsonObject();
+      body.addProperty("handled", result.handled());
+      if (result.handled()) body.addProperty("message", result.message());
+      json(e, 200, body);
     } catch (IllegalArgumentException ex) { json(e, 400, Map.of("error", ex.getMessage())); }
       catch (SQLException ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "database_error", "message", ex.getMessage())); }
-  }
-
-  private String todayOpenItems(Database.Context context) throws SQLException {
-    List<String> schedules = new ArrayList<>();
-    List<String> todos = new ArrayList<>();
-    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("SELECT title FROM schedule_items WHERE workspace_id = ? AND DATE(start_at) = CURDATE() AND status <> 'done' ORDER BY start_at LIMIT 10")) {
-      p.setBytes(1, Database.uuidBytes(context.workspaceId())); try (ResultSet rs = p.executeQuery()) { while (rs.next()) schedules.add("日程：" + rs.getString(1)); }
-    }
-    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("SELECT title FROM todos WHERE workspace_id = ? AND (due_at IS NULL OR DATE(due_at) = CURDATE()) AND status <> 'done' ORDER BY due_at LIMIT 10")) {
-      p.setBytes(1, Database.uuidBytes(context.workspaceId())); try (ResultSet rs = p.executeQuery()) { while (rs.next()) todos.add("待办：" + rs.getString(1)); }
-    }
-    List<String> all = new ArrayList<>(); all.addAll(schedules); all.addAll(todos);
-    if (all.isEmpty()) return "今天没有未完成的日程或待办，按自己的节奏休息一下。";
-    return "今天还有：\n- " + String.join("\n- ", all);
-  }
-
-  private String progressSummary(Database.Context context) throws SQLException {
-    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("SELECT COUNT(*), COALESCE(AVG(progress), 0) FROM plans WHERE workspace_id = ? AND status = 'active'")) {
-      p.setBytes(1, Database.uuidBytes(context.workspaceId())); try (ResultSet rs = p.executeQuery()) {
-        if (!rs.next()) return "暂时还没有长期计划。";
-        return "当前有 " + rs.getInt(1) + " 个进行中的长期计划，平均完成度 " + Math.round(rs.getDouble(2)) + "%。";
-      }
-    }
-  }
-
-  private String completeByTitle(Database.Context context, String title) throws SQLException {
-    ItemRef item = findByTitle(context, title);
-    if (item == null) return "没有找到名称包含“" + title + "”的计划、日程或待办。";
-    String status = item.table.equals("plans") ? "completed" : "done";
-    String sql = item.table.equals("todos")
-        ? "UPDATE todos SET status = ? WHERE id = ? AND workspace_id = ?"
-        : "UPDATE " + item.table + " SET status = ?, progress = 100 WHERE id = ? AND workspace_id = ?";
-    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
-      p.setString(1, status); p.setBytes(2, Database.uuidBytes(item.id)); p.setBytes(3, Database.uuidBytes(context.workspaceId())); p.executeUpdate();
-    }
-    return "已完成：" + item.title;
-  }
-
-  private String deleteByTitle(Database.Context context, String title) throws SQLException {
-    ItemRef item = findByTitle(context, title);
-    if (item == null) return "没有找到名称包含“" + title + "”的记录。";
-    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("DELETE FROM " + item.table + " WHERE id = ? AND workspace_id = ?")) {
-      p.setBytes(1, Database.uuidBytes(item.id)); p.setBytes(2, Database.uuidBytes(context.workspaceId())); p.executeUpdate();
-    }
-    return "已删除：" + item.title;
-  }
-
-  private ItemRef findByTitle(Database.Context context, String title) throws SQLException {
-    String[] tables = {"todos", "schedule_items", "plans"};
-    for (String table : tables) {
-      try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("SELECT id, title FROM " + table + " WHERE workspace_id = ? AND title LIKE ? ORDER BY updated_at DESC LIMIT 1")) {
-        p.setBytes(1, Database.uuidBytes(context.workspaceId())); p.setString(2, "%" + title + "%");
-        try (ResultSet rs = p.executeQuery()) { if (rs.next()) return new ItemRef(table, Database.bytesUuid(rs.getBytes("id")), rs.getString("title")); }
-      }
-    }
-    return null;
-  }
-
-  private record ItemRef(String table, UUID id, String title) {}
-
-  private void insertPlan(Database.Context context, UUID id, String title) throws SQLException {
-    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("INSERT INTO plans (id, workspace_id, owner_id, title, description, color) VALUES (?, ?, ?, ?, ?, ?)")) {
-      p.setBytes(1, Database.uuidBytes(id)); p.setBytes(2, Database.uuidBytes(context.workspaceId())); p.setBytes(3, Database.uuidBytes(context.userId())); p.setString(4, title); p.setString(5, "微信快速记录"); p.setString(6, "#D39A24"); p.executeUpdate();
-    }
-  }
-
-  private void insertTodo(Database.Context context, UUID id, String title) throws SQLException {
-    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("INSERT INTO todos (id, workspace_id, created_by, title, due_at) VALUES (?, ?, ?, ?, ?)")) {
-      p.setBytes(1, Database.uuidBytes(id)); p.setBytes(2, Database.uuidBytes(context.workspaceId())); p.setBytes(3, Database.uuidBytes(context.userId())); p.setString(4, title); p.setTimestamp(5, Timestamp.valueOf(LocalDateTime.now())); p.executeUpdate();
-    }
-  }
-
-  private void insertSchedule(Database.Context context, UUID id, String title) throws SQLException {
-    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("INSERT INTO schedule_items (id, workspace_id, created_by, title, start_at) VALUES (?, ?, ?, ?, ?)")) {
-      p.setBytes(1, Database.uuidBytes(id)); p.setBytes(2, Database.uuidBytes(context.workspaceId())); p.setBytes(3, Database.uuidBytes(context.userId())); p.setString(4, title); p.setTimestamp(5, Timestamp.valueOf(LocalDateTime.now())); p.executeUpdate();
-    }
   }
 
   private void insertNote(Database.Context context, UUID id, String title) throws SQLException {
@@ -1015,6 +937,29 @@ public final class ApiServer {
     } catch (SQLException ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "database_error", "message", ex.getMessage())); }
   }
 
+  /** 数据版本号：聚合工作区各主表最新的 updated_at，供前端轻量轮询判断是否有 bot 等外部写入需要刷新。 */
+  private void stateVersion(HttpExchange e) throws IOException {
+    try {
+      if (options(e)) return;
+      if (!"GET".equals(e.getRequestMethod())) { json(e, 405, Map.of("error", "method_not_allowed")); return; }
+      UUID workspace = workspace(e);
+      String sql = "SELECT GREATEST("
+          + "COALESCE((SELECT MAX(updated_at) FROM plans WHERE workspace_id=?),'2000-01-01'),"
+          + "COALESCE((SELECT MAX(updated_at) FROM schedule_items WHERE workspace_id=?),'2000-01-01'),"
+          + "COALESCE((SELECT MAX(updated_at) FROM todos WHERE workspace_id=?),'2000-01-01'),"
+          + "COALESCE((SELECT MAX(updated_at) FROM notes WHERE workspace_id=?),'2000-01-01'),"
+          + "COALESCE((SELECT MAX(updated_at) FROM learning_goals WHERE workspace_id=?),'2000-01-01'))";
+      try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
+        for (int i = 1; i <= 5; i++) p.setBytes(i, Database.uuidBytes(workspace));
+        try (ResultSet rs = p.executeQuery()) {
+          rs.next();
+          Timestamp latest = rs.getTimestamp(1);
+          json(e, 200, Map.of("version", latest == null ? 0 : latest.getTime()));
+        }
+      }
+    } catch (SQLException ex) { ex.printStackTrace(); json(e, 500, Map.of("error", "database_error", "message", ex.getMessage())); }
+  }
+
   private JsonObject loadStats(UUID workspace) throws SQLException {
       LocalDate today = LocalDate.now();
       LocalDate from = YearMonth.from(today).minusMonths(5).atDay(1);
@@ -1180,11 +1125,12 @@ public final class ApiServer {
       try (InputStream in = e.getRequestBody()) { raw = in.readAllBytes(); }
       if (raw.length > maxBytes) { json(e, 413, Map.of("error", "file_too_large", "message", "图片不能超过 10 MB")); return; }
 
-      // 保存到 web/dist/uploads/notes/ 目录
+      // 保存到前端构建目录的 uploads/notes/ 下，与 StaticFileHandler 托管的目录保持一致，
+      // 避免用 CWD 相对路径时（如从 backend 目录启动）写进 backend/web/dist 导致图片 404、静态目录被遮蔽。
       String ext = contentType.contains("png") ? "png" : contentType.contains("gif") ? "gif"
           : contentType.contains("webp") ? "webp" : contentType.contains("svg") ? "svg" : "jpg";
       String filename = UUID.randomUUID() + "." + ext;
-      java.nio.file.Path uploadDir = java.nio.file.Path.of("web/dist/uploads/notes");
+      java.nio.file.Path uploadDir = StaticFileHandler.resolveWebRoot().resolve("uploads/notes");
       java.nio.file.Files.createDirectories(uploadDir);
       java.nio.file.Files.write(uploadDir.resolve(filename), raw);
 
@@ -1219,7 +1165,9 @@ public final class ApiServer {
   private void list(HttpExchange e, String table) throws SQLException, IOException {
     String softDelete = List.of("plans", "todos", "schedule_items").contains(table) ? " AND deleted_at IS NULL" : "";
     // 日历日程：不显示已删计划的日程（删除计划时其日程仍留在表里，这里过滤掉，避免日历残留孤儿项）。
-    String sql = table.equals("schedule_items")
+    String sql = table.equals("plans")
+        ? "SELECT * FROM plans WHERE workspace_id = ?" + softDelete + " ORDER BY created_at ASC, id ASC"
+        : table.equals("schedule_items")
         ? "SELECT s.* FROM schedule_items s LEFT JOIN plans p ON p.id=s.plan_id "
             + "WHERE s.workspace_id = ? AND s.deleted_at IS NULL AND (s.plan_id IS NULL OR p.deleted_at IS NULL) "
             + "ORDER BY s.updated_at DESC"

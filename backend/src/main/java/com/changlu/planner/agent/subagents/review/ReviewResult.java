@@ -1,6 +1,7 @@
 package com.changlu.planner.agent.subagents.review;
 
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.stream.JsonReader;
@@ -32,10 +33,10 @@ public record ReviewResult(
     return new ReviewResult(
         text(facts, "date", LocalDate.now().toString()),
         facts,
-        summary,
-        array(content, "highlights"),
-        array(content, "risks"),
-        array(content, "nextActions"),
+        sanitizeText(summary),
+        sanitize(array(content, "highlights")),
+        sanitize(array(content, "risks")),
+        sanitize(array(content, "nextActions")),
         generatedAt,
         true);
   }
@@ -47,12 +48,7 @@ public record ReviewResult(
     if (structured != null && structured.has("summary")) {
       return fromGenerated(facts, structured, generatedAt);
     }
-    String summary = raw
-        .replaceAll("(?s)<think>.*?</think>", "")
-        .replace("```json", "")
-        .replace("```JSON", "")
-        .replace("```", "")
-        .trim();
+    String summary = sanitizeText(raw);
     if (summary.isBlank()) throw new IllegalStateException("AI 返回了空的复盘内容");
     return new ReviewResult(
         text(facts, "date", LocalDate.now().toString()), facts, summary,
@@ -150,10 +146,10 @@ public record ReviewResult(
     return new ReviewResult(
         text(facts, "date", LocalDate.now().toString()),
         facts,
-        summary,
-        array(suggestions, "highlights"),
-        array(suggestions, "risks"),
-        array(suggestions, "nextActions"),
+        sanitizeText(summary),
+        sanitize(array(suggestions, "highlights")),
+        sanitize(array(suggestions, "risks")),
+        sanitize(array(suggestions, "nextActions")),
         generatedAt,
         suggestions.has("aiGenerated") && suggestions.get("aiGenerated").getAsBoolean());
   }
@@ -178,6 +174,43 @@ public record ReviewResult(
     value.addProperty("generatedAt", generatedAt);
     value.addProperty("aiGenerated", aiGenerated);
     return value;
+  }
+
+  /** 复盘内容必须是可读中文：统一清洗模型偶发的代码块/Markdown/JSON 残留后再落库与展示。 */
+  static String sanitizeText(String value) {
+    if (value == null) return "";
+    String raw = value.trim();
+    String text = raw
+        .replaceAll("(?s)<think>.*?</think>", "")
+        .replaceAll("```json", "")
+        .replaceAll("```JSON", "")
+        // 代码围栏（含语言标注）连同围栏内的内容一并去掉
+        .replaceAll("(?s)```[a-zA-Z]*.*?(?:```|$)", "")
+        .replaceAll("```", "")
+        .replace("`", "")
+        .trim();
+    // 围栏剥掉后整段仍是 JSON 对象：抽 summary 作为可读正文
+    JsonObject embedded = parseEmbeddedJson(text);
+    if (embedded != null && embedded.has("summary")) {
+      return sanitizeText(text(embedded, "summary", text));
+    }
+    // 清洗后若被完全删空（原文几乎全是代码），回退保留原文，避免页面出现空白总结。
+    return text.isBlank() ? raw : text;
+  }
+
+  /** 数组项逐条清洗，只保留清洗后非空的字符串项。 */
+  private static JsonArray sanitize(JsonArray values) {
+    JsonArray cleaned = new JsonArray();
+    if (values == null) return cleaned;
+    for (JsonElement element : values) {
+      if (element.isJsonPrimitive() && element.getAsJsonPrimitive().isString()) {
+        String item = sanitizeText(element.getAsString());
+        if (!item.isBlank()) cleaned.add(item);
+      } else {
+        cleaned.add(element.deepCopy());
+      }
+    }
+    return cleaned;
   }
 
   private static JsonArray array(JsonObject object, String name) {

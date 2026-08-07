@@ -99,8 +99,9 @@ public final class BriefingSubagent implements Subagent {
   }
 
   private List<PlanRow> loadPlans(Database.Context context) throws SQLException {
+    // 与工作台列表一致，排除已软删除的计划，避免简报出现回收站里的记录。
     String sql = "SELECT title, progress FROM plans WHERE workspace_id = ? AND status = 'active' "
-        + "ORDER BY progress DESC LIMIT 5";
+        + "AND deleted_at IS NULL ORDER BY progress DESC LIMIT 5";
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
       p.setBytes(1, Database.uuidBytes(context.workspaceId()));
       try (ResultSet rs = p.executeQuery()) {
@@ -113,7 +114,8 @@ public final class BriefingSubagent implements Subagent {
 
   private List<ScheduleRow> loadSchedules(Database.Context context) throws SQLException {
     String sql = "SELECT TIME_FORMAT(start_at, '%H:%i'), title, status, progress FROM schedule_items "
-        + "WHERE workspace_id = ? AND DATE(start_at) = CURDATE() ORDER BY start_at LIMIT 10";
+        + "WHERE workspace_id = ? AND DATE(start_at) = CURDATE() AND deleted_at IS NULL "
+        + "ORDER BY start_at LIMIT 10";
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
       p.setBytes(1, Database.uuidBytes(context.workspaceId()));
       try (ResultSet rs = p.executeQuery()) {
@@ -127,7 +129,7 @@ public final class BriefingSubagent implements Subagent {
 
   private List<TodoRow> loadTodos(Database.Context context) throws SQLException {
     String sql = "SELECT title, due_at FROM todos WHERE workspace_id = ? AND status <> 'done' "
-        + "ORDER BY due_at IS NULL, due_at LIMIT 10";
+        + "AND deleted_at IS NULL ORDER BY due_at IS NULL, due_at LIMIT 10";
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(sql)) {
       p.setBytes(1, Database.uuidBytes(context.workspaceId()));
       try (ResultSet rs = p.executeQuery()) {

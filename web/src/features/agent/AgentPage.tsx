@@ -115,17 +115,44 @@ const draftActionLabels: Record<string, string> = {
   create_todo: '创建待办',
   create_schedule: '加入日程',
   update_plan: '调整计划',
+  update_stage: '调整阶段',
   update_task: '调整任务',
   update_todo: '调整待办',
   update_schedule: '调整日程',
   delete_plan: '删除计划',
+  delete_stage: '删除阶段',
   delete_task: '删除任务',
   delete_todo: '删除待办',
   delete_schedule: '删除日程',
+  restore_plan: '恢复计划',
+  restore_stage: '恢复阶段',
+  restore_task: '恢复任务',
+  restore_todo: '恢复待办',
+  restore_schedule: '恢复日程',
+  complete_task: '完成任务',
+  complete_todo: '完成待办',
+  complete_schedule: '完成日程',
+  delay_task: '推迟任务',
+  delay_todo: '推迟待办',
+  delay_schedule: '推迟日程',
+  block_task: '标记受阻',
+  skip_task: '跳过任务',
+  cancel_task: '取消任务',
+  batch_reschedule: '批量调整日程',
+  update_preference: '更新偏好',
   create_learning_goal: '创建学习目标',
   update_learning_goal: '调整学习目标',
   delete_learning_goal: '删除学习目标',
   create_learning_plan: '创建学习计划',
+}
+
+/** 草案动作字段值的英文枚举 → 中文展示。 */
+const draftFieldValueLabels: Record<string, Record<string, string>> = {
+  priority: { high: '高', medium: '中', low: '低' },
+  status: {
+    planned: '已规划', active: '进行中', in_progress: '进行中', paused: '已暂停',
+    completed: '已完成', done: '已完成', cancelled: '已取消', pending: '待处理',
+  },
 }
 
 const draftFieldLabels: Record<string, string> = {
@@ -142,10 +169,13 @@ const draftFieldLabels: Record<string, string> = {
   weeklyHours: '每周时长',
 }
 
-function formatDraftValue(value: unknown) {
+function formatDraftValue(key: string, value: unknown) {
   if (value == null || value === '') return '未设置'
   if (typeof value === 'object') return '已包含详细内容'
-  return String(value)
+  const text = String(value)
+  const valueLabels = draftFieldValueLabels[key]
+  if (valueLabels && text in valueLabels) return valueLabels[text]
+  return text
 }
 
 function draftActionDetails(action: AiDraft['actions'][number]) {
@@ -158,7 +188,7 @@ function draftActionDetails(action: AiDraft['actions'][number]) {
       return total + (Array.isArray(tasks) ? tasks.length : 0)
     }, 0)
     return [
-      fields.title ? `计划：${formatDraftValue(fields.title)}` : '',
+      fields.title ? `计划：${formatDraftValue('title', fields.title)}` : '',
       stages.length ? `阶段：${stages.length} 个` : '',
       taskCount ? `任务：${taskCount} 个` : '',
     ].filter(Boolean)
@@ -166,7 +196,7 @@ function draftActionDetails(action: AiDraft['actions'][number]) {
   return Object.entries(fields)
     .filter(([key]) => key in draftFieldLabels)
     .slice(0, 3)
-    .map(([key, value]) => `${draftFieldLabels[key]}：${formatDraftValue(value)}`)
+    .map(([key, value]) => `${draftFieldLabels[key]}：${formatDraftValue(key, value)}`)
 }
 
 function formatScheduleTime(value?: unknown) {
@@ -340,7 +370,7 @@ function travelPlanPreview(data: TravelPlanData) {
   return (
     <div className="ai-travel-plan-preview">
       <div className="ai-travel-plan-meta">
-        <div><MapPin size={15} /><strong>{request.destination ?? '旅行目的地'}旅行计划</strong></div>
+        <div><MapPin size={15} /><strong>{request.destination ?? '旅行目的地'}旅行计划</strong>{request.origin ? <em className="ai-travel-origin">从 {request.origin} 出发</em> : null}</div>
         <span>{request.startDate ?? ''}{request.endDate ? ` 至 ${request.endDate}` : ''}</span>
       </div>
       {revisionDiff.length > 0 && (

@@ -13,8 +13,8 @@ class TravelMigrationTest {
     Field field = DatabaseMigrator.class.getDeclaredField("MIGRATIONS");
     field.setAccessible(true);
     @SuppressWarnings("unchecked") List<String> migrations = (List<String>) field.get(null);
-    assertEquals(List.of("017_learning_metrics.sql", "018_travel_schedule_context.sql", "019_travel_refresh.sql"),
-        migrations.subList(migrations.size() - 3, migrations.size()));
+    assertEquals(List.of("017_learning_metrics.sql", "018_travel_schedule_context.sql", "019_travel_refresh.sql", "020_reminder_extensions.sql"),
+        migrations.subList(migrations.size() - 4, migrations.size()));
 
     String context = resource("/db/migrations/018_travel_schedule_context.sql");
     String refresh = resource("/db/migrations/019_travel_refresh.sql");

@@ -137,7 +137,7 @@ export interface TravelWeather {
 }
 
 export interface TravelPlanData extends Record<string, unknown> {
-  request?: Record<string, unknown> & { destination?: string; startDate?: string; endDate?: string }
+  request?: Record<string, unknown> & { destination?: string; origin?: string; startDate?: string; endDate?: string }
   days?: TravelDay[]
   weather?: TravelWeather[]
   budgetEstimate?: {

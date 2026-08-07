@@ -116,6 +116,30 @@ class LearningSubagentTest {
   }
 
   @Test
+  void naturalCreateGoalWithScheduleIsNotMisreadAsProgressAnalysis() throws Exception {
+    // 回归保护：用户发「90天内系统学会Python数据分析，每周8小时」时，"数据分析"里的"分析"
+    // 不得把 create_goal 误判成 analyze_progress；"学会"+时长信号必须路由到创建。
+    subagent = new LearningSubagent(null, model);
+    assertEquals("create_goal", subagent.classifyIntent("90天内系统学会Python数据分析，每周8小时"));
+    assertEquals("create_goal", subagent.classifyIntent("我要掌握办公自动化VBA，每周6小时"));
+    // 带"创建学习目标"前缀的既有路径不受影响
+    assertEquals("create_goal", subagent.classifyIntent("创建学习目标：三个月后雅思考到7分，每周10小时"));
+  }
+
+  @Test
+  void analyzeAndProgressWordsStillRouteToProgressAnalysis() throws Exception {
+    // 回归保护：真正的进度分析请求不被新加入的"每周/每天/学会"信号抢走。
+    subagent = new LearningSubagent(null, model);
+    assertEquals("analyze_progress", subagent.classifyIntent("分析我的学习进度"));
+    assertEquals("analyze_progress", subagent.classifyIntent("看看我的学习进展如何"));
+    assertEquals("analyze_progress", subagent.classifyIntent("分析每天的学习效率"));
+    assertEquals("delete_goal", subagent.classifyIntent("删除学习目标"));
+    assertEquals("update_goal", subagent.classifyIntent("把雅思目标改到8分"));
+    assertEquals("view_stats", subagent.classifyIntent("学习统计"));
+    assertEquals("general", subagent.classifyIntent("你好"));
+  }
+
+  @Test
   void allIntentPathsReturnJsonObjectNotException() throws Exception {
     // 验证所有意图路径在异常时都返回 JsonObject 而不抛异常（优雅降级）
     subagent = new LearningSubagent(null, model);
@@ -175,6 +199,43 @@ class LearningSubagentTest {
     String systemContent = messages.get(0).getAsJsonObject().get("content").getAsString();
     assertTrue(systemContent.contains("conflicts"));
     assertTrue(systemContent.contains("rationale"));
+  }
+
+  @Test
+  void curriculumMessagesUseCompactStageSpec() {
+    // 紧凑大纲：阶段只带主题与模板，不再要求一次性输出逐日 dailyPlan（避免长周期输出超时）。
+    JsonObject context = new JsonObject();
+    context.addProperty("currentDate", "2026-08-07");
+    JsonArray messages = LearningPrompt.curriculumMessages(context);
+    assertEquals(2, messages.size());
+    String systemContent = messages.get(0).getAsJsonObject().get("content").getAsString();
+    assertTrue(systemContent.contains("topics"));
+    assertTrue(systemContent.contains("dailyTemplate"));
+    assertFalse(systemContent.contains("dailyPlan"));
+    assertTrue(systemContent.contains("逐日展开"));
+  }
+
+  @Test
+  void dailyChunkMessagesRequireExactDayCount() {
+    JsonObject context = new JsonObject();
+    context.addProperty("stageTitle", "基础阶段");
+    context.addProperty("startDate", "2026-08-07");
+    context.addProperty("days", 30);
+    JsonArray messages = LearningPrompt.dailyChunkMessages(context);
+    assertEquals(2, messages.size());
+    assertEquals("system", messages.get(0).getAsJsonObject().get("role").getAsString());
+    String systemContent = messages.get(0).getAsJsonObject().get("content").getAsString();
+    assertTrue(systemContent.contains("条目数必须与输入的 days 完全一致"));
+    assertTrue(systemContent.contains("第 1 条对应 startDate"));
+  }
+
+  @Test
+  void subagentTimeoutAllowsChunkedDailyExpansion() {
+    // 回归保护：分块展开需要跨多次模型调用，预算必须显著大于单块模型调用超时。
+    subagent = new LearningSubagent(null, model);
+    long timeoutSeconds = subagent.definition().timeout().getSeconds();
+    assertTrue(timeoutSeconds >= 300,
+        "learning 子代理预算应 ≥300s 以容纳分块展开，当前=" + timeoutSeconds + "s");
   }
 
   @Test

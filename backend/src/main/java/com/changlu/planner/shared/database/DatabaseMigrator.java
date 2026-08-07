@@ -37,7 +37,8 @@ final class DatabaseMigrator {
         "016_ai_image_assets.sql",
         "017_learning_metrics.sql",
         "018_travel_schedule_context.sql",
-        "019_travel_refresh.sql"
+        "019_travel_refresh.sql",
+        "020_reminder_extensions.sql"
   );
 
   private DatabaseMigrator() {}

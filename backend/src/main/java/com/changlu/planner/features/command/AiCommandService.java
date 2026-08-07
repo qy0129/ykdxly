@@ -22,6 +22,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -407,7 +408,7 @@ public final class AiCommandService {
       p.setBytes(1, Database.uuidBytes(context.workspaceId())); p.setBytes(2, Database.uuidBytes(context.userId()));
       try (ResultSet rs = p.executeQuery()) { while (rs.next()) {
         JsonObject row = new JsonObject(); row.addProperty("entityType", rs.getString(1)); row.addProperty("action", rs.getString(2));
-        row.addProperty("note", rs.getString(3)); row.addProperty("actualMinutes", integer(rs.getObject(4)));
+        row.addProperty("note", readableExecutionNote(rs.getString(3))); row.addProperty("actualMinutes", integer(rs.getObject(4)));
         row.addProperty("occurredAt", rs.getTimestamp(5).toLocalDateTime().toString()); logs.add(row);
       }}
     }
@@ -960,12 +961,18 @@ public final class AiCommandService {
     return result;
   }
 
-  /** 供 Subagent 注入的共享上下文：长期记忆 + 最近对话原文，让专业执行器也能结合上文。 */
+  /** 供 Subagent 注入的共享上下文：长期记忆 + 待确认草案 + 最近对话原文，让专业执行器也能结合上文。 */
   public String sharedContext(UUID conversationId, Database.Context identity) throws SQLException {
     StringBuilder builder = new StringBuilder();
     String memoryText = memory.context(identity);
     if (!memoryText.isBlank()) {
       builder.append("用户长期记忆（稳定的偏好、个性和事实，请自然遵循）：\n").append(memoryText);
+    }
+    // 待确认草案：让模型知道已有未执行草案，不得声称"已创建"，除非用户已回复确认。这是防止虚假确认的关键。
+    String pendingNote = pendingDraftNote(conversationId, identity);
+    if (!pendingNote.isBlank()) {
+      if (!builder.isEmpty()) builder.append('\n');
+      builder.append(pendingNote);
     }
     JsonArray history = historyPayload(conversationId, identity, 16);
     if (!history.isEmpty()) {
@@ -982,6 +989,43 @@ public final class AiCommandService {
       }
     }
     return builder.toString().trim();
+  }
+
+  /**
+   * 查询当前会话仍待确认的草案并生成警告文本。防止模型在用户尚未确认草案时声称"已创建/已写入"，
+   * 造成 bot 端虚假确认而前端无数据的误导。无待确认草案时返回空字符串。
+   */
+  private String pendingDraftNote(UUID conversationId, Database.Context identity) throws SQLException {
+    if (conversationId == null) return "";
+    StringBuilder note = new StringBuilder();
+    try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(
+        "SELECT id, request_text, reply FROM ai_action_drafts "
+            + "WHERE conversation_id=? AND workspace_id=? AND user_id=? "
+            + "AND status='pending' AND expires_at>NOW() ORDER BY created_at DESC")) {
+      p.setBytes(1, Database.uuidBytes(conversationId));
+      p.setBytes(2, Database.uuidBytes(identity.workspaceId()));
+      p.setBytes(3, Database.uuidBytes(identity.userId()));
+      try (ResultSet rs = p.executeQuery()) {
+        while (rs.next()) {
+          UUID id = Database.bytesUuid(rs.getBytes(1));
+          String request = rs.getString(2);
+          String reply = rs.getString(3);
+          if (!note.isEmpty()) note.append('\n');
+          note.append("当前有一个待确认草案（编号：").append(shortCode(id)).append("）。")
+              .append("用户尚未确认执行，相关内容并未真正创建或写入。")
+              .append("如果用户想让这个草案生效，必须明确回复\"确认 ").append(shortCode(id)).append("\"；")
+              .append("如果你想取消则回复\"取消 ").append(shortCode(id)).append("\"。")
+              .append("在用户确认之前，不要声称这些计划/目标已创建，也不要重复生成相同内容的草案。");
+          if (request != null && !request.isBlank()) {
+            note.append(" 草案对应请求：").append(request.replace("\n", " "));
+          }
+          if (reply != null && !reply.isBlank()) {
+            note.append(" 草案说明：").append(reply.replace("\n", " "));
+          }
+        }
+      }
+    }
+    return note.toString();
   }
 
   private JsonArray historyPayload(UUID conversationId, Database.Context owner) throws SQLException {
@@ -1006,11 +1050,35 @@ public final class AiCommandService {
     JsonArray result = new JsonArray(); for (int i = rows.size() - 1; i >= 0; i--) result.add(rows.get(i)); return result;
   }
 
+  /** 执行记录里的 note/reason 可能存内部代号（如 diet_agent、create_plan），模型会照抄进复盘总结；统一转成中文后再喂给模型。 */
+  private static String readableExecutionNote(String value) {
+    if (value == null) return "";
+    String code = value.trim();
+    String label = EXECUTION_NOTE_LABELS.get(code);
+    return label == null ? code : label;
+  }
+
+  private static final Map<String, String> EXECUTION_NOTE_LABELS = Map.ofEntries(
+      Map.entry("diet_agent", "饮食代理"), Map.entry("learning_agent", "学习代理"),
+      Map.entry("travel_agent", "旅行代理"), Map.entry("planning-agent", "计划助手"),
+      Map.entry("create_plan", "创建计划"), Map.entry("update_plan", "调整计划"), Map.entry("delete_plan", "删除计划"), Map.entry("restore_plan", "恢复计划"),
+      Map.entry("create_stage", "创建阶段"), Map.entry("update_stage", "调整阶段"), Map.entry("delete_stage", "删除阶段"), Map.entry("restore_stage", "恢复阶段"),
+      Map.entry("create_task", "创建任务"), Map.entry("update_task", "调整任务"), Map.entry("complete_task", "完成任务"),
+      Map.entry("delay_task", "推迟任务"), Map.entry("block_task", "标记受阻"), Map.entry("skip_task", "跳过任务"),
+      Map.entry("cancel_task", "取消任务"), Map.entry("delete_task", "删除任务"), Map.entry("restore_task", "恢复任务"),
+      Map.entry("create_todo", "创建待办"), Map.entry("update_todo", "调整待办"), Map.entry("complete_todo", "完成待办"),
+      Map.entry("delay_todo", "推迟待办"), Map.entry("delete_todo", "删除待办"), Map.entry("restore_todo", "恢复待办"),
+      Map.entry("create_schedule", "创建日程"), Map.entry("update_schedule", "调整日程"), Map.entry("complete_schedule", "完成日程"),
+      Map.entry("delay_schedule", "推迟日程"), Map.entry("delete_schedule", "删除日程"), Map.entry("restore_schedule", "恢复日程"),
+      Map.entry("batch_reschedule", "批量调整日程"), Map.entry("update_preference", "更新偏好"),
+      Map.entry("create_learning_goal", "创建学习目标"), Map.entry("update_learning_goal", "调整学习目标"),
+      Map.entry("delete_learning_goal", "删除学习目标"), Map.entry("create_learning_plan", "创建学习计划"));
+
   private JsonArray recentExecution(Database.Context context) throws SQLException {
     JsonArray rows = new JsonArray();
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement("SELECT entity_type,action_type,reason,actual_minutes,occurred_at FROM execution_records WHERE workspace_id=? AND user_id=? AND occurred_at>=DATE_SUB(NOW(),INTERVAL 7 DAY) AND undone_at IS NULL ORDER BY occurred_at DESC LIMIT 80")) {
       p.setBytes(1, Database.uuidBytes(context.workspaceId())); p.setBytes(2, Database.uuidBytes(context.userId()));
-      try (ResultSet rs = p.executeQuery()) { while (rs.next()) { JsonObject row = new JsonObject(); row.addProperty("entityType", rs.getString(1)); row.addProperty("action", rs.getString(2)); row.addProperty("reason", rs.getString(3)); row.addProperty("actualMinutes", integer(rs.getObject(4))); row.addProperty("occurredAt", rs.getTimestamp(5).toLocalDateTime().toString()); rows.add(row); } }
+      try (ResultSet rs = p.executeQuery()) { while (rs.next()) { JsonObject row = new JsonObject(); row.addProperty("entityType", rs.getString(1)); row.addProperty("action", rs.getString(2)); row.addProperty("reason", readableExecutionNote(rs.getString(3))); row.addProperty("actualMinutes", integer(rs.getObject(4))); row.addProperty("occurredAt", rs.getTimestamp(5).toLocalDateTime().toString()); rows.add(row); } }
     }
     return rows;
   }

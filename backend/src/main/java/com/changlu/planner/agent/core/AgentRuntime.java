@@ -260,9 +260,22 @@ public final class AgentRuntime implements AutoCloseable {
     state.userTurns.add(message);
     state.pendingDraftId = null;
     state.clearPendingQuestions();
-    saveState(run.id(), state);
     JsonObject request = new JsonObject();
     request.addProperty("message", message);
+    // 草案修改和普通 resume 必须使用同一份结构化上下文；仅传修改文字会丢失
+    // 旅行日期、饮食画像和学习目标参数，导致专业 subagent 重新追问或生成空结果。
+    reuseTaskArguments(request, state);
+    restoreDocumentIds(request, state);
+    // 上一版方案数据要留给 subagent 做局部修订：draft/actions/planReview 是临时标记，
+    // 保留 days/mealPlan/request 等结构化计划内容；学习计划的实质在 actions 里，先快照成 previousPlan 再移除。
+    if (state.taskData.has("actions") && state.taskData.get("actions").isJsonArray()) {
+      state.taskData.add("previousPlan", state.taskData.get("actions").deepCopy());
+    }
+    state.taskData.remove("draft");
+    state.taskData.remove("actions");
+    state.taskData.remove("planReview");
+    state.taskData.remove("planApprovalRequired");
+    saveState(run.id(), state);
     request.addProperty("conversationId", run.conversationId().toString());
     return execute(run.id(), request, identity, run.channel(), run.iteration());
   }
@@ -350,6 +363,7 @@ public final class AgentRuntime implements AutoCloseable {
                              int currentIteration) throws Exception {
     RunRow run = run(runId, identity);
     AgentLoopState state = loadState(run);
+    rememberTaskArguments(state, input);
     // 每次 execute 入口都刷新 deadline：resume/确认后续步骤时重新给足预算，只约束单次调用内的循环。
     state.deadlineEpochMs = Instant.now().plus(LOOP_TIMEOUT).toEpochMilli();
     String goal = run.goal();
@@ -431,7 +445,9 @@ public final class AgentRuntime implements AutoCloseable {
         if ("subagent".equals(decision.executorType())) {
           stepRecorder.setCurrentStepId(stepId);
           try {
-            result = executeSubagent(decision, goal, input, runId, identity, channel, state);
+            // 路由使用完整 goal 保留领域上下文；subagent 使用当前轮消息，避免修改草案时被首轮“创建”意图覆盖。
+            String subagentMessage = currentTurn.isBlank() ? goal : currentTurn;
+            result = executeSubagent(decision, subagentMessage, input, runId, identity, channel, state);
           } finally {
             stepRecorder.setCurrentStepId(null);
           }
@@ -467,6 +483,21 @@ public final class AgentRuntime implements AutoCloseable {
           memory.afterExchange(conversationId, userTurn, string(result, "reply", ""), identity);
         }
         firstDispatch = false;
+
+        // AgentResult 的失败是结构化返回，不会进入 catch；必须立即终止本轮，
+        // 否则 pauseStatus 会把它当成普通完成，后续路由可能覆盖真实错误。
+        if ("FAILED".equalsIgnoreCase(string(result, "status", ""))) {
+          String failure = string(result, "reply", string(result, "message", "执行失败"));
+          finishCall(toolCallId, "FAILED", result, failure);
+          stepRecorder.finish(stepId, "FAILED", result, failure, durationMs);
+          state.appendStep(decision.executorType(), decision.executorName(), route, "FAILED", failure);
+          saveState(runId, state);
+          JsonObject response = finishRun(runId, iteration, input, decision, result, identity);
+          failRun(runId, failure);
+          workflow("执行失败", "Agent消息", route, compact(failure));
+          workflow("工作流结束", "系统状态", route, "执行失败");
+          return response;
+        }
 
         finishCall(toolCallId, "COMPLETED", result, null);
         recordProposedTools(runId, iteration, result);
@@ -607,6 +638,14 @@ public final class AgentRuntime implements AutoCloseable {
     }
   }
 
+  /** 保存首轮结构化参数，供草案修改和 WAITING_USER 恢复复用。 */
+  private void rememberTaskArguments(AgentLoopState state, JsonObject input) {
+    if (input == null || !input.has("arguments") || !input.get("arguments").isJsonObject()) return;
+    JsonObject arguments = input.getAsJsonObject("arguments");
+    if (arguments.isEmpty()) return;
+    state.taskData.add("request", arguments.deepCopy());
+  }
+
   /** 把已执行器累积的结构化数据（如 diet 的 mealPlan）带回到最终响应。 */
   private void mergeAccumulatedData(AgentLoopState state, JsonObject result) {
     if (state.taskData.size() == 0) return;
@@ -716,7 +755,8 @@ public final class AgentRuntime implements AutoCloseable {
         ? response.getAsJsonObject("draft") : null;
     JsonArray questions = response.has("questions") && response.get("questions").isJsonArray()
         ? response.getAsJsonArray("questions") : new JsonArray();
-    String status = draft != null ? "WAITING_CONFIRMATION" : questions.isEmpty() ? "COMPLETED" : "WAITING_USER";
+    String status = "FAILED".equalsIgnoreCase(string(toolResult, "status", ""))
+        ? "FAILED" : draft != null ? "WAITING_CONFIRMATION" : questions.isEmpty() ? "COMPLETED" : "WAITING_USER";
     response.addProperty("status", status);
     UUID draftId = draft == null ? null : UUID.fromString(draft.get("id").getAsString());
     try (Connection c = database.connection(); PreparedStatement p = c.prepareStatement(

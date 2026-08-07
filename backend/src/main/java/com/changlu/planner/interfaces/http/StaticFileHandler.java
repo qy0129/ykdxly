@@ -40,7 +40,7 @@ final class StaticFileHandler implements HttpHandler {
       return;
     }
 
-    Path root = webRoot();
+    Path root = resolveWebRoot();
     String decoded = URLDecoder.decode(requestPath, StandardCharsets.UTF_8);
     Path requested = root.resolve(decoded.substring(1)).normalize();
     if (!requested.startsWith(root)) {
@@ -69,14 +69,46 @@ final class StaticFileHandler implements HttpHandler {
     }
   }
 
-  /** 优先读取配置；未配置时兼容从项目根目录或 backend 目录启动。 */
-  private Path webRoot() {
+  /**
+   * 解析前端构建目录，兼容任意启动位置：
+   * 配置 > CWD 相对（web/dist、../web/dist）> class 位置向上找项目根。
+   * 只接受真正包含 index.html 的构建目录，避免被 CWD 下仅用于存放上传文件、没有 index.html
+   * 的同名目录（如 backend/web/dist）遮蔽而误报 web_not_built。
+   */
+  static Path resolveWebRoot() {
     String configured = EnvironmentConfig.value("PLANNER_WEB_DIR", "web.directory", "");
-    if (!configured.isBlank()) return Path.of(configured).toAbsolutePath().normalize();
+    if (!configured.isBlank()) {
+      Path path = Path.of(configured).toAbsolutePath().normalize();
+      if (isWebBuild(path)) return path;
+    }
+    Path[] cwdCandidates = { Path.of("web", "dist"), Path.of("..", "web", "dist") };
+    for (Path candidate : cwdCandidates) {
+      Path path = candidate.toAbsolutePath().normalize();
+      if (isWebBuild(path)) return path;
+    }
+    Path fromClass = webBuildFromClassLocation();
+    if (fromClass != null) return fromClass;
+    return Path.of("web", "dist").toAbsolutePath().normalize();
+  }
 
-    Path projectRoot = Path.of("web", "dist");
-    if (Files.isDirectory(projectRoot)) return projectRoot.toAbsolutePath().normalize();
-    return Path.of("..", "web", "dist").toAbsolutePath().normalize();
+  private static boolean isWebBuild(Path root) {
+    return Files.isRegularFile(root.resolve("index.html"));
+  }
+
+  /** 从 class 文件/可执行 jar 所在目录逐级向上找项目根（兼容从 backend/target 或打包 jar 启动）。 */
+  private static Path webBuildFromClassLocation() {
+    try {
+      Path codeSource = Path.of(
+          StaticFileHandler.class.getProtectionDomain().getCodeSource().getLocation().toURI())
+          .toAbsolutePath().normalize();
+      Path dir = Files.isRegularFile(codeSource) ? codeSource.getParent() : codeSource;
+      for (int i = 0; i < 6 && dir != null; i++) {
+        Path candidate = dir.resolve("web").resolve("dist");
+        if (isWebBuild(candidate)) return candidate;
+        dir = dir.getParent();
+      }
+    } catch (Exception ignored) { }
+    return null;
   }
 
   private void json(HttpExchange exchange, int status, Object value) throws IOException {

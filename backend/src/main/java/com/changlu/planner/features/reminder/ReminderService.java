@@ -86,58 +86,128 @@ public final class ReminderService {
   }
 
   private void syncOutbox(Connection connection, Database.Context context, String channel) throws SQLException {
-    // 先取消尚未投递的旧版本，再用当前待办状态重新生成，处理改期、取消提醒和完成待办。
+    // 先取消尚未投递的旧版本，再用当前数据源状态重新生成，处理改期、取消提醒和完成事项。
     try (PreparedStatement cancel = connection.prepareStatement(
-        "UPDATE notification_outbox SET status='cancelled' WHERE user_id=? AND notification_type='todo_reminder' AND channel=? AND status='pending'")) {
+        "UPDATE notification_outbox SET status='cancelled' WHERE user_id=? "
+            + "AND notification_type IN ('todo_reminder','task_reminder','schedule_reminder') AND channel=? AND status='pending'")) {
       cancel.setBytes(1, Database.uuidBytes(context.userId()));
       cancel.setString(2, channel);
       cancel.executeUpdate();
     }
 
+    upsertTodos(connection, context, channel);
+    upsertTasks(connection, context, channel);
+    upsertSchedules(connection, context, channel);
+  }
+
+  /** 待办提醒：必须显式设置了 reminder_minutes 才会生成提醒。 */
+  private void upsertTodos(Connection connection, Database.Context context, String channel) throws SQLException {
     String query = "SELECT id,title,due_at,reminder_minutes FROM todos "
         + "WHERE workspace_id=? AND created_by=? AND status NOT IN ('done','cancelled') "
         + "AND deleted_at IS NULL AND due_at IS NOT NULL AND reminder_minutes IS NOT NULL";
-    try (PreparedStatement select = connection.prepareStatement(query);
-         PreparedStatement insert = connection.prepareStatement(
-             "INSERT INTO notification_outbox "
-                 + "(id,user_id,notification_type,payload,channel,status,scheduled_at,dedup_key) "
-                 + "VALUES (?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE "
-                 + "payload=VALUES(payload), scheduled_at=VALUES(scheduled_at), "
-                 + "status=IF(notification_outbox.status='cancelled','pending',notification_outbox.status)")) {
+    try (PreparedStatement select = connection.prepareStatement(query)) {
       select.setBytes(1, Database.uuidBytes(context.workspaceId()));
       select.setBytes(2, Database.uuidBytes(context.userId()));
       try (ResultSet rows = select.executeQuery()) {
         while (rows.next()) {
           UUID todoId = Database.bytesUuid(rows.getBytes("id"));
           String title = rows.getString("title");
-          Timestamp dueAt = rows.getTimestamp("due_at");
+          LocalDateTime dueTime = rows.getTimestamp("due_at").toLocalDateTime();
           int reminderMinutes = rows.getInt("reminder_minutes");
-          LocalDateTime dueTime = dueAt.toLocalDateTime();
-          LocalDateTime remindAt = dueTime.minusMinutes(reminderMinutes);
           JsonObject payload = new JsonObject();
+          payload.addProperty("type", "todo_reminder");
           payload.addProperty("todoId", todoId.toString());
           payload.addProperty("title", title);
           payload.addProperty("dueAt", dueTime.toString());
           payload.addProperty("reminderMinutes", reminderMinutes);
-          String dedupKey = "todo:" + todoId + ":" + dueTime + ":" + reminderMinutes + ":" + channel;
-          insert.setBytes(1, Database.uuidBytes(UUID.randomUUID()));
-          insert.setBytes(2, Database.uuidBytes(context.userId()));
-          insert.setString(3, "todo_reminder");
-          insert.setString(4, payload.toString());
-          insert.setString(5, channel);
-          insert.setString(6, "pending");
-          insert.setTimestamp(7, Timestamp.valueOf(remindAt));
-          insert.setString(8, dedupKey);
-          insert.executeUpdate();
+          upsert(connection, context, channel, "todo_reminder", payload,
+              dueTime.minusMinutes(reminderMinutes),
+              "todo:" + todoId + ":" + dueTime + ":" + reminderMinutes + ":" + channel);
         }
       }
+    }
+  }
+
+  /** 计划任务提醒：未显式设置 reminder_minutes 时默认提前 30 分钟。 */
+  private void upsertTasks(Connection connection, Database.Context context, String channel) throws SQLException {
+    String query = "SELECT t.id,t.title,t.due_at,COALESCE(t.reminder_minutes,30) AS reminder_minutes "
+        + "FROM plan_tasks t JOIN plans p ON p.id=t.plan_id "
+        + "WHERE p.workspace_id=? AND t.deleted_at IS NULL AND p.deleted_at IS NULL "
+        + "AND t.status NOT IN ('done','cancelled') AND t.due_at IS NOT NULL";
+    try (PreparedStatement select = connection.prepareStatement(query)) {
+      select.setBytes(1, Database.uuidBytes(context.workspaceId()));
+      try (ResultSet rows = select.executeQuery()) {
+        while (rows.next()) {
+          UUID taskId = Database.bytesUuid(rows.getBytes("id"));
+          String title = rows.getString("title");
+          LocalDateTime dueTime = rows.getTimestamp("due_at").toLocalDateTime();
+          int reminderMinutes = rows.getInt("reminder_minutes");
+          JsonObject payload = new JsonObject();
+          payload.addProperty("type", "task_reminder");
+          payload.addProperty("taskId", taskId.toString());
+          payload.addProperty("title", title);
+          payload.addProperty("dueAt", dueTime.toString());
+          payload.addProperty("reminderMinutes", reminderMinutes);
+          upsert(connection, context, channel, "task_reminder", payload,
+              dueTime.minusMinutes(reminderMinutes),
+              "task:" + taskId + ":" + dueTime + ":" + reminderMinutes + ":" + channel);
+        }
+      }
+    }
+  }
+
+  /** 日程提醒：未显式设置 reminder_minutes 时默认到期即提醒（提前 0 分钟）。 */
+  private void upsertSchedules(Connection connection, Database.Context context, String channel) throws SQLException {
+    String query = "SELECT id,title,start_at,COALESCE(reminder_minutes,0) AS reminder_minutes "
+        + "FROM schedule_items WHERE workspace_id=? AND deleted_at IS NULL "
+        + "AND status NOT IN ('done','cancelled') AND start_at IS NOT NULL";
+    try (PreparedStatement select = connection.prepareStatement(query)) {
+      select.setBytes(1, Database.uuidBytes(context.workspaceId()));
+      try (ResultSet rows = select.executeQuery()) {
+        while (rows.next()) {
+          UUID scheduleId = Database.bytesUuid(rows.getBytes("id"));
+          String title = rows.getString("title");
+          LocalDateTime startTime = rows.getTimestamp("start_at").toLocalDateTime();
+          int reminderMinutes = rows.getInt("reminder_minutes");
+          JsonObject payload = new JsonObject();
+          payload.addProperty("type", "schedule_reminder");
+          payload.addProperty("scheduleId", scheduleId.toString());
+          payload.addProperty("title", title);
+          payload.addProperty("dueAt", startTime.toString());
+          payload.addProperty("reminderMinutes", reminderMinutes);
+          upsert(connection, context, channel, "schedule_reminder", payload,
+              startTime.minusMinutes(reminderMinutes),
+              "schedule:" + scheduleId + ":" + startTime + ":" + reminderMinutes + ":" + channel);
+        }
+      }
+    }
+  }
+
+  private void upsert(Connection connection, Database.Context context, String channel, String type,
+                      JsonObject payload, LocalDateTime scheduledAt, String dedupKey) throws SQLException {
+    try (PreparedStatement insert = connection.prepareStatement(
+        "INSERT INTO notification_outbox "
+            + "(id,user_id,notification_type,payload,channel,status,scheduled_at,dedup_key) "
+            + "VALUES (?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE "
+            + "payload=VALUES(payload), scheduled_at=VALUES(scheduled_at), "
+            + "status=IF(notification_outbox.status='cancelled','pending',notification_outbox.status)")) {
+      insert.setBytes(1, Database.uuidBytes(UUID.randomUUID()));
+      insert.setBytes(2, Database.uuidBytes(context.userId()));
+      insert.setString(3, type);
+      insert.setString(4, payload.toString());
+      insert.setString(5, channel);
+      insert.setString(6, "pending");
+      insert.setTimestamp(7, Timestamp.valueOf(scheduledAt));
+      insert.setString(8, dedupKey);
+      insert.executeUpdate();
     }
   }
 
   private List<Outbox> claimDue(Connection connection, UUID userId, String channel) throws SQLException {
     List<Outbox> due = new ArrayList<>();
     try (PreparedStatement select = connection.prepareStatement(
-        "SELECT id,payload FROM notification_outbox WHERE user_id=? AND notification_type='todo_reminder' "
+        "SELECT id,payload FROM notification_outbox WHERE user_id=? "
+            + "AND notification_type IN ('todo_reminder','task_reminder','schedule_reminder') "
             + "AND channel=? AND status='pending' AND scheduled_at <= NOW() AND attempts < 5 "
             + "ORDER BY scheduled_at LIMIT 20")) {
       select.setBytes(1, Database.uuidBytes(userId));

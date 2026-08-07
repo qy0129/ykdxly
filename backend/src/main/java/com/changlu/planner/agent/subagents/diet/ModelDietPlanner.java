@@ -15,17 +15,28 @@ public final class ModelDietPlanner implements DietPlannerModel {
 
   @Override public JsonObject plan(DietRequest request, JsonArray sources, JsonObject dailyTargets,
                                    List<String> missingFields, String sharedContext) throws Exception {
+    return planWithContext(request, sources, dailyTargets, missingFields, sharedContext,
+        "", new JsonArray());
+  }
+
+  @Override public JsonObject planWithContext(DietRequest request, JsonArray sources,
+                                              JsonObject dailyTargets, List<String> missingFields,
+                                              String sharedContext, String userRequest,
+                                              JsonArray previousMealPlan) throws Exception {
     return model.completeJson("diet-subagent",
-        DietPrompt.messages(requestMessage(request), gson.toJson(request.toJson()),
+        DietPrompt.messages(requestMessage(request, userRequest), gson.toJson(request.toJson()),
             gson.toJson(sources),
             dailyTargets == null ? null : gson.toJson(dailyTargets),
             String.join("、", missingFields),
-            sharedContext),
+            sharedContext, previousMealPlan),
         0.15, 5000, 180, 2);
   }
 
-  private String requestMessage(DietRequest request) {
+  private String requestMessage(DietRequest request, String userRequest) {
     String goal = request.goal() == null || request.goal().isBlank() ? "健康饮食" : request.goal();
-    return goal + " 一周饮食计划";
+    String base = goal + " 一周饮食计划";
+    // 草案修改时把修改文字带进提示词，否则模型只按最初目标生成，改动会被忽略。
+    if (userRequest != null && !userRequest.isBlank()) base += "\n用户最新要求：" + userRequest;
+    return base;
   }
 }

@@ -17,4 +17,16 @@ public interface DietPlannerModel {
    */
   JsonObject plan(DietRequest request, JsonArray sources, JsonObject dailyTargets,
                   List<String> missingFields, String sharedContext) throws Exception;
+
+  /**
+   * 带修改上下文的生成入口：userRequest 是用户最新要求（草案修改文本，如"把周二的晚餐换成鸡胸肉"），
+   * previousMealPlan 是上一版菜单。修改既有方案时做局部调整：以用户最新要求为准，
+   * 未提及的餐次/日期保持与上一版一致，而不是全量重生成导致修改丢失。
+   * 默认实现退回无上下文版本，保证只实现 plan 的测试替身不用改。
+   */
+  default JsonObject planWithContext(DietRequest request, JsonArray sources, JsonObject dailyTargets,
+                                     List<String> missingFields, String sharedContext,
+                                     String userRequest, JsonArray previousMealPlan) throws Exception {
+    return plan(request, sources, dailyTargets, missingFields, sharedContext);
+  }
 }

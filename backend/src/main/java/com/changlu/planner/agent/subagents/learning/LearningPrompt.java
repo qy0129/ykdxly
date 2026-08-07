@@ -142,6 +142,7 @@ public final class LearningPrompt {
           "rationale": "为什么这样规划这个目标"
         }
         目标标题要具体、可衡量。如果用户请求模糊，在 conflicts 中追问澄清。
+        draft 里所有给用户看的文字（title、description、domain、milestones）必须使用中文，禁止输出英文。
         """ + dateNote));
     messages.add(ModelClient.message("user", context.toString()));
     return messages;
@@ -160,12 +161,13 @@ public final class LearningPrompt {
         只输出要修改的字段，输出 JSON：
         {"fields":{"title":"...","description":"...","domain":"...","priority":"high|medium|low","targetDate":"YYYY-MM-DD 或 null","weeklyHours":数字,"status":"active|completed|archived"}}
         只包含用户明确要求修改的字段；没有要修改的字段时输出 {"fields":{}}。
+        fields 中给用户看的文字（title、description、domain）必须使用中文，禁止输出英文。
         """ + dateNote));
     messages.add(ModelClient.message("user", context.toString()));
     return messages;
   }
 
-  // ── 学习课程大纲提示（联网调研后生成量化指标 + 里程碑 + 阶段 + 每日模板）──
+  // ── 学习课程大纲提示（联网调研后生成量化指标 + 里程碑 + 阶段主题；逐日任务由分块展开，避免单次输出过长超时）──
   public static JsonArray curriculumMessages(JsonObject context) {
     JsonArray messages = new JsonArray();
     String today = context.has("currentDate") && !context.get("currentDate").isJsonNull()
@@ -173,7 +175,7 @@ public final class LearningPrompt {
     String dateNote = today.isBlank() ? ""
         : "今天是 " + today + "。用户说的“明年/今年/月底/三个月内”等相对时间一律以今天为准推算成具体日期。";
     messages.add(ModelClient.message("system", """
-        你是学习规划专家。基于用户请求和联网调研资料，输出结构化课程大纲。
+        你是学习规划专家。基于用户请求和联网调研资料，输出紧凑版结构化课程大纲。
         输入：{"request":"用户请求","currentDate":"今天","targetDate":"用户给出的目标日期或空","sources":[公开资料],"existingGoals":[已有目标]}。
         输出 JSON：
         {
@@ -183,19 +185,37 @@ public final class LearningPrompt {
           "planTitle": "学习计划标题",
           "stages": [
             {"title":"阶段名","days":天数,"focus":"本阶段重点","dailyMinutes":每天分钟数,
-             "dailyPlan":[
-               {"title":"当天知识点（如：函数极限与连续）","content":"当天具体要学的任务，精确到知识点与练习量（如：掌握极限的ε-δ定义，完成课后习题1.1-1.12并整理错题）"}
-             ],
+             "topics":["本阶段 8-15 个具体知识点/学习主题，逐日轮换安排用"],
+             "dailyTemplate":"每日任务模板，用 {topic} 占位，如：完成{topic}并做5道练习题并整理错题",
              "priority":"high|medium|low"}
           ]
         }
         要求：
         - targetDate 必须按用户意图和 currentDate 推算成具体日期，不能留空。
         - stages 的 days 之和约等于 今天到 targetDate 的天数；阶段通常 2-4 个（如基础/强化/冲刺）。
-        - 每个阶段的 dailyPlan 是逐日具体任务数组：条目数必须与 days 完全一致，第 i 条就是第 i 天的安排。
-        - 每条 title 概括当天要学的知识点（≤15字）；content 精确到知识点/教材章节/练习题量，写清当天具体做什么（≤50字），具体可执行，禁止用"复习""练习""巩固"这类泛化描述代替。
+        - 每个阶段的 topics 必须具体可执行（8-15 个），禁止用"复习""练习""巩固"这类泛化词当主题；dailyTemplate 要写清每天具体怎么做。
+        - 只负责整体结构与阶段主题，不要在 stages 里逐日展开任务（逐日安排由后续分块单独生成）。
         - 量化指标按领域自适应（考试分数/词汇量/做题量/每周时长等），尽量 2-4 个。
+        - 所有给用户看的文字（goal 的 title/description/domain、targetMetrics 的 label/unit、milestones、planTitle、stages 的 title/focus/topics/dailyTemplate）必须使用中文，禁止输出英文。
         """ + dateNote));
+    messages.add(ModelClient.message("user", context.toString()));
+    return messages;
+  }
+
+  // ── 逐日任务分块提示（一次只展开一个日期块，输出量小、稳定快速）──
+  public static JsonArray dailyChunkMessages(JsonObject context) {
+    JsonArray messages = new JsonArray();
+    messages.add(ModelClient.message("system", """
+        你是学习规划执行助手。根据一个学习阶段的信息，为指定日期范围逐日生成具体学习任务。
+        输入：{"stageTitle":"阶段名","startDate":"YYYY-MM-DD","days":天数,"focus":"阶段重点","topics":["主题列表"],"dailyTemplate":"每日模板"}。
+        输出 JSON：
+        {"days":[{"title":"当天知识点（≤15字）","content":"当天具体任务，精确到知识点/章节/练习量（≤50字）"}]}
+        要求：
+        - days 数组条目数必须与输入的 days 完全一致，第 1 条对应 startDate，之后逐日递增，不要跳日或重复。
+        - 每条 title 概括当天知识点；content 具体可执行（知识点/教材章节/练习题量），禁止用"复习""巩固"这类泛化描述。
+        - 内容要贴合该阶段的 focus，按阶段节奏推进；前期打基础、中期深化、后期冲刺模拟。
+        - 所有文字必须使用中文，禁止输出英文。
+        """));
     messages.add(ModelClient.message("user", context.toString()));
     return messages;
   }

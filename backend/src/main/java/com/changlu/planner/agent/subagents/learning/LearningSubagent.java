@@ -10,13 +10,17 @@ import com.changlu.planner.agent.core.contract.SubagentRequest;
 import com.changlu.planner.agent.core.tool.ToolCall;
 import com.changlu.planner.features.learning.LearningService;
 import com.changlu.planner.features.command.AiCommandService;
+import com.changlu.planner.shared.database.Database;
 import com.changlu.planner.agent.subagents.learning.tools.LearningResearchTool;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -63,7 +67,10 @@ public final class LearningSubagent implements Subagent {
       "learning", "1.0.0", "学习目标管理、学习进度分析、学习计划建议和知识领域梳理",
       List.of("学习目标", "学习进度", "学习计划", "课程", "知识梳理"), List.of(),
       new JsonObject(), new JsonObject(), Set.of(LearningResearchTool.NAME), true, true,
-      Duration.ofSeconds(180), 2);
+      // 长周期目标按 30 天一块分块展开逐日任务，需要跨多次模型调用：预算提到 480s（紧凑大纲 + 约 10 块），
+      // 给 SiliconFlow 高峰时的慢响应留出余量，避免 subagent 预算墙在草案落库前截断。
+      // 主循环每轮完成后会刷新自身预算，单次子代理调用不会撞 3 分钟主循环墙。
+      Duration.ofSeconds(480), 2);
 
   public LearningSubagent(LearningService service, ModelClient model) {
     this(service, model, null, null);
@@ -159,11 +166,24 @@ public final class LearningSubagent implements Subagent {
    * 基于关键词分类用户意图。
    * 这是 Subagent 内部的轻量路由，不涉及主 Agent 的 if/else。
    */
-  private String classifyIntent(String request) {
+  /** 意图分类：包级可见便于测试直接断言；仅执行路由内部使用。 */
+  String classifyIntent(String request) {
     String normalized = request.replaceAll("\\s", "").toLowerCase();
+    // 修改意图优先于创建：草案修改消息（如"把目标日期改成明年5月"）没有创建动词时直接落 update_goal，
+    // 避免被误判成创建而重新建一份重复目标。但消息里同时出现"创建/新建/设立"且携带"把X改成Y"这类内联
+    // 约束时仍是创建（如"创建学习目标：雅思7分，把每周时长改成10小时"），不能被修改词抢走。
+    boolean createVerb = normalized.contains("创建") || normalized.contains("新建")
+        || normalized.contains("添加目标") || normalized.contains("设立");
+    boolean updateVerb = normalized.contains("修改") || normalized.contains("更新")
+        || normalized.contains("调整目标") || normalized.contains("改到")
+        || normalized.contains("改成") || normalized.contains("改一下")
+        || normalized.contains("提前") || normalized.contains("推迟")
+        || normalized.contains("顺延");
+    if (updateVerb && !createVerb) {
+      return "update_goal";
+    }
     // 写操作优先：请求里同时出现"创建/分析"（如"创建 Python 数据分析目标"）时不能被读意图抢走。
-    if (normalized.contains("创建") || normalized.contains("新建") || normalized.contains("添加目标")
-        || normalized.contains("设立")) {
+    if (createVerb) {
       return "create_goal";
     }
     // 没有"创建"字样但表达"想学/要学X，达到/考到Y分"的创建目标意图。
@@ -172,18 +192,24 @@ public final class LearningSubagent implements Subagent {
     boolean wantsLearn = normalized.contains("想学") || normalized.contains("要学")
         || normalized.contains("打算学") || normalized.contains("准备学")
         || normalized.contains("开始学") || normalized.contains("想考")
-        || normalized.contains("要考");
+        || normalized.contains("要考")
+        // 「90天内系统学会Python数据分析，每周8小时」这类自然说法没有"创建/想学/要考"，
+        // 但"学会/学成/掌握"是明确的学习目标信号；否则"数据分析"里的"分析"会被误判成进度分析。
+        || normalized.contains("学会") || normalized.contains("学成")
+        || normalized.contains("学完") || normalized.contains("精通")
+        || normalized.contains("掌握");
     boolean hasTarget = normalized.contains("达到") || normalized.contains("考到")
-        || normalized.contains("分") || normalized.contains("目标");
+        || normalized.contains("分") || normalized.contains("目标")
+        // 「每周8小时/每天学习」这类时长安排本身是创建计划的目标信号（无"达到X分"指标时兜底）。
+        || normalized.contains("每周") || normalized.contains("每天")
+        || normalized.contains("每日");
     boolean isQuestion = normalized.contains("怎么学") || normalized.contains("怎么")
         || normalized.contains("如何") || normalized.contains("吗")
         || normalized.endsWith("？") || normalized.endsWith("?");
     if (wantsLearn && hasTarget && !isQuestion) {
       return "create_goal";
     }
-    if (normalized.contains("修改") || normalized.contains("更新") || normalized.contains("调整目标")
-        || normalized.contains("改到") || normalized.contains("改成") || normalized.contains("改一下")
-        || normalized.contains("提前") || normalized.contains("推迟") || normalized.contains("顺延")) {
+    if (updateVerb) {
       return "update_goal";
     }
     if (normalized.contains("删除") || normalized.contains("移除") || normalized.contains("放弃")) {
@@ -317,7 +343,7 @@ public final class LearningSubagent implements Subagent {
         return createGoalDraft(context, requestText, "已生成学习目标草案：「" + title + "」，请确认后写入。", action);
       }
       // 3b. 有目标日期 → 逐日展开每日学习计划，写入规划
-      JsonObject planFields = dailyPlanFields(curriculum, goal, title, targetDate, input);
+      JsonObject planFields = dailyPlanFields(curriculum, goal, title, targetDate, input, context);
       JsonObject action = goalAction("create_learning_plan", "创建学习计划：" + title, planFields, null);
       String reply = "已生成学习目标与每日学习计划草案：「" + title + "」，确认后写入计划并按天推进。";
       return createGoalDraft(context, requestText, reply, action);
@@ -334,6 +360,13 @@ public final class LearningSubagent implements Subagent {
     var goals = service.listGoals(context.identity());
     LearningService.LearningGoal target = resolveGoal(requestText, input, goals);
     if (target == null) {
+      // 待确认草案阶段的目标还没落库（listGoals 查不到）。若运行状态里有上一版草案（modifyDraft 快照成
+      // previousPlan），说明是"改草案"而不是改已存在的目标：把原目标摘要 + 修改句合并后重新走课程大纲
+      // 生成，让修改融入新草案，而不是回一句"当前没有可修改的学习目标"。
+      JsonObject previousPlan = previousPlanData(context);
+      if (previousPlan != null && goals.isEmpty()) {
+        return regenerateDraft(request, context, previousPlan);
+      }
       if (goals.isEmpty()) return LearningResult.success("当前没有可修改的学习目标，可以先创建一个。", new JsonObject());
       return waitingQuestion("要修改哪个学习目标？" + numberedGoalList(goals));
     }
@@ -484,15 +517,17 @@ public final class LearningSubagent implements Subagent {
 
   /**
    * 检测是否已存在同主题的活跃学习目标。
-   * 命中条件：目标日期相近（±90 天）且（领域一致 或 标题共享片段 ≥3 字）。
+   * 命中条件：目标日期相近（±90 天）且（领域一致 或 去噪后标题共享片段 ≥4 字）。
    * 避免重复创建目标+每日计划，否则确认时 330 条每日日程会与旧计划重叠，被 schedule_conflict 整单拦截。
+   * 标题先剥离"三个月后"这类时间前缀和"目标 95 分"这类标注，否则"三个月"公共词会触发阈值误判
+   * 不同科目（如高数 vs 英语四级）为重复，导致 bot 拒绝创建而前端无数据。
    */
   private LearningService.LearningGoal findDuplicateGoal(AgentContext context, String title,
                                                          String domain, LocalDate targetDate) throws Exception {
     if (title == null || title.isBlank() || targetDate == null) return null;
     var goals = service.listGoals(context.identity());
     if (goals.isEmpty()) return null;
-    String normalizedTitle = normalize(title);
+    String normalizedTitle = normalize(stripGoalNoise(title));
     String normalizedDomain = normalize(domain);
     for (var goal : goals) {
       if (!"active".equals(goal.status()) || goal.targetDate() == null) continue;
@@ -501,10 +536,28 @@ public final class LearningSubagent implements Subagent {
       String goalDomain = normalize(goal.domain());
       boolean sameDomain = !normalizedDomain.isBlank() && !goalDomain.isBlank()
           && (goalDomain.contains(normalizedDomain) || normalizedDomain.contains(goalDomain));
-      boolean similarTitle = longestShared(normalizedTitle, normalize(goal.title())) >= 3;
+      String goalTitle = normalize(stripGoalNoise(goal.title()));
+      boolean similarTitle = !normalizedTitle.isBlank() && !goalTitle.isBlank()
+          && longestShared(normalizedTitle, goalTitle) >= 4;
       if (sameDomain || similarTitle) return goal;
     }
     return null;
+  }
+
+  /** 剥离标题里的时间跨度前缀（三个月/一年/几周等）与"目标 X 分"等标注，只留学科核心词，避免去重误判。 */
+  private String stripGoalNoise(String value) {
+    if (value == null) return "";
+    String t = value.replaceAll("\\s", "");
+    // 时间前缀：数字或中文数字 + 时间单位（个月/年/周/天），后接 内/后/里 等，整体剥掉。
+    t = t.replaceAll("^(\\d+\\.?\\d*|[一二三四五六七八九十两半多近约])\\s*(个月|月|年|周|星期|天|日)(内|后|里|之内|以后|以内|之内完成)?", "");
+    // 中文数字开头的"三个月"重复剥一次（上面正则覆盖不全时兜底）。
+    t = t.replaceAll("^(一|二|三|四|五|六|七|八|九|十|两|几|半)\\s*(个月|月|年|周|星期|天)", "");
+    // "目标 95 分"、"目标 600 分" 及 "(目标...)" 括号标注。
+    t = t.replaceAll("目标\\s*\\d+\\s*分", "");
+    t = t.replaceAll("[（(]目标[^）)]*[）)]", "");
+    // "每周 X 小时"、"每天 X 小时" 时长标注。
+    t = t.replaceAll("(每|每天|每周)\\s*\\d+\\.?\\d*\\s*小时", "");
+    return t;
   }
 
   /** 已有目标时的提示文案，指引用户修改而不是重复创建。 */
@@ -523,6 +576,44 @@ public final class LearningSubagent implements Subagent {
         context.channel(), requestText, reply, actions);
     JsonObject data = new JsonObject(); data.add("draft", draft.get("draft")); data.add("actions", actions);
     return LearningResult.pendingConfirmation(reply, data);
+  }
+
+  /** 从运行状态取上一版学习草案的 actions（modifyDraft 会把它快照成 taskData.previousPlan）。 */
+  private JsonObject previousPlanData(AgentContext context) {
+    JsonObject state = context.taskState();
+    if (state == null || !state.has("taskData") || !state.get("taskData").isJsonObject()) return null;
+    JsonObject taskData = state.getAsJsonObject("taskData");
+    if (!taskData.has("previousPlan") || !taskData.get("previousPlan").isJsonArray()) return null;
+    return taskData.deepCopy();
+  }
+
+  /** 草案修改：原目标未落库，取上一版草案的目标摘要，合并修改句后重新走课程大纲生成与新草案。 */
+  private LearningResult regenerateDraft(SubagentRequest request, AgentContext context,
+                                         JsonObject taskData) throws Exception {
+    JsonArray plan = taskData.getAsJsonArray("previousPlan");
+    JsonObject action = plan.size() > 0 && plan.get(0).isJsonObject() ? plan.get(0).getAsJsonObject() : null;
+    JsonObject fields = action != null && action.has("fields") && action.get("fields").isJsonObject()
+        ? action.getAsJsonObject("fields") : new JsonObject();
+    JsonObject goal = fields.has("learningGoal") && fields.get("learningGoal").isJsonObject()
+        ? fields.getAsJsonObject("learningGoal") : fields;
+    String title = string(goal, "title", string(fields, "title", ""));
+    String domain = string(goal, "domain", string(fields, "domain", ""));
+    String targetDate = string(goal, "targetDate", string(fields, "targetDate", ""));
+    Double weeklyHours = goal.has("weeklyHours") && goal.get("weeklyHours").isJsonPrimitive()
+        ? goal.get("weeklyHours").getAsDouble() : null;
+    // 把原计划要点 + 修改句合并成重生成请求，让修改真正到达模型；结构化参数里带 title 会触发
+    // handleCreateGoal 的快速路径（跳过模型），把修改文字吞掉重新建一份一模一样的目标。
+    StringBuilder combined = new StringBuilder();
+    if (!title.isBlank()) combined.append(title).append("学习计划");
+    if (!domain.isBlank()) combined.append("，领域：").append(domain);
+    if (!targetDate.isBlank()) combined.append("，目标日期：").append(targetDate);
+    if (weeklyHours != null) combined.append("，每周时长：").append(weeklyHours);
+    combined.append("\n用户要求修改：").append(request.message());
+    JsonObject safeArgs = request.arguments() == null ? new JsonObject() : request.arguments().deepCopy();
+    safeArgs.remove("title");
+    safeArgs.remove("targetDate");
+    // 复用创建流程：联网调研 + 课程大纲 + 逐日学习计划，全部重新生成并写入新草案。
+    return handleCreateGoal(new SubagentRequest(combined.toString(), safeArgs, request.documentIds()), context);
   }
 
   private JsonObject goalAction(String type, String summary, JsonObject fields, String targetId) {
@@ -562,7 +653,8 @@ public final class LearningSubagent implements Subagent {
     return sources;
   }
 
-  /** 让模型基于请求与调研资料生成课程大纲（量化指标 + 里程碑 + 阶段 + 每日模板）。 */
+  /** 让模型基于请求与调研资料生成紧凑课程大纲（目标 + 量化指标 + 里程碑 + 阶段主题）。
+   *  只输出结构与主题，输出量小；逐日任务由 {@link #expandDailyChunk} 按块生成。 */
   private JsonObject requestCurriculum(String requestText, JsonObject input, JsonArray sources,
                                        AgentContext context) throws Exception {
     JsonObject modelContext = new JsonObject();
@@ -583,13 +675,16 @@ public final class LearningSubagent implements Subagent {
     modelContext.add("existingGoals", existing);
     JsonArray messages = LearningPrompt.curriculumMessages(modelContext);
     appendSharedContext(messages, context);
-    // 逐日 dailyPlan 会显著增加输出长度：max_tokens 从 4000 提到 8000，并放宽超时到 170 秒。
-    return model.completeJson("learning-curriculum", messages, 0.3, 8000, 170, 2);
+    // 紧凑大纲输出 ~1500-2500 token（约 40-60 秒，SiliconFlow 高峰可能更久），
+    // 单次超时 150s 给慢响应留余量，避免超时重试挤占逐日分块展开的预算。
+    return model.completeJson("learning-curriculum", messages, 0.3, 2200, 150, 2);
   }
 
-  /** 把课程大纲展开成 create_learning_plan 的 fields：阶段 → 每日任务 → 每日日程。 */
+  /** 把紧凑课程大纲展开成 create_learning_plan 的 fields：阶段 → 每日任务 → 每日日程。
+   *  逐日任务按至多 30 天一块分块让模型生成；超出展开预算（预留组装与回复时间）的天数
+   *  回退 {@link #topicFor} 轮换补齐，保证长周期计划在子代理预算内一定完成。 */
   private JsonObject dailyPlanFields(JsonObject curriculum, JsonObject goal, String title,
-                                     LocalDate targetDate, JsonObject input) {
+                                     LocalDate targetDate, JsonObject input, AgentContext context) {
     JsonObject fields = new JsonObject();
     fields.addProperty("title", string(curriculum, "planTitle", title + "学习计划"));
     fields.addProperty("description", "由学习规划 Agent 联网调研后生成的每日学习计划，每天一个任务按计划推进。");
@@ -609,6 +704,9 @@ public final class LearningSubagent implements Subagent {
     fields.add("learningGoal", goalFields);
 
     int totalDays = (int) java.time.temporal.ChronoUnit.DAYS.between(LocalDate.now(), targetDate) + 1;
+    // 每日学习时段：默认 20:00，但若与用户已有日程（如其他计划的每日学习）冲突则自动顺延到空闲时段，
+    // 否则确认时会因 schedule_conflict 整体回滚。探测以今天为基准；学习计划通常每天同一时段推进。
+    LocalTime dailySlot = pickFreeDailySlot(context, LocalDate.now(), 120);
     JsonArray modelStages = array(curriculum, "stages");
     if (modelStages.isEmpty()) {
       JsonObject fallback = new JsonObject();
@@ -621,58 +719,95 @@ public final class LearningSubagent implements Subagent {
       modelStages.add(fallback);
     }
 
-    JsonArray stages = new JsonArray();
-    LocalDate date = LocalDate.now();
-    int dayIndex = 1;
+    // 第一阶段：纯算术收集各阶段元数据（不触模型），确定阶段边界与全局每日序号，
+    // 供并发展开与按序组装共用，保证阶段划分与原始串行逻辑完全一致。
+    List<StageWork> works = new ArrayList<>();
+    LocalDate cursor = LocalDate.now();
+    int cursorDay = 1;
     int allocated = 0;
-    JsonArray lastDailyPlan = new JsonArray();
-    for (int s = 0; s < modelStages.size() && !date.isAfter(targetDate); s++) {
+    for (int s = 0; s < modelStages.size() && !cursor.isAfter(targetDate); s++) {
       JsonObject ms = modelStages.get(s).getAsJsonObject();
       int stageDays = s == modelStages.size() - 1 ? totalDays - allocated : intValue(ms, "days", 0);
       if (stageDays <= 0) stageDays = totalDays - allocated;
       if (stageDays <= 0) break;
-      String stageTitle = string(ms, "title", "阶段" + (s + 1));
-      int minutes = Math.max(25, intValue(ms, "dailyMinutes", 90));
-      JsonArray topics = array(ms, "topics");
-      String template = string(ms, "dailyTemplate", "完成{topic}并记录学习结果");
-      String priority = string(ms, "priority", s == 0 ? "high" : "medium");
-      // 逐日具体任务：模型生成的 dailyPlan 条目数应等于 days，第 i 条对应阶段第 i 天；缺失时退回 topics 轮换。
-      JsonArray dailyPlan = array(ms, "dailyPlan");
-      lastDailyPlan = dailyPlan;
+      works.add(new StageWork(ms, cursor, cursorDay, stageDays,
+          string(ms, "title", "阶段" + (s + 1)),
+          Math.max(25, intValue(ms, "dailyMinutes", 90)), array(ms, "topics"),
+          string(ms, "dailyTemplate", "完成{topic}并记录学习结果"),
+          string(ms, "priority", s == 0 ? "high" : "medium")));
+      allocated += stageDays;
+      cursor = cursor.plusDays(stageDays);
+      cursorDay += stageDays;
+    }
 
+    // 第二阶段：各阶段逐日展开并发执行（阶段之间互不依赖），重叠模型等待时间。
+    // ModelClient 线程安全（每次调用独立 HttpClient 请求）、AgentContext 不可变、
+    // deadline 由各线程共享 ⇒ 总墙钟仍被子代理预算封顶，并行不会放大耗时不封顶。
+    JsonArray[] expandedPlans = new JsonArray[works.size()];
+    List<Thread> expansionThreads = new ArrayList<>();
+    for (int i = 0; i < works.size(); i++) {
+      StageWork w = works.get(i);
+      final int index = i;
+      Thread thread = Thread.ofVirtual().start(() -> {
+        JsonArray chunks = expandStageDaily(w.modelStage, w.title, w.start, w.days, context);
+        expandedPlans[index] = buildStageDailyPlan(chunks, w.startDay, w.days, w.topics, w.title, w.template);
+      });
+      expansionThreads.add(thread);
+    }
+    for (Thread thread : expansionThreads) {
+      try {
+        thread.join();
+      } catch (InterruptedException interrupted) {
+        Thread.currentThread().interrupt();
+        // 被中断（如外层预算取消）时不再等待剩余线程：已完成的展开照常组装，
+        // 未完成的 expandedPlans[i] 为 null，装配时回退主题轮换补齐。
+        break;
+      }
+    }
+
+    // 第三阶段：按序组装阶段 → 每日任务 → 每日日程（纯 Java 计算，快）。
+    JsonArray stages = new JsonArray();
+    LocalDate date = LocalDate.now();
+    int dayIndex = 1;
+    JsonArray lastDailyPlan = new JsonArray();
+    for (int i = 0; i < works.size(); i++) {
+      StageWork w = works.get(i);
+      JsonArray dailyPlan = expandedPlans[i] == null ? new JsonArray() : expandedPlans[i];
+      lastDailyPlan = dailyPlan;
+      date = w.start;
+      dayIndex = w.startDay;
       JsonObject stage = new JsonObject();
-      stage.addProperty("title", stageTitle);
-      stage.addProperty("dueDate", date.plusDays(stageDays - 1L).toString());
+      stage.addProperty("title", w.title);
+      stage.addProperty("dueDate", w.start.plusDays(w.days - 1L).toString());
       JsonArray tasks = new JsonArray();
-      for (int d = 0; d < stageDays && !date.isAfter(targetDate); d++, date = date.plusDays(1), dayIndex++) {
+      for (int d = 0; d < w.days && !date.isAfter(targetDate); d++, date = date.plusDays(1), dayIndex++) {
         JsonObject planItem = dailyPlanItem(dailyPlan, d);
         String dayTitle = planItem == null ? "" : string(planItem, "title", "");
         String dayContent = planItem == null ? "" : string(planItem, "content", "");
         if (dayTitle.isBlank()) {
           // 没有逐日安排时退回轮换主题，保证每天仍有具体内容而非泛化阶段名。
-          String topic = topicFor(dayIndex, topics);
-          dayTitle = "当日学习内容".equals(topic) ? stageTitle : topic;
+          String topic = topicFor(dayIndex, w.topics);
+          dayTitle = "当日学习内容".equals(topic) ? w.title : topic;
         }
         if (dayContent.isBlank()) {
-          dayContent = template.replace("{topic}", dayTitle);
+          dayContent = w.template.replace("{topic}", dayTitle);
         }
         if (dayTitle.length() > 50) dayTitle = dayTitle.substring(0, 50) + "…";
         JsonObject task = new JsonObject();
         task.addProperty("title", "Day " + dayIndex + " · " + dayTitle);
         task.addProperty("description", dayContent);
-        task.addProperty("priority", priority);
-        task.addProperty("estimatedMinutes", minutes);
+        task.addProperty("priority", w.priority);
+        task.addProperty("estimatedMinutes", w.minutes);
         task.addProperty("dueAt", date + "T23:00:00");
         JsonArray schedules = new JsonArray();
         JsonObject schedule = new JsonObject();
-        schedule.addProperty("title", stageTitle + " · 每日学习");
-        schedule.addProperty("startAt", date + "T20:00:00");
-        schedule.addProperty("durationMinutes", minutes);
+        schedule.addProperty("title", w.title + " · 每日学习");
+        schedule.addProperty("startAt", date + "T" + dailySlot);
+        schedule.addProperty("durationMinutes", w.minutes);
         schedules.add(schedule);
         task.add("schedules", schedules);
         tasks.add(task);
       }
-      allocated += stageDays;
       stage.add("tasks", tasks);
       stages.add(stage);
     }
@@ -698,7 +833,7 @@ public final class LearningSubagent implements Subagent {
         JsonArray schedules = new JsonArray();
         JsonObject schedule = new JsonObject();
         schedule.addProperty("title", "冲刺巩固 · 每日学习");
-        schedule.addProperty("startAt", date + "T20:00:00");
+        schedule.addProperty("startAt", date + "T" + dailySlot);
         schedule.addProperty("durationMinutes", 90);
         schedules.add(schedule);
         task.add("schedules", schedules);
@@ -710,6 +845,115 @@ public final class LearningSubagent implements Subagent {
     }
     fields.add("stages", stages);
     return fields;
+  }
+
+  /**
+   * 为每日学习日程挑选一个空闲开始时段。默认 20:00；若与用户已有日程（如其他计划每晚的学习日程）
+   * 冲突则依次顺延到 19:00 / 21:00 / 18:00 / 22:00 / 17:00 / 23:00 / 16:00，保证确认时不会因
+   * schedule_conflict 整体回滚。commands 为 null（纯解析场景）时直接用默认时段。
+   */
+  private LocalTime pickFreeDailySlot(AgentContext context, LocalDate day, int durationMinutes) {
+    if (commands == null) return LocalTime.of(20, 0);
+    LocalTime[] candidates = {
+        LocalTime.of(20, 0), LocalTime.of(19, 0), LocalTime.of(21, 0),
+        LocalTime.of(18, 0), LocalTime.of(22, 0), LocalTime.of(17, 0),
+        LocalTime.of(23, 0), LocalTime.of(16, 0)
+    };
+    try {
+      for (LocalTime slot : candidates) {
+        String startAt = day.atTime(slot).toString();
+        if (commands.scheduleConflicts(context.identity(), startAt, durationMinutes).isEmpty()) {
+          return slot;
+        }
+      }
+    } catch (Exception error) {
+      LOG.warn("[学习规划] 每日时段探测失败，退回默认 20:00：{}", error.getMessage());
+      return LocalTime.of(20, 0);
+    }
+    // 全部时段都被占用（极端情况），仍返回默认并让确认时的冲突校验提示用户调整。
+    return LocalTime.of(20, 0);
+  }
+
+  /** 单个学习阶段的展开元数据：先纯算术收集，再并发展开，最后按序组装。 */
+  private record StageWork(JsonObject modelStage, LocalDate start, int startDay, int days,
+                           String title, int minutes, JsonArray topics, String template, String priority) {}
+
+  /** 用模型展开结果（可能短于 days）拼出与阶段天数等长的逐日计划，缺的天数按主题轮换补齐。
+   *  返回的数组与阶段天数严格等长，后续逐日循环可直接取用。 */
+  private JsonArray buildStageDailyPlan(JsonArray expanded, int startDay, int days, JsonArray topics,
+                                        String stageTitle, String template) {
+    if (expanded == null) expanded = new JsonArray();
+    JsonArray dailyPlan = new JsonArray();
+    for (int d = 0; d < days; d++) {
+      JsonObject planItem = d < expanded.size() ? dailyPlanItem(expanded, d) : null;
+      if (planItem == null) {
+        String topic = topicFor(startDay + d, topics);
+        String fallbackTitle = "当日学习内容".equals(topic) ? stageTitle : topic;
+        planItem = new JsonObject();
+        planItem.addProperty("title", fallbackTitle);
+        planItem.addProperty("content", template.replace("{topic}", fallbackTitle));
+      }
+      dailyPlan.add(planItem);
+    }
+    return dailyPlan;
+  }
+
+  /** 分块展开某个阶段的逐日任务：每块至多 30 天一次模型调用；超出预算立即停止，剩余天数回退轮换。
+   *  返回的数组元素为 {title,content}，可能短于 stageDays（未覆盖部分由调用方轮换补齐）。 */
+  private JsonArray expandStageDaily(JsonObject stage, String stageTitle, LocalDate start,
+                                     int stageDays, AgentContext context) {
+    JsonArray result = new JsonArray();
+    if (stageDays <= 0) return result;
+    // 留 45 秒给组装与草案回复：展开只用子代理预算扣掉余量后的时间。
+    Instant expansionDeadline = context.deadline().minusSeconds(45);
+    LocalDate cursor = start;
+    int remaining = stageDays;
+    while (remaining > 0) {
+      if (Instant.now().isAfter(expansionDeadline)) break;
+      int days = Math.min(30, remaining);
+      JsonArray chunk = expandDailyChunk(stage, stageTitle, cursor, days);
+      // 块内容不足（模型返回条目少或失败）说明输出不稳定，停止展开以免逐日内容越写越空。
+      if (chunk == null || chunk.size() != days) break;
+      for (JsonElement element : chunk) result.add(element);
+      cursor = cursor.plusDays(days);
+      remaining -= days;
+    }
+    return result;
+  }
+
+  /** 让模型为一个日期块生成逐日任务；失败或条目不符时返回 null，由调用方回退轮换。 */
+  private JsonArray expandDailyChunk(JsonObject stage, String stageTitle, LocalDate start, int days) {
+    if (!model.configured()) return null;
+    try {
+      JsonObject modelContext = new JsonObject();
+      modelContext.addProperty("stageTitle", stageTitle);
+      modelContext.addProperty("startDate", start.toString());
+      modelContext.addProperty("days", days);
+      if (stage.has("focus") && !stage.get("focus").isJsonNull()
+          && !stage.get("focus").getAsString().isBlank()) {
+        modelContext.addProperty("focus", stage.get("focus").getAsString());
+      }
+      modelContext.add("topics", array(stage, "topics"));
+      if (stage.has("dailyTemplate") && !stage.get("dailyTemplate").isJsonNull()
+          && !stage.get("dailyTemplate").getAsString().isBlank()) {
+        modelContext.addProperty("dailyTemplate", stage.get("dailyTemplate").getAsString());
+      }
+      JsonArray messages = LearningPrompt.dailyChunkMessages(modelContext);
+      // 每天约 100 token（title+content+JSON 开销），30 天需 ~3300 token：max_tokens 必须给足，
+      // 否则模型输出被截断成非法 JSON，整块回退轮换（实测 900 时大部分块失败）。
+      // 单次超时 150s：SiliconFlow 高峰生成 3500 token 可能超 100s，超时重试会浪费整个子代理预算。
+      JsonObject output = model.completeJson("learning-daily-chunk", messages, 0.4, 3500, 150, 2);
+      JsonArray chunk = array(output, "days");
+      if (chunk.size() > days) {
+        JsonArray trimmed = new JsonArray();
+        for (int i = 0; i < days; i++) trimmed.add(chunk.get(i));
+        chunk = trimmed;
+      }
+      return chunk;
+    } catch (Exception error) {
+      LOG.warn("[学习规划] 每日任务分块生成失败，回退轮换：{}", error.getMessage());
+      return null;
+    }
   }
 
   /** 取 dailyPlan 的第 index 条（超出条数时按天轮换复用）；支持 {title,content} 对象或纯字符串，无效时返回 null。 */
